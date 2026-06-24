@@ -102,6 +102,14 @@ class OpenAICompatibleProvider(BaseProvider):
                         yield json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    except GeneratorExit:
+                        # Client disconnected — close stream cleanly
+                        _logger.debug("%s stream: client disconnected", self._name)
+                        return
+        except GeneratorExit:
+            # Generator was garbage-collected or closed — exit silently
+            _logger.debug("%s stream: generator closed", self._name)
+            return
         except httpx.ConnectError as exc:
             raise RetryableProviderError(
                 f"Could not connect to {self._name} at {self._base_url}: {exc}",

@@ -66,10 +66,10 @@ def setup_logging(debug: bool | None = None) -> None:
         root.removeHandler(existing)
     root.addHandler(handler)
 
-    # Silence noisy libraries unless in debug mode
-    noisy_loggers = ["httpcore", "httpx", "urllib3", "asyncio"]
+    # Silence noisy HTTP libraries — our own debug logs cover this already
+    noisy_loggers = ["httpcore", "httpx", "urllib3", "asyncio", "hpack"]
     for name in noisy_loggers:
-        logging.getLogger(name).setLevel(logging.DEBUG if debug else logging.WARNING)
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     # Uvicorn access logs — keep at WARNING in normal mode, DEBUG in debug mode
     logging.getLogger("uvicorn.access").setLevel(logging.DEBUG if debug else logging.WARNING)
