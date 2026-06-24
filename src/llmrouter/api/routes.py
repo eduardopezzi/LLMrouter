@@ -34,7 +34,7 @@ from llmrouter.providers.base import ProviderError
 
 class ChatMessagePayload(BaseModel):
     role: str
-    content: str
+    content: str | list[dict[str, Any]]
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
@@ -323,12 +323,24 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
     if payload.user is not None:
         extra["user"] = payload.user
 
+    def _flatten_content(content: str | list[dict[str, Any]]) -> str:
+        """Flatten content array to a single string for provider compatibility."""
+        if isinstance(content, str):
+            return content
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content") or ""
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        return "\n".join(parts)
+
     return ChatRequest(
         model=payload.model,
         messages=[
             ChatMessage(
                 role=message.role,
-                content=message.content,
+                content=_flatten_content(message.content),
                 name=message.name,
                 tool_calls=message.tool_calls,
                 tool_call_id=message.tool_call_id,

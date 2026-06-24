@@ -125,7 +125,7 @@ class ChatMessage:
     """A single message in a chat conversation."""
 
     role: str
-    content: str
+    content: str | list[dict[str, Any]]
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
@@ -150,7 +150,18 @@ class ChatRequest:
     @property
     def prompt_text(self) -> str:
         """Concatenate all message contents for scoring."""
-        return "\n".join(m.content for m in self.messages if m.content)
+        parts: list[str] = []
+        for m in self.messages:
+            if isinstance(m.content, str):
+                if m.content:
+                    parts.append(m.content)
+            elif isinstance(m.content, list):
+                for block in m.content:
+                    if isinstance(block, dict):
+                        text = block.get("text") or block.get("content") or ""
+                        if isinstance(text, str) and text:
+                            parts.append(text)
+        return "\n".join(parts)
 
 
 @dataclass(frozen=True)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 
+import httpx
+
 from llmrouter.core.types import ChatRequest, ChatResponse, FinishReason, Usage
-from llmrouter.providers.base import BaseProvider
+from llmrouter.providers.base import BaseProvider, ProviderError, RetryableProviderError
 
 
 class OpenAICompatibleProvider(BaseProvider):
@@ -12,12 +14,38 @@ class OpenAICompatibleProvider(BaseProvider):
 
     async def chat_completion(self, request: ChatRequest, model: str) -> ChatResponse:
         payload = self._build_payload(request, model, stream=False)
-        response = await self.client.post(
-            f"{self._base_url}/chat/completions",
-            json=payload,
-            headers=self._build_headers(),
-        )
-        response.raise_for_status()
+        url = f"{self._base_url}/chat/completions"
+        try:
+            response = await self.client.post(
+                url,
+                json=payload,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+        except httpx.ConnectError as exc:
+            raise RetryableProviderError(
+                f"Could not connect to {self._name} at {self._base_url}: {exc}",
+                status_code=503,
+                provider=self._name,
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise RetryableProviderError(
+                f"Request to {self._name} timed out after {self._timeout}s: {exc}",
+                status_code=504,
+                provider=self._name,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"{self._name} returned HTTP {exc.response.status_code}: {exc.response.text[:500]}",
+                status_code=exc.response.status_code,
+                provider=self._name,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RetryableProviderError(
+                f"Transport error contacting {self._name}: {exc}",
+                status_code=502,
+                provider=self._name,
+            ) from exc
         body = response.json()
         return self._normalize_response(body, model)
 
@@ -25,29 +53,55 @@ class OpenAICompatibleProvider(BaseProvider):
         self, request: ChatRequest, model: str
     ) -> AsyncIterator[dict[str, object]]:
         payload = self._build_payload(request, model, stream=True)
-        async with self.client.stream(
-            "POST",
-            f"{self._base_url}/chat/completions",
-            json=payload,
-            headers=self._build_headers(),
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                line = line.strip()
-                if not line or line.startswith(":"):
-                    continue
-                if line.startswith("data: "):
-                    data = line[6:]
-                elif line.startswith("data:"):
-                    data = line[5:]
-                else:
-                    continue
-                if data == "[DONE]":
-                    break
-                try:
-                    yield json.loads(data)
-                except json.JSONDecodeError:
-                    continue
+        url = f"{self._base_url}/chat/completions"
+        try:
+            async with self.client.stream(
+                "POST",
+                url,
+                json=payload,
+                headers=self._build_headers(),
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data: "):
+                        data = line[6:]
+                    elif line.startswith("data:"):
+                        data = line[5:]
+                    else:
+                        continue
+                    if data == "[DONE]":
+                        break
+                    try:
+                        yield json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+        except httpx.ConnectError as exc:
+            raise RetryableProviderError(
+                f"Could not connect to {self._name} at {self._base_url}: {exc}",
+                status_code=503,
+                provider=self._name,
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise RetryableProviderError(
+                f"Stream request to {self._name} timed out after {self._timeout}s: {exc}",
+                status_code=504,
+                provider=self._name,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"{self._name} returned HTTP {exc.response.status_code}: {exc.response.text[:500]}",
+                status_code=exc.response.status_code,
+                provider=self._name,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RetryableProviderError(
+                f"Stream interrupted from {self._name}: {exc}",
+                status_code=502,
+                provider=self._name,
+            ) from exc
 
     def _build_payload(
         self, request: ChatRequest, model: str, *, stream: bool
