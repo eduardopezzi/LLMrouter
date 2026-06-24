@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from llmrouter.core.proxy import ProviderProxy
@@ -46,6 +48,16 @@ class ChatCompletionPayload(BaseModel):
     stream: bool = False
     top_p: float = 1.0
     stop: list[str] | None = None
+    # Pass-through fields for OpenAI-compatible clients (Cline, etc.)
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any | None = None
+    response_format: dict[str, Any] | None = None
+    seed: int | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    n: int | None = None
+    logit_bias: dict[str, float] | None = None
+    user: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -117,13 +129,8 @@ def create_app(
     async def chat_completions(
         payload: ChatCompletionPayload,
         request: Request,
-    ) -> dict[str, object]:
+    ) -> Any:
         _require_api_key(request, app.state.api_key)
-        if payload.stream:
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail="Streaming responses are not implemented in the API layer yet",
-            )
         if app.state.proxy is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -131,6 +138,18 @@ def create_app(
             )
 
         chat_request = _to_chat_request(payload)
+
+        # Streaming path — SSE response for clients like Cline
+        if payload.stream:
+            return await _stream_response(
+                request=request,
+                chat_request=chat_request,
+                payload=payload,
+                proxy=app.state.proxy,
+                app_router=app.state.router,
+                collector=app.state.collector,
+            )
+
         started = time.perf_counter()
         constraints = _routing_constraints(payload)
         decision = await app.state.router.route(chat_request, constraints)
@@ -193,7 +212,117 @@ def create_app(
     return app
 
 
+async def _stream_response(
+    *,
+    request: Request,
+    chat_request: ChatRequest,
+    payload: ChatCompletionPayload,
+    proxy: ProviderProxy,
+    app_router: MultiModelRouter,
+    collector: ObservationCollector | None,
+) -> StreamingResponse:
+    """Build a Server-Sent Events streaming response for chat completions.
+
+    Routes the request through the multi-model router, then streams chunks
+    from the selected provider proxy in OpenAI SSE format.
+    """
+    constraints = _routing_constraints(payload)
+    decision = await app_router.route(chat_request, constraints)
+    selected_model = decision.primary
+    started = time.perf_counter()
+    request_id = request.headers.get("x-request-id")
+
+    async def event_generator() -> AsyncIterator[str]:
+        collected_content: list[str] = []
+        try:
+            async for chunk in proxy.stream_chat_completion(chat_request, decision):
+                # Forward the chunk to the client
+                yield f"data: {json.dumps(chunk)}\n\n"
+                # Accumulate content for observation recording
+                _extract_delta_text(chunk, collected_content)
+        except ProviderError as exc:
+            error_payload = {"error": {"message": str(exc), "type": "provider_error"}}
+            yield f"data: {json.dumps(error_payload)}\n\n"
+            return
+        finally:
+            yield "data: [DONE]\n\n"
+            # Record observation (best-effort)
+            latency_ms = (time.perf_counter() - started) * 1000
+            if collector is not None:
+                response_text = "".join(collected_content)
+                # Approximate token count for observation
+                approx_tokens = max(len(response_text) // 4, 1)
+                usage = Usage(
+                    prompt_tokens=len(chat_request.prompt_text) // 4,
+                    completion_tokens=approx_tokens,
+                    total_tokens=(len(chat_request.prompt_text) // 4) + approx_tokens,
+                )
+                _record_observation(
+                    collector=collector,
+                    chat_request=chat_request,
+                    response_payload=[{"message": {"content": response_text}}],
+                    model=selected_model.name,
+                    selected_model=selected_model,
+                    usage=usage,
+                    latency_ms=latency_ms,
+                    scorer_score=decision.score,
+                    scorer_tier=decision.tier.value,
+                    request_id=request_id,
+                )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _extract_delta_text(chunk: dict[str, Any], accumulator: list[str]) -> None:
+    """Extract delta text content from an SSE chunk for observation recording."""
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        content = delta.get("content")
+        if isinstance(content, str):
+            accumulator.append(content)
+    message = choice.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            accumulator.append(content)
+
+
 def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
+    # Merge explicit pass-through fields into extra
+    extra = dict(payload.extra)
+    if payload.tools is not None:
+        extra["tools"] = payload.tools
+    if payload.tool_choice is not None:
+        extra["tool_choice"] = payload.tool_choice
+    if payload.response_format is not None:
+        extra["response_format"] = payload.response_format
+    if payload.seed is not None:
+        extra["seed"] = payload.seed
+    if payload.frequency_penalty is not None:
+        extra["frequency_penalty"] = payload.frequency_penalty
+    if payload.presence_penalty is not None:
+        extra["presence_penalty"] = payload.presence_penalty
+    if payload.n is not None:
+        extra["n"] = payload.n
+    if payload.logit_bias is not None:
+        extra["logit_bias"] = payload.logit_bias
+    if payload.user is not None:
+        extra["user"] = payload.user
+
     return ChatRequest(
         model=payload.model,
         messages=[
@@ -211,7 +340,7 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
         stream=payload.stream,
         top_p=payload.top_p,
         stop=payload.stop,
-        extra=payload.extra,
+        extra=extra,
     )
 
 
