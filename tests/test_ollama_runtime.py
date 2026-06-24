@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from llmrouter.config import Settings
+from llmrouter.core.registry import load_model_registry
+from llmrouter.core.types import ChatMessage, ChatRequest, Provider
+from llmrouter.providers.ollama_provider import OllamaProvider
+from llmrouter.runtime import build_providers
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_uses_openai_compatible_endpoint() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.read().decode()
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-ollama",
+                "created": 123,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "total_tokens": 4,
+                },
+            },
+        )
+
+    provider = OllamaProvider(base_url="http://ollama.test")
+    provider._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://ollama.test",
+    )
+
+    response = await provider.chat_completion(
+        ChatRequest(
+            model=None,
+            messages=[ChatMessage(role="user", content="hello")],
+        ),
+        "qwen2.5-coder:3b",
+    )
+
+    await provider.close()
+    assert seen["path"] == "/v1/chat/completions"
+    assert '"model":"qwen2.5-coder:3b"' in str(seen["body"]).replace(" ", "")
+    assert response.id == "chatcmpl-ollama"
+    assert response.usage.total_tokens == 4
+
+
+def test_runtime_builds_ollama_without_api_key() -> None:
+    registry = load_model_registry("config/models.yaml")
+    providers = build_providers(Settings(), registry)
+
+    assert Provider.OLLAMA in providers
