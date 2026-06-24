@@ -13,7 +13,7 @@ docker build -t llmrouter .
 Run with API authentication:
 
 ```bash
-docker run --rm -p 8000:8000 \
+docker run --rm -p 12345:12345 \
   -e LLMROUTER_SERVER__API_KEY="your-secret-key" \
   -e LLMROUTER_PROVIDERS__OLLAMA__BASE_URL="http://host.docker.internal:11434" \
   -e LLMROUTER_EVALUATOR__OLLAMA__BASE_URL="http://host.docker.internal:11434" \
@@ -23,7 +23,7 @@ docker run --rm -p 8000:8000 \
 Use:
 
 ```bash
-curl -H "Authorization: Bearer your-secret-key" http://localhost:8000/v1/models
+curl -H "Authorization: Bearer your-secret-key" http://localhost:12345/v1/models
 ```
 
 ## Local Server

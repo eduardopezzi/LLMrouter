@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     LLMROUTER_SERVER__HOST=0.0.0.0 \
-    LLMROUTER_SERVER__PORT=8000 \
+    LLMROUTER_SERVER__PORT=12345 \
     LLMROUTER_PROVIDERS__OLLAMA__BASE_URL=http://host.docker.internal:11434
 
 WORKDIR /app
@@ -24,9 +24,9 @@ RUN mkdir -p /app/data \
 
 USER llmrouter
 
-EXPOSE 8000
+EXPOSE 12345
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:12345/health', timeout=3).read()"
 
-CMD ["python", "-m", "uvicorn", "llmrouter.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "llmrouter.main:app", "--host", "0.0.0.0", "--port", "12345"]
