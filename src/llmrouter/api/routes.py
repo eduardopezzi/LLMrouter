@@ -29,7 +29,10 @@ from llmrouter.core.types import (
 from llmrouter.evaluator.collector import ObservationCollector
 from llmrouter.evaluator.feedback import FeedbackLoop
 from llmrouter.evaluator.types import RoutingObservation
+from llmrouter.logging_config import get_logger
 from llmrouter.providers.base import ProviderError
+
+_logger = get_logger("llmrouter.api")
 
 
 class ChatMessagePayload(BaseModel):
@@ -139,6 +142,15 @@ def create_app(
 
         chat_request = _to_chat_request(payload)
 
+        # Debug: log incoming request
+        _logger.debug(
+            "POST /v1/chat/completions | model=%s, messages=%d, prompt_len=%d, stream=%s",
+            payload.model,
+            len(payload.messages),
+            len(chat_request.prompt_text),
+            payload.stream,
+        )
+
         # Streaming path — SSE response for clients like Cline
         if payload.stream:
             return await _stream_response(
@@ -154,12 +166,32 @@ def create_app(
         constraints = _routing_constraints(payload)
         decision = await app.state.router.route(chat_request, constraints)
 
+        # Debug: log routing decision
+        _logger.debug(
+            "Routing decision: primary=%s | score=%.2f tier=%s | fallbacks=%s",
+            decision.primary.name,
+            decision.score,
+            decision.tier.name,
+            [m.name for m in decision.fallbacks] or "none",
+        )
+        _logger.debug("Reason: %s", decision.reason)
+
         try:
             response = await app.state.proxy.chat_completion(chat_request, decision)
         except ProviderError as exc:
+            _logger.warning("Provider error: %s (status=%d)", exc, exc.status_code)
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
         latency_ms = (time.perf_counter() - started) * 1000
+
+        # Debug: log response summary
+        _logger.debug(
+            "Response: %d tokens (prompt=%d, completion=%d) in %.0fms",
+            response.usage.total_tokens,
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            latency_ms,
+        )
         _record_observation(
             collector=app.state.collector,
             chat_request=chat_request,
@@ -231,6 +263,16 @@ async def _stream_response(
     selected_model = decision.primary
     started = time.perf_counter()
     request_id = request.headers.get("x-request-id")
+
+    # Debug: log routing decision for streaming
+    _logger.debug(
+        "Stream routing: primary=%s | score=%.2f tier=%s | fallbacks=%s",
+        selected_model.name,
+        decision.score,
+        decision.tier.name,
+        [m.name for m in decision.fallbacks] or "none",
+    )
+    _logger.debug("Reason: %s", decision.reason)
 
     async def event_generator() -> AsyncIterator[str]:
         collected_content: list[str] = []

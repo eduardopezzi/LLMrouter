@@ -25,6 +25,9 @@ from llmrouter.core.types import (
     RoutingStrategy,
     Tier,
 )
+from llmrouter.logging_config import get_logger
+
+_logger = get_logger("llmrouter.router")
 
 
 class SelectionStrategy(Protocol):
@@ -152,6 +155,11 @@ class MultiModelRouter:
             primary = self._registry.get(request.model)
             assert primary is not None
             fallbacks = self._build_fallbacks(primary, constraints)
+            _logger.debug(
+                "Explicit model selection: %s | fallbacks=%s",
+                primary.name,
+                [m.name for m in fallbacks] or "none",
+            )
             return RoutingDecision(
                 primary=primary,
                 fallbacks=fallbacks,
@@ -164,20 +172,48 @@ class MultiModelRouter:
         prompt_text = request.prompt_text
         scoring = self._scorer.score(prompt_text)
 
+        # Debug: log scoring details
+        _logger.debug(
+            "Scoring: score=%.2f tier=%s | signals: %s",
+            scoring.score,
+            scoring.tier.name,
+            ", ".join(f"{k}={v:.2f}" for k, v in sorted(
+                scoring.signals.items(), key=lambda x: x[1], reverse=True
+            )) or "none",
+        )
+
         # Get candidate models for the recommended tier
         candidates = self._get_candidates(scoring.tier, constraints)
 
         if not candidates:
             # Fallback: try any model available
             candidates = self._registry.all()
+            _logger.debug("No candidates in tier %s, using all %d models", scoring.tier.name, len(candidates))
 
         if not candidates:
             raise RuntimeError("No models available for routing")
+
+        # Debug: log candidates
+        _logger.debug(
+            "Candidates (%d in tier %s): %s",
+            len(candidates),
+            scoring.tier.name,
+            [m.name for m in candidates],
+        )
 
         # Apply selection strategy
         ordered = self._strategy.select(candidates, constraints)
         primary = ordered[0]
         fallbacks = ordered[1 : 1 + self._fallback_count]
+
+        # Debug: log final selection
+        _logger.debug(
+            "Strategy=%s → primary=%s (priority=%d) | fallbacks=%s",
+            type(self._strategy).__name__,
+            primary.name,
+            primary.priority,
+            [m.name for m in fallbacks] or "none",
+        )
 
         return RoutingDecision(
             primary=primary,

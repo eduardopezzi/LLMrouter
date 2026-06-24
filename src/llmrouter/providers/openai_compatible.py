@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 
 import httpx
 
 from llmrouter.core.types import ChatRequest, ChatResponse, FinishReason, Usage
+from llmrouter.logging_config import get_logger
 from llmrouter.providers.base import BaseProvider, ProviderError, RetryableProviderError
+
+_logger = get_logger("llmrouter.provider")
 
 
 class OpenAICompatibleProvider(BaseProvider):
@@ -15,6 +19,14 @@ class OpenAICompatibleProvider(BaseProvider):
     async def chat_completion(self, request: ChatRequest, model: str) -> ChatResponse:
         payload = self._build_payload(request, model, stream=False)
         url = f"{self._base_url}/chat/completions"
+        _logger.debug(
+            "%s → POST %s | model=%s, messages=%d",
+            self._name,
+            url,
+            model,
+            len(request.messages),
+        )
+        started = time.perf_counter()
         try:
             response = await self.client.post(
                 url,
@@ -23,18 +35,21 @@ class OpenAICompatibleProvider(BaseProvider):
             )
             response.raise_for_status()
         except httpx.ConnectError as exc:
+            _logger.debug("%s connection FAILED in %.0fms", self._name, (time.perf_counter() - started) * 1000)
             raise RetryableProviderError(
                 f"Could not connect to {self._name} at {self._base_url}: {exc}",
                 status_code=503,
                 provider=self._name,
             ) from exc
         except httpx.TimeoutException as exc:
+            _logger.debug("%s TIMEOUT after %.0fms", self._name, (time.perf_counter() - started) * 1000)
             raise RetryableProviderError(
                 f"Request to {self._name} timed out after {self._timeout}s: {exc}",
                 status_code=504,
                 provider=self._name,
             ) from exc
         except httpx.HTTPStatusError as exc:
+            _logger.debug("%s HTTP %d in %.0fms", self._name, exc.response.status_code, (time.perf_counter() - started) * 1000)
             raise ProviderError(
                 f"{self._name} returned HTTP {exc.response.status_code}: {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
@@ -46,6 +61,8 @@ class OpenAICompatibleProvider(BaseProvider):
                 status_code=502,
                 provider=self._name,
             ) from exc
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _logger.debug("%s ← HTTP 200 in %.0fms", self._name, elapsed_ms)
         body = response.json()
         return self._normalize_response(body, model)
 
@@ -54,6 +71,13 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> AsyncIterator[dict[str, object]]:
         payload = self._build_payload(request, model, stream=True)
         url = f"{self._base_url}/chat/completions"
+        _logger.debug(
+            "%s → POST (stream) %s | model=%s, messages=%d",
+            self._name,
+            url,
+            model,
+            len(request.messages),
+        )
         try:
             async with self.client.stream(
                 "POST",

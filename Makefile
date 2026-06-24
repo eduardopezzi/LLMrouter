@@ -5,7 +5,7 @@ PYTHONPATH := src
 HOST ?= 0.0.0.0
 PORT ?= 12345
 
-.PHONY: help install install-dev run run-reload test lint format typecheck clean docker-build docker-run
+.PHONY: help install install-dev run run-reload run-debug test lint format typecheck clean docker-build docker-run
 
 help: ## Mostra os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -21,6 +21,9 @@ run: ## Inicia o servidor (porta 12345)
 
 run-reload: ## Inicia o servidor com auto-reload
 	PYTHONPATH=$(PYTHONPATH) python -m uvicorn llmrouter.main:app --host $(HOST) --port $(PORT) --reload
+
+run-debug: ## Inicia o servidor com debug logging (mostra roteamento, scoring, fallbacks)
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main --debug --host $(HOST) --port $(PORT)
 
 test: ## Executa os testes
 	pytest

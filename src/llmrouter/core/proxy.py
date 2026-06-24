@@ -6,7 +6,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from llmrouter.core.types import ChatRequest, ChatResponse, Provider, RoutingDecision
+from llmrouter.logging_config import get_logger
 from llmrouter.providers.base import BaseProvider, ProviderError
+
+_logger = get_logger("llmrouter.proxy")
 
 
 class ProviderProxy:
@@ -29,9 +32,14 @@ class ProviderProxy:
         attempts = [decision.primary, *decision.fallbacks]
         last_error: ProviderError | None = None
 
-        for model in attempts:
+        for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
             if provider is None:
+                _logger.warning(
+                    "Provider '%s' not configured for model '%s'",
+                    model.provider.value,
+                    model.name,
+                )
                 last_error = ProviderError(
                     f"Provider {model.provider.value} is not configured",
                     status_code=503,
@@ -40,8 +48,22 @@ class ProviderProxy:
                 continue
 
             try:
+                _logger.debug(
+                    "Trying provider '%s' (%s) [%d/%d]",
+                    model.provider.value,
+                    model.provider_model_name,
+                    i + 1,
+                    len(attempts),
+                )
                 return await provider.chat_completion(request, model.provider_model_name)
             except ProviderError as exc:
+                _logger.warning(
+                    "Provider '%s' failed: %s (status=%d)%s",
+                    model.provider.value,
+                    exc,
+                    exc.status_code,
+                    f" → falling back to '{attempts[i + 1].name}'" if i + 1 < len(attempts) else " (no more fallbacks)",
+                )
                 last_error = exc
 
         if last_error is not None:
@@ -61,7 +83,7 @@ class ProviderProxy:
         attempts = [decision.primary, *decision.fallbacks]
         last_error: ProviderError | None = None
 
-        for model in attempts:
+        for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
             if provider is None:
                 last_error = ProviderError(
@@ -81,10 +103,24 @@ class ProviderProxy:
                     )
                     continue
 
+                _logger.debug(
+                    "Stream trying provider '%s' (%s) [%d/%d]",
+                    model.provider.value,
+                    model.provider_model_name,
+                    i + 1,
+                    len(attempts),
+                )
                 async for chunk in provider.stream_completion(request, model.provider_model_name):
                     yield chunk
                 return  # Success — stop trying fallbacks
             except ProviderError as exc:
+                _logger.warning(
+                    "Stream provider '%s' failed: %s (status=%d)%s",
+                    model.provider.value,
+                    exc,
+                    exc.status_code,
+                    f" → falling back to '{attempts[i + 1].name}'" if i + 1 < len(attempts) else " (no more fallbacks)",
+                )
                 last_error = exc
                 continue
 
