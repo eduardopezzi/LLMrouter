@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -61,6 +62,12 @@ class ChatCompletionPayload(BaseModel):
     n: int | None = None
     logit_bias: dict[str, float] | None = None
     user: str | None = None
+    task_role: str | None = Field(
+        default=None,
+        description="Optional LLMrouter routing role, e.g. review, test_generation, fix.",
+    )
+    metadata: dict[str, Any] | None = None
+    llmrouter: dict[str, Any] | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -73,6 +80,7 @@ def create_app(
     feedback_loop: FeedbackLoop | None = None,
     evaluator_interval_seconds: int | None = None,
     api_key: str | None = None,
+    cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -100,6 +108,13 @@ def create_app(
                 await app.state.proxy.close()
 
     app = FastAPI(title="LLMrouter", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins or ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.state.registry = model_registry
     app.state.router = app_router
     app.state.proxy = proxy
@@ -118,6 +133,11 @@ def create_app(
             if app.state.proxy is not None
             else [],
             "evaluator": app.state.feedback_loop is not None,
+            "openai_compatible": {
+                "chat_completions": "/v1/chat/completions",
+                "models": "/v1/models",
+                "routing_roles": _routing_roles(app.state.registry),
+            },
         }
 
     @app.get("/v1/models")
@@ -364,6 +384,12 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
         extra["logit_bias"] = payload.logit_bias
     if payload.user is not None:
         extra["user"] = payload.user
+    if payload.task_role is not None:
+        extra["task_role"] = payload.task_role
+    if payload.metadata is not None:
+        extra["metadata"] = payload.metadata
+    if payload.llmrouter is not None:
+        extra["llmrouter"] = payload.llmrouter
 
     def _flatten_content(content: str | list[dict[str, Any]]) -> str:
         """Flatten content array to a single string for provider compatibility."""
@@ -462,10 +488,24 @@ def _choice_text(choice: dict[str, Any]) -> str:
 
 
 def _routing_constraints(payload: ChatCompletionPayload) -> RoutingConstraints:
-    role = payload.extra.get("role") or payload.extra.get("task_role")
+    router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    role = (
+        payload.task_role
+        or router_options.get("task_role")
+        or router_options.get("role")
+        or payload.extra.get("role")
+        or payload.extra.get("task_role")
+    )
     if not isinstance(role, str) or not role:
         return RoutingConstraints()
     return RoutingConstraints(required_capabilities=frozenset({role}))
+
+
+def _routing_roles(registry: ModelRegistry) -> list[str]:
+    roles: set[str] = set()
+    for model in registry.all():
+        roles.update(model.capabilities)
+    return sorted(roles)
 
 
 def _estimate_cost(model: ModelInfo, usage: Usage) -> float:

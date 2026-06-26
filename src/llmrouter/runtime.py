@@ -73,6 +73,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         if feedback_loop is not None
         else None,
         api_key=resolved_settings.server.api_key,
+        cors_origins=resolved_settings.server.cors_origins,
     )
 
 

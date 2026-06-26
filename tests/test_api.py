@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi.testclient import TestClient
 
 from llmrouter.api.routes import create_app
@@ -18,10 +20,14 @@ from llmrouter.evaluator.feedback import FeedbackReport
 
 
 class FakeProxy:
-    async def chat_completion(self, request: ChatRequest, decision: object) -> ChatResponse:
+    def __init__(self) -> None:
+        self.last_decision = None
+
+    async def chat_completion(self, request: ChatRequest, decision: Any) -> ChatResponse:
+        self.last_decision = decision
         return ChatResponse(
             id="chatcmpl-test",
-            model="cheap",
+            model=decision.primary.name,
             choices=[{"index": 0, "message": {"role": "assistant", "content": "hello"}}],
             usage=Usage(prompt_tokens=2, completion_tokens=1, total_tokens=3),
             finish_reason=FinishReason.STOP,
@@ -81,6 +87,11 @@ def test_health_reports_model_count() -> None:
         "models": 1,
         "providers": [],
         "evaluator": False,
+        "openai_compatible": {
+            "chat_completions": "/v1/chat/completions",
+            "models": "/v1/models",
+            "routing_roles": [],
+        },
     }
 
 
@@ -122,3 +133,38 @@ def test_api_key_accepts_x_api_key_header() -> None:
     response = client.get("/v1/models", headers={"X-API-Key": "secret"})
 
     assert response.status_code == 200
+
+
+def test_chat_completions_respects_task_role() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="summary",
+                provider=Provider.OPENAI,
+                tier=Tier.T1,
+                capabilities=frozenset({"summarization"}),
+            ),
+            ModelInfo(
+                name="reviewer",
+                provider=Provider.OPENAI,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+            ),
+        )
+    )
+    proxy = FakeProxy()
+    app = create_app(registry=registry, proxy=proxy)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "task_role": "review",
+            "messages": [{"role": "user", "content": "please review this short diff"}],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "reviewer"
+    assert body["llmrouter"]["selected_model"] == "reviewer"

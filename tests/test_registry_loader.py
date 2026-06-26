@@ -8,7 +8,7 @@ from llmrouter.runtime import build_registry
 def test_load_model_registry_from_catalog() -> None:
     registry = load_model_registry("config/models.yaml")
 
-    assert len(registry.models) == 19
+    assert len(registry.models) == 22
     first = registry.models[0]
     assert first.name == "ollama/kimi-k2.7-code:cloud"
     assert first.provider == Provider.OLLAMA

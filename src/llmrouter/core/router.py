@@ -253,6 +253,11 @@ class MultiModelRouter:
             candidates = [
                 m for m in candidates if constraints.required_capabilities <= m.capabilities
             ]
+            if not candidates:
+                candidates = [
+                    m for m in self._registry.all()
+                    if constraints.required_capabilities <= m.capabilities
+                ]
 
         return candidates
 
