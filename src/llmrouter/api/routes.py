@@ -186,6 +186,15 @@ def create_app(
         constraints = _routing_constraints(payload)
         decision = await app.state.router.route(chat_request, constraints)
 
+        _logger.info(
+            "Chat completion model: requested=%s selected=%s provider=%s provider_model=%s stream=%s",
+            payload.model or "auto",
+            decision.primary.name,
+            decision.primary.provider.value,
+            decision.primary.provider_model_name,
+            bool(payload.stream),
+        )
+
         # Debug: log routing decision
         _logger.debug(
             "Routing decision: primary=%s | score=%.2f tier=%s | fallbacks=%s",
@@ -283,6 +292,15 @@ async def _stream_response(
     selected_model = decision.primary
     started = time.perf_counter()
     request_id = request.headers.get("x-request-id")
+
+    _logger.info(
+        "Chat completion model: requested=%s selected=%s provider=%s provider_model=%s stream=%s",
+        payload.model or "auto",
+        selected_model.name,
+        selected_model.provider.value,
+        selected_model.provider_model_name,
+        bool(payload.stream),
+    )
 
     # Debug: log routing decision for streaming
     _logger.debug(
