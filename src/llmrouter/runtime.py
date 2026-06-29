@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from llmrouter.providers import (
 def build_app(settings: Settings | None = None) -> FastAPI:
     """Create a fully wired FastAPI app from configuration."""
     resolved_settings = settings or get_settings()
+    _ensure_runtime_logging(debug=resolved_settings.debug)
     registry = build_registry(resolved_settings.models_file)
     proxy = ProviderProxy(build_providers(resolved_settings, registry))
     router = MultiModelRouter(
@@ -75,6 +77,18 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         api_key=resolved_settings.server.api_key,
         cors_origins=resolved_settings.server.cors_origins,
     )
+
+
+def _ensure_runtime_logging(*, debug: bool) -> None:
+    """Ensure LLMrouter logs are visible when loaded directly by Uvicorn."""
+    logger = logging.getLogger("llmrouter")
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+    logger.addHandler(handler)
 
 
 def build_registry(models_file: str) -> ModelRegistry:

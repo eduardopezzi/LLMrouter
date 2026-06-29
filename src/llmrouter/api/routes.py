@@ -186,15 +186,6 @@ def create_app(
         constraints = _routing_constraints(payload)
         decision = await app.state.router.route(chat_request, constraints)
 
-        _logger.info(
-            "Chat completion model: requested=%s selected=%s provider=%s provider_model=%s stream=%s",
-            payload.model or "auto",
-            decision.primary.name,
-            decision.primary.provider.value,
-            decision.primary.provider_model_name,
-            bool(payload.stream),
-        )
-
         # Debug: log routing decision
         _logger.debug(
             "Routing decision: primary=%s | score=%.2f tier=%s | fallbacks=%s",
@@ -212,6 +203,13 @@ def create_app(
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
         latency_ms = (time.perf_counter() - started) * 1000
+        _log_chat_access(
+            request=request,
+            requested_model=payload.model or "auto",
+            selected_model=decision.primary,
+            status_code=status.HTTP_200_OK,
+            stream=False,
+        )
 
         # Debug: log response summary
         _logger.debug(
@@ -293,13 +291,12 @@ async def _stream_response(
     started = time.perf_counter()
     request_id = request.headers.get("x-request-id")
 
-    _logger.info(
-        "Chat completion model: requested=%s selected=%s provider=%s provider_model=%s stream=%s",
-        payload.model or "auto",
-        selected_model.name,
-        selected_model.provider.value,
-        selected_model.provider_model_name,
-        bool(payload.stream),
+    _log_chat_access(
+        request=request,
+        requested_model=payload.model or "auto",
+        selected_model=selected_model,
+        status_code=status.HTTP_200_OK,
+        stream=True,
     )
 
     # Debug: log routing decision for streaming
@@ -314,12 +311,25 @@ async def _stream_response(
 
     async def event_generator() -> AsyncIterator[str]:
         collected_content: list[str] = []
+        saw_output = False
         try:
             async for chunk in proxy.stream_chat_completion(chat_request, decision):
-                # Forward the chunk to the client
-                yield f"data: {json.dumps(chunk)}\n\n"
+                normalized_chunk = _normalize_stream_chunk(chunk, selected_model.name)
+                if normalized_chunk is None:
+                    continue
+                saw_output = saw_output or _chunk_has_assistant_output(normalized_chunk)
+                # Forward a normalized OpenAI-compatible chunk to the client.
+                yield f"data: {json.dumps(normalized_chunk)}\n\n"
                 # Accumulate content for observation recording
-                _extract_delta_text(chunk, collected_content)
+                _extract_delta_text(normalized_chunk, collected_content)
+            if not saw_output:
+                _logger.warning(
+                    "Provider stream completed without assistant content or tool calls: "
+                    "selected=%s provider=%s provider_model=%s",
+                    selected_model.name,
+                    selected_model.provider.value,
+                    selected_model.provider_model_name,
+                )
         except ProviderError as exc:
             error_payload = {"error": {"message": str(exc), "type": "provider_error"}}
             yield f"data: {json.dumps(error_payload)}\n\n"
@@ -359,6 +369,89 @@ async def _stream_response(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _log_chat_access(
+    *,
+    request: Request,
+    requested_model: str,
+    selected_model: ModelInfo,
+    status_code: int,
+    stream: bool,
+) -> None:
+    client = request.client
+    client_addr = f"{client.host}:{client.port}" if client else "-"
+    _logger.info(
+        '%s - "%s %s HTTP/%s" %d %s requested_model=%s selected_model=%s '
+        "provider=%s provider_model=%s stream=%s",
+        client_addr,
+        request.method,
+        request.url.path,
+        request.scope.get("http_version", "1.1"),
+        status_code,
+        "OK" if status_code == status.HTTP_200_OK else "",
+        requested_model,
+        selected_model.name,
+        selected_model.provider.value,
+        selected_model.provider_model_name,
+        stream,
+    )
+
+
+def _normalize_stream_chunk(chunk: dict[str, Any], model: str) -> dict[str, Any] | None:
+    """Normalize provider SSE chunks to the OpenAI chat.completion.chunk shape."""
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+
+    normalized_choices: list[dict[str, Any]] = []
+    for index, choice in enumerate(choices):
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        message = choice.get("message")
+        if not isinstance(delta, dict):
+            delta = {}
+        if isinstance(message, dict):
+            for key in ("role", "content", "tool_calls"):
+                if key in message and key not in delta:
+                    delta[key] = message[key]
+        normalized_choices.append(
+            {
+                "index": int(choice.get("index", index) or 0),
+                "delta": delta,
+                "finish_reason": choice.get("finish_reason"),
+            }
+        )
+
+    if not normalized_choices:
+        return None
+    return {
+        "id": str(chunk.get("id") or f"chatcmpl-{int(time.time() * 1000)}"),
+        "object": str(chunk.get("object") or "chat.completion.chunk"),
+        "created": int(chunk.get("created") or int(time.time())),
+        "model": str(chunk.get("model") or model),
+        "choices": normalized_choices,
+    }
+
+
+def _chunk_has_assistant_output(chunk: dict[str, Any]) -> bool:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        tool_calls = delta.get("tool_calls")
+        if isinstance(content, str) and content:
+            return True
+        if isinstance(tool_calls, list) and tool_calls:
+            return True
+    return False
 
 
 def _extract_delta_text(chunk: dict[str, Any], accumulator: list[str]) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -35,12 +37,27 @@ class FakeProxy:
         )
 
 
+class FakeStreamingProxy:
+    async def stream_chat_completion(self, request: ChatRequest, decision: Any) -> Any:
+        yield {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello"},
+                    "finish_reason": None,
+                }
+            ]
+        }
+        yield {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+
 class FakeFeedbackLoop:
     async def run_cycle(self, limit: int = 50) -> FeedbackReport:
         return FeedbackReport(evaluated=2, optimal=1, correct=1, overkill=0, underkill=0)
 
 
-def test_chat_completions_routes_through_proxy(tmp_path) -> None:
+def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="llmrouter.api")
     registry = ModelRegistry(
         models=(
             ModelInfo(
@@ -71,6 +88,9 @@ def test_chat_completions_routes_through_proxy(tmp_path) -> None:
     assert observation.chosen_model == "cheap"
     assert observation.cost_usd == 0.002
     assert observation.metadata["provider"] == "openai"
+    assert 'POST /v1/chat/completions HTTP/1.1" 200 OK' in caplog.text
+    assert "selected_model=cheap" in caplog.text
+    assert "provider_model=cheap" in caplog.text
 
 
 def test_health_reports_model_count() -> None:
@@ -168,3 +188,29 @@ def test_chat_completions_respects_task_role() -> None:
     body = response.json()
     assert body["model"] == "reviewer"
     assert body["llmrouter"]["selected_model"] == "reviewer"
+
+
+def test_streaming_chunks_are_normalized_for_openai_clients() -> None:
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    app = create_app(registry=registry, proxy=FakeStreamingProxy())
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "stream": True,
+            "messages": [{"role": "user", "content": "say hello"}],
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line for line in response.iter_lines() if line.startswith("data: ")]
+
+    first_payload = lines[0].removeprefix("data: ")
+    body = json.loads(first_payload)
+    assert body["object"] == "chat.completion.chunk"
+    assert body["model"] == "cheap"
+    assert body["choices"][0]["delta"] == {"role": "assistant", "content": "hello"}
+    assert lines[-1] == "data: [DONE]"

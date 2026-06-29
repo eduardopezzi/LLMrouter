@@ -228,3 +228,18 @@ PYTHONPATH=src python -m uvicorn llmrouter.main:app --host 0.0.0.0 --port 12345
 
 A porta padrão é `12345` e pode ser alterada via variável de ambiente
 `LLMROUTER_SERVER__PORT` ou pelo parâmetro `PORT` do Makefile (`make run PORT=8080`).
+
+### Logs
+
+Se o LLMrouter estiver instalado como serviço systemd chamado `llmrouter`, acompanhe
+os logs em tempo real com:
+
+```bash
+journalctl -u llmrouter -f
+```
+
+Para ver as últimas linhas e continuar acompanhando:
+
+```bash
+journalctl -u llmrouter -n 100 -f
+```
