@@ -254,6 +254,31 @@ llmrouter                 # usa o entrypoint, porta 12345 por padrão
 PYTHONPATH=src python -m uvicorn llmrouter.main:app --host 0.0.0.0 --port 12345
 ```
 
+### Workers
+
+Para distribuir requests entre múltiplos núcleos, rode o LLMrouter com múltiplos
+workers Uvicorn:
+
+```bash
+llmrouter --workers 4
+```
+
+ou:
+
+```bash
+make run WORKERS=4
+```
+
+Tambem e possivel configurar por ambiente:
+
+```env
+LLMROUTER_SERVER__WORKERS=4
+```
+
+Use `--reload` apenas em desenvolvimento; reload e múltiplos workers não rodam
+juntos. Workers aumentam concorrência entre requests, mas uma única request
+CPU-bound ainda pode ocupar um núcleo enquanto estiver sendo processada.
+
 ### Atalhos via Makefile
 
 | Comando          | Descrição                                  |
@@ -261,7 +286,7 @@ PYTHONPATH=src python -m uvicorn llmrouter.main:app --host 0.0.0.0 --port 12345
 | `make help`      | Lista todos os comandos disponíveis        |
 | `make install`   | Instala o pacote em modo editável          |
 | `make install-dev` | Instala com dependências de desenvolvimento |
-| `make run`       | Inicia o servidor (porta 12345)            |
+| `make run`       | Inicia o servidor (porta 12345, use `WORKERS=4`) |
 | `make run-reload`| Inicia com auto-reload                     |
 | `make panel` | Abre painel CLI de roteamento e estatisticas |
 | `make panel-stats` | Mostra estatisticas do painel CLI |

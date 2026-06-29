@@ -6,7 +6,10 @@ from llmrouter.cli_panel import (
     FALLBACK_COUNT_ENV,
     PROVIDER_COST_ORDER_ENV,
     ROUTING_STRATEGY_ENV,
+    _parse_provider_selection,
+    _read_log_tail,
     observation_stats,
+    render_current_settings,
     render_panel_summary,
     set_fallback_count,
     set_provider_cost_order,
@@ -119,3 +122,89 @@ def test_observation_stats_reads_sqlite_database(tmp_path) -> None:
     assert stats["top_models"] == [
         {"model": "nvidia/reviewer", "requests": 1, "avg_latency_ms": 25.0}
     ]
+
+
+def test_render_current_settings_shows_all_sections(tmp_path) -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="nvidia/reviewer",
+                provider=Provider.NVIDIA,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+            ),
+        )
+    )
+    settings = Settings(evaluator={"db_path": str(tmp_path / "missing.db")})
+
+    output = render_current_settings(settings, registry)
+
+    assert "=== Current Settings ===" in output
+    assert "Routing" in output
+    assert "strategy:" in output
+    assert "cost" in output
+    assert "fallback_count:" in output
+    assert "2" in output
+    assert "provider_cost_order: nvidia, zai, ollama" in output
+    assert "Scorer weights" in output
+    assert "Server" in output
+    assert "host: 0.0.0.0" in output
+    assert "port: 12345" in output
+    assert "Evaluator" in output
+    assert "Debug" in output
+    assert "Catalog summary" in output
+    assert "providers_in_catalog: nvidia" in output
+
+
+def test_parse_provider_selection_by_numbers() -> None:
+    available = ["gemini", "nvidia", "ollama", "openai", "zai"]
+    result = _parse_provider_selection("2,5,3", available)
+    assert result == ["nvidia", "zai", "ollama"]
+
+
+def test_parse_provider_selection_by_names() -> None:
+    result = _parse_provider_selection("nvidia,zai,ollama", [])
+    assert result == ["nvidia", "zai", "ollama"]
+
+
+def test_parse_provider_selection_empty_returns_empty() -> None:
+    assert _parse_provider_selection("", ["nvidia"]) == []
+    assert _parse_provider_selection("   ", ["nvidia"]) == []
+
+
+def test_parse_provider_selection_invalid_numbers_filtered() -> None:
+    available = ["nvidia", "ollama"]
+    result = _parse_provider_selection("1,9,2", available)
+    assert result == ["nvidia", "ollama"]
+
+
+def test_parse_provider_selection_deduplicates() -> None:
+    available = ["nvidia", "ollama"]
+    result = _parse_provider_selection("1,1,2,2", available)
+    assert result == ["nvidia", "ollama"]
+
+
+def test_read_log_tail_returns_none_when_missing() -> None:
+    assert _read_log_tail("/nonexistent/path.log", 10) is None
+
+
+def test_read_log_tail_returns_last_lines(tmp_path) -> None:
+    log_path = tmp_path / "test.log"
+    log_path.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+
+    content = _read_log_tail(str(log_path), 2)
+    assert content == "line4\nline5"
+
+    content_all = _read_log_tail(str(log_path), 100)
+    assert "line1" in content_all
+    assert "line5" in content_all
+
+
+def test_read_log_tail_handles_encoding_errors(tmp_path) -> None:
+    log_path = tmp_path / "bad_encoding.log"
+    log_path.write_bytes(b"valid line\n\xff\xfe bad bytes\nanother line\n")
+
+    content = _read_log_tail(str(log_path), 10)
+    assert content is not None
+    assert "valid line" in content
+    assert "another line" in content

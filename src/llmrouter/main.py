@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 import uvicorn
@@ -191,6 +192,13 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Enable auto-reload on file changes.",
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=None,
+        help="Number of Uvicorn worker processes (default: from config, usually 1).",
+    )
     return parser.parse_args()
 
 
@@ -268,18 +276,24 @@ def main() -> None:
     # Configure logging based on --debug flag
     setup_logging(debug=args.debug)
     if args.debug:
-        import logging
         logging.getLogger("llmrouter").info("Debug mode ENABLED — detailed logging active")
 
     host = args.host or settings.server.host
     port = args.port or settings.server.port
     reload = args.reload or settings.debug
+    workers = max(args.workers or settings.server.workers, 1)
+    if reload and workers > 1:
+        logging.getLogger("llmrouter").warning(
+            "Reload mode does not support multiple workers; using workers=1"
+        )
+        workers = 1
 
     uvicorn.run(
         "llmrouter.main:app",
         host=host,
         port=port,
         reload=reload,
+        workers=workers,
         log_level="debug" if args.debug else "info",
     )
 

@@ -4,6 +4,7 @@
 PYTHONPATH := src
 HOST ?= 0.0.0.0
 PORT ?= 12345
+WORKERS ?= 1
 CONTRACT ?= contracts/llmrouter.contract.json
 PREVIOUS_CONTRACT ?= contracts/previous.llmrouter.contract.json
 CONTRACTS_REPO ?= https://github.com/Vieli-Tech/phoenix_versions.git
@@ -20,13 +21,13 @@ install-dev: ## Instala o pacote com dependências de desenvolvimento
 	pip install -e ".[dev]"
 
 run: ## Inicia o servidor (porta 12345)
-	PYTHONPATH=$(PYTHONPATH) python -m uvicorn llmrouter.main:app --host $(HOST) --port $(PORT)
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main --host $(HOST) --port $(PORT) --workers $(WORKERS)
 
 run-reload: ## Inicia o servidor com auto-reload
-	PYTHONPATH=$(PYTHONPATH) python -m uvicorn llmrouter.main:app --host $(HOST) --port $(PORT) --reload
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main --host $(HOST) --port $(PORT) --reload
 
 run-debug: ## Inicia o servidor com debug logging (mostra roteamento, scoring, fallbacks)
-	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main --debug --host $(HOST) --port $(PORT)
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main --debug --host $(HOST) --port $(PORT) --workers $(WORKERS)
 
 panel: ## Abre painel CLI de roteamento e estatisticas
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main panel

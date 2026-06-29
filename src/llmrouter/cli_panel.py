@@ -15,6 +15,9 @@ from llmrouter.core.types import Provider, RoutingStrategy
 ROUTING_STRATEGY_ENV = "LLMROUTER_ROUTING__STRATEGY"
 FALLBACK_COUNT_ENV = "LLMROUTER_ROUTING__FALLBACK_COUNT"
 PROVIDER_COST_ORDER_ENV = "LLMROUTER_ROUTING__PROVIDER_COST_ORDER"
+DEBUG_ENV = "LLMROUTER_DEBUG"
+LOG_LEVEL_ENV = "LLMROUTER_LOG_LEVEL"
+DEFAULT_LOG_PATH = "logs/llmrouter.log"
 
 
 @dataclass(frozen=True)
@@ -202,30 +205,270 @@ def run_interactive_panel(
         print("1. Set routing strategy")
         print("2. Set fallback count")
         print("3. Set provider cost order")
-        print("4. Refresh stats")
-        print("5. Exit")
+        print("4. Show current settings")
+        print("5. View logs")
+        print("6. Toggle debug mode")
+        print("7. Refresh stats")
+        print("0. Exit")
         choice = input("Select an option: ").strip()
 
         if choice == "1":
-            values = ", ".join(strategy.value for strategy in RoutingStrategy)
-            value = input(f"Strategy ({values}): ").strip()
-            set_routing_strategy(env_path, value)
-            print(f"Updated {ROUTING_STRATEGY_ENV}={value}")
+            _prompt_routing_strategy(env_path, settings)
+            settings = _reload(settings)
         elif choice == "2":
-            value = int(input("Fallback count: ").strip())
-            set_fallback_count(env_path, value)
-            print(f"Updated {FALLBACK_COUNT_ENV}={value}")
+            _prompt_fallback_count(env_path, settings)
+            settings = _reload(settings)
         elif choice == "3":
-            value = input("Provider order, comma-separated (example: nvidia,zai,ollama): ")
-            providers = [item.strip() for item in value.split(",") if item.strip()]
-            set_provider_cost_order(env_path, providers)
-            print(f"Updated {PROVIDER_COST_ORDER_ENV}={providers}")
+            _prompt_provider_cost_order(env_path, settings, registry)
+            settings = _reload(settings)
         elif choice == "4":
-            continue
+            print()
+            print(render_current_settings(settings, registry))
         elif choice == "5":
+            _prompt_view_logs(settings)
+        elif choice == "6":
+            _prompt_toggle_debug(env_path, settings)
+            settings = _reload(settings)
+        elif choice in {"7", ""}:
+            continue
+        elif choice == "0":
             return
         else:
             print("Invalid option")
+
+
+def render_current_settings(settings: Settings, registry: ModelRegistry) -> str:
+    """Render all current configuration values for inspection."""
+    routing = routing_panel_config(settings)
+    catalog = catalog_stats(registry)
+    models = registry.all()
+    providers_in_catalog = sorted({model.provider.value for model in models})
+
+    lines = [
+        "=== Current Settings ===",
+        "",
+        "Routing",
+        f"  strategy:           {routing.strategy}",
+        f"  fallback_count:     {routing.fallback_count}",
+        f"  provider_cost_order: {', '.join(routing.provider_cost_order)}",
+        f"  max_cost_per_request: {settings.routing.max_cost_per_request or 'unlimited'}",
+        "",
+        "Scorer weights",
+    ]
+    for name, weight in sorted(settings.routing.scorer_weights.items()):
+        lines.append(f"  {name}: {weight}")
+
+    lines.extend(
+        [
+            "",
+            "Server",
+            f"  host: {settings.server.host}",
+            f"  port: {settings.server.port}",
+            f"  api_key: {'(set)' if settings.server.api_key else '(not set)'}",
+            "",
+            "Evaluator",
+            f"  enabled: {settings.evaluator.enabled}",
+            f"  db_path: {settings.evaluator.db_path}",
+            f"  ollama_model: {settings.evaluator.ollama.model}",
+            f"  ollama_base_url: {settings.evaluator.ollama.base_url}",
+            "",
+        "Debug",
+        f"  debug: {settings.debug}",
+        f"  log_level: {settings.log_level.value}",
+            "",
+            "Catalog summary",
+            f"  total_models: {catalog['models']}",
+            f"  providers_in_catalog: {', '.join(providers_in_catalog)}",
+            f"  tiers: {_format_mapping(catalog['tiers'])}",
+            f"  roles: {_format_mapping(catalog['roles'])}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _prompt_routing_strategy(env_path: str | Path, settings: Settings) -> None:
+    """Interactive prompt for routing strategy selection."""
+    strategies = list(RoutingStrategy)
+    current = settings.routing.strategy.value
+
+    print()
+    print(f"Current strategy: {current}")
+    print("Available strategies:")
+    for idx, strategy in enumerate(strategies, 1):
+        marker = " (current)" if strategy.value == current else ""
+        print(f"  {idx}) {strategy.value}{marker}")
+
+    value = input(f"Select strategy [1-{len(strategies)}] or press Enter to keep current: ").strip()
+
+    if not value:
+        print("No changes.")
+        return
+
+    try:
+        idx = int(value)
+        if 1 <= idx <= len(strategies):
+            selected = strategies[idx - 1].value
+            set_routing_strategy(env_path, selected)
+            print(f"Updated {ROUTING_STRATEGY_ENV}={selected}")
+            return
+    except ValueError:
+        pass
+
+    try:
+        set_routing_strategy(env_path, value)
+        print(f"Updated {ROUTING_STRATEGY_ENV}={value}")
+    except Exception as exc:
+        print(f"Error: {exc}")
+
+
+def _prompt_fallback_count(env_path: str | Path, settings: Settings) -> None:
+    """Interactive prompt for fallback count."""
+    current = settings.routing.fallback_count
+    print()
+    print(f"Current fallback count: {current}")
+    value = input("New fallback count (>=0) or press Enter to keep current: ").strip()
+
+    if not value:
+        print("No changes.")
+        return
+
+    try:
+        count = int(value)
+        set_fallback_count(env_path, count)
+        print(f"Updated {FALLBACK_COUNT_ENV}={count}")
+    except ValueError as exc:
+        print(f"Error: {exc}")
+
+
+def _prompt_provider_cost_order(
+    env_path: str | Path,
+    settings: Settings,
+    registry: ModelRegistry,
+) -> None:
+    """Interactive prompt for provider cost order with numbered selection."""
+    models = registry.all()
+    available = sorted({model.provider.value for model in models})
+    current = list(settings.routing.provider_cost_order)
+
+    print()
+    print(f"Current order: {', '.join(current) if current else '(empty)'}")
+    print("Available providers in catalog:")
+    for idx, provider in enumerate(available, 1):
+        marker = ""
+        if provider in current:
+            marker = f" (position {current.index(provider) + 1})"
+        print(f"  {idx}) {provider}{marker}")
+
+    all_providers = sorted(provider.value for provider in Provider)
+    missing = [p for p in all_providers if p not in available]
+    if missing:
+        print("Other supported providers (not in catalog):")
+        offset = len(available)
+        for idx, provider in enumerate(missing, 1):
+            marker = ""
+            if provider in current:
+                marker = f" (position {current.index(provider) + 1})"
+            print(f"  {offset + idx}) {provider}{marker}")
+        available = available + missing
+
+    print()
+    value = input(
+        "Enter numbers comma-separated (e.g. 2,5,3) or names (e.g. nvidia,zai,ollama).\n"
+        "Press Enter to keep current: "
+    ).strip()
+
+    if not value:
+        print("No changes.")
+        return
+
+    providers = _parse_provider_selection(value, available)
+    if not providers:
+        print("No valid providers parsed. No changes.")
+        return
+
+    try:
+        set_provider_cost_order(env_path, providers)
+        print(f"Updated {PROVIDER_COST_ORDER_ENV}={providers}")
+    except Exception as exc:
+        print(f"Error: {exc}")
+
+
+def _prompt_view_logs(settings: Settings) -> None:
+    """Interactive prompt to view recent log entries."""
+    import os
+
+    log_path = os.environ.get("LLMROUTER_LOG_FILE", DEFAULT_LOG_PATH)
+    lines_count = 50
+
+    print()
+    print(f"Log file: {log_path}")
+    value = input(f"Lines to show (default {lines_count}): ").strip()
+    if value:
+        try:
+            lines_count = max(1, int(value))
+        except ValueError:
+            print(f"Invalid number, using default {lines_count}")
+
+    content = _read_log_tail(log_path, lines_count)
+    if content is None:
+        print(f"Log file not found: {log_path}")
+        print("Tip: logs are written to stderr by default. Set LLMROUTER_LOG_FILE to persist.")
+        return
+
+    print()
+    print(f"=== Last {lines_count} lines of {log_path} ===")
+    print(content)
+    print("=== End of log ===")
+
+
+def _prompt_toggle_debug(env_path: str | Path, settings: Settings) -> None:
+    """Toggle debug mode in the .env file."""
+    current = settings.debug
+    new_value = not current
+    update_env_file(env_path, {DEBUG_ENV: "true" if new_value else "false"})
+    print(f"Debug mode: {'ENABLED' if new_value else 'DISABLED'}")
+    print(f"Updated {DEBUG_ENV}={'true' if new_value else 'false'}")
+
+
+def _parse_provider_selection(value: str, available: list[str]) -> list[str]:
+    """Parse user input into a list of provider names.
+
+    Accepts either comma-separated numbers (indices into ``available``) or
+    comma-separated provider names.
+    """
+    tokens = [token.strip() for token in value.split(",") if token.strip()]
+    if not tokens:
+        return []
+
+    # Detect numeric selection
+    if all(token.isdigit() for token in tokens):
+        result: list[str] = []
+        for token in tokens:
+            idx = int(token)
+            if 1 <= idx <= len(available):
+                provider = available[idx - 1]
+                if provider not in result:
+                    result.append(provider)
+        return result
+
+    # Name-based selection
+    return _normalize_provider_order(tokens)
+
+
+def _read_log_tail(log_path: str, lines_count: int) -> str | None:
+    """Read the last N lines from a log file. Returns None if file missing."""
+    path = Path(log_path)
+    if not path.exists():
+        return None
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-lines_count:])
+
+
+def _reload(settings: Settings) -> Settings:
+    """Reload settings after env file changes."""
+    from llmrouter.config import reload_settings
+
+    return reload_settings()
 
 
 def _normalize_provider_order(providers: list[str]) -> list[str]:

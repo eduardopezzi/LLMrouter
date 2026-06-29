@@ -30,7 +30,7 @@ PYTHONPATH=src python -m uvicorn llmrouter.main:app --host 0.0.0.0 --port 12345
 
 | Campo              | Valor                                    |
 | ------------------ | ---------------------------------------- |
-| **Base URL**       | `http://localhost:12345/v1`              |
+| **Base URL**       | `http://yoda:12345/v1`              |
 | **API Key**        | (sua `LLMROUTER_SERVER__API_KEY` do `.env`) |
 | **Model**          | `auto` (deixe o roteador decidir)        |
 

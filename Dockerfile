@@ -29,4 +29,4 @@ EXPOSE 12345
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:12345/health', timeout=3).read()"
 
-CMD ["python", "-m", "uvicorn", "llmrouter.main:app", "--host", "0.0.0.0", "--port", "12345"]
+CMD ["llmrouter"]
