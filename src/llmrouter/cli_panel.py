@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -211,7 +213,10 @@ def run_interactive_panel(
         print("6. Toggle debug mode")
         print("7. Refresh stats")
         print("0. Exit")
-        choice = input("Select an option: ").strip()
+        try:
+            choice = input("Select an option: ").strip()
+        except EOFError:
+            return
 
         if choice == "1":
             _prompt_routing_strategy(env_path, settings)
@@ -225,6 +230,7 @@ def run_interactive_panel(
         elif choice == "4":
             print()
             print(render_current_settings(settings, registry))
+            _pause_for_enter()
         elif choice == "5":
             _prompt_view_logs(settings)
         elif choice == "6":
@@ -398,14 +404,21 @@ def _prompt_view_logs(settings: Settings) -> None:
     """Follow recent log entries until interrupted."""
     import os
 
-    log_path = os.environ.get("LLMROUTER_LOG_FILE", DEFAULT_LOG_PATH)
+    log_path = os.environ.get("LLMROUTER_LOG_FILE")
+    journal_unit = os.environ.get("LLMROUTER_JOURNAL_UNIT", "llmrouter")
 
     print()
-    print(f"Log file: {log_path}")
     print("Showing last 25 lines. Press Ctrl+C to return to the panel.")
 
     try:
-        follow_log_file(log_path, lines_count=25)
+        if log_path:
+            print(f"Log file: {log_path}")
+            follow_log_file(log_path, lines_count=25)
+        elif _journalctl_available():
+            follow_journal_logs(journal_unit, lines_count=25)
+        else:
+            print(f"Log file: {DEFAULT_LOG_PATH}")
+            follow_log_file(DEFAULT_LOG_PATH, lines_count=25)
     except KeyboardInterrupt:
         print()
         print("Stopped following logs.")
@@ -501,6 +514,29 @@ def _read_log_since(path: Path, offset: int) -> tuple[str, int]:
         file.seek(offset)
         chunk = file.read()
         return chunk, file.tell()
+
+
+def follow_journal_logs(unit: str = "llmrouter", *, lines_count: int = 25) -> None:
+    """Follow systemd journal logs for the LLMrouter service."""
+    command = _journalctl_follow_command(unit, lines_count)
+    print(f"Journal unit: {unit}")
+    print("$ " + " ".join(command))
+    subprocess.run(command, check=False)
+
+
+def _journalctl_follow_command(unit: str, lines_count: int = 25) -> list[str]:
+    return ["journalctl", "-u", unit, "-n", str(max(lines_count, 1)), "-f"]
+
+
+def _journalctl_available() -> bool:
+    return shutil.which("journalctl") is not None
+
+
+def _pause_for_enter() -> None:
+    try:
+        input("\nPress Enter to return to the menu...")
+    except EOFError:
+        return
 
 
 def _reload(settings: Settings) -> Settings:

@@ -6,6 +6,7 @@ from llmrouter.cli_panel import (
     FALLBACK_COUNT_ENV,
     PROVIDER_COST_ORDER_ENV,
     ROUTING_STRATEGY_ENV,
+    _journalctl_follow_command,
     _log_file_end_offset,
     _parse_provider_selection,
     _read_log_since,
@@ -234,3 +235,14 @@ def test_read_log_since_handles_truncated_file(tmp_path) -> None:
 
     assert chunk == "new line\n"
     assert new_offset == len("new line\n")
+
+
+def test_journalctl_follow_command_uses_last_25_lines_by_default() -> None:
+    assert _journalctl_follow_command("llmrouter") == [
+        "journalctl",
+        "-u",
+        "llmrouter",
+        "-n",
+        "25",
+        "-f",
+    ]
