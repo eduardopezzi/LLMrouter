@@ -20,6 +20,7 @@ from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.types import (
     ChatRequest,
     ModelInfo,
+    Provider,
     RoutingConstraints,
     RoutingDecision,
     RoutingStrategy,
@@ -42,12 +43,33 @@ class SelectionStrategy(Protocol):
 # Built-in strategies
 # ---------------------------------------------------------------------------
 
+_PROVIDER_COST_RANK = {
+    Provider.NVIDIA: 0,
+    Provider.ZAI: 1,
+    Provider.OLLAMA: 2,
+}
+
 
 class CostStrategy:
-    """Prefer the cheapest model within the tier."""
+    """Prefer the cheapest model within the tier.
+
+    Numeric model costs are primary. When the catalog has equal or zero costs,
+    providers are ranked by the current commercial preference:
+    NVIDIA, then Zhipu, then Ollama.
+    """
+
+    def __init__(self, provider_cost_order: list[str] | None = None) -> None:
+        self._provider_cost_rank = _provider_cost_rank(provider_cost_order)
 
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
-        return sorted(models, key=lambda m: m.cost_ratio)
+        return sorted(
+            models,
+            key=lambda m: (
+                m.cost_ratio,
+                self._provider_cost_rank.get(m.provider, 99),
+                m.priority,
+            ),
+        )
 
 
 class QualityStrategy:
@@ -68,7 +90,7 @@ class LatencyStrategy:
     """
 
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
-        return sorted(models, key=lambda m: (m.provider != "ollama", m.cost_ratio))
+        return sorted(models, key=lambda m: (m.provider != Provider.OLLAMA, m.cost_ratio))
 
 
 class BalancedStrategy:
@@ -97,9 +119,14 @@ _STRATEGY_MAP: dict[RoutingStrategy, type[SelectionStrategy]] = {
 }
 
 
-def get_strategy(strategy: RoutingStrategy) -> SelectionStrategy:
+def get_strategy(
+    strategy: RoutingStrategy,
+    provider_cost_order: list[str] | None = None,
+) -> SelectionStrategy:
     """Return the selection strategy implementation for the given enum value."""
     cls = _STRATEGY_MAP.get(strategy, BalancedStrategy)
+    if cls is CostStrategy:
+        return cls(provider_cost_order)
     return cls()
 
 
@@ -126,12 +153,13 @@ class MultiModelRouter:
         self,
         registry: ModelRegistry,
         scorer: PromptScorer,
-        strategy: RoutingStrategy = RoutingStrategy.BALANCED,
+        strategy: RoutingStrategy = RoutingStrategy.COST,
         fallback_count: int = 2,
+        provider_cost_order: list[str] | None = None,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
-        self._strategy = get_strategy(strategy)
+        self._strategy = get_strategy(strategy, provider_cost_order)
         self._fallback_count = fallback_count
 
     async def route(
@@ -188,7 +216,11 @@ class MultiModelRouter:
         if not candidates:
             # Fallback: try any model available
             candidates = self._registry.all()
-            _logger.debug("No candidates in tier %s, using all %d models", scoring.tier.name, len(candidates))
+            _logger.debug(
+                "No candidates in tier %s, using all %d models",
+                scoring.tier.name,
+                len(candidates),
+            )
 
         if not candidates:
             raise RuntimeError("No models available for routing")
@@ -282,3 +314,17 @@ class MultiModelRouter:
             f"Prompt scored {scoring.score:.2f} (tier {scoring.tier.name}), "
             f"signals: {signal_str}. Selected {model.name} via {model.provider.value}."
         )
+
+
+def _provider_cost_rank(provider_cost_order: list[str] | None) -> dict[Provider, int]:
+    if not provider_cost_order:
+        return _PROVIDER_COST_RANK
+    result: dict[Provider, int] = {}
+    for index, provider_name in enumerate(provider_cost_order):
+        try:
+            result[Provider(provider_name)] = index
+        except ValueError:
+            continue
+    for provider, rank in _PROVIDER_COST_RANK.items():
+        result.setdefault(provider, len(result) + rank)
+    return result

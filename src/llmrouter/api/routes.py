@@ -87,7 +87,7 @@ def create_app(
     app_router = router or MultiModelRouter(
         model_registry,
         PromptScorer(),
-        RoutingStrategy.BALANCED,
+        RoutingStrategy.COST,
     )
 
     @asynccontextmanager

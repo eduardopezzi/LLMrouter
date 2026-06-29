@@ -40,6 +40,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         scorer=PromptScorer(_scorer_weights(resolved_settings.routing.scorer_weights)),
         strategy=resolved_settings.routing.strategy,
         fallback_count=resolved_settings.routing.fallback_count,
+        provider_cost_order=resolved_settings.routing.provider_cost_order,
     )
     collector = (
         ObservationCollector(

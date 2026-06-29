@@ -7,7 +7,14 @@ import sys
 
 import uvicorn
 
-from llmrouter.config import get_settings
+from llmrouter.cli_panel import (
+    render_panel_summary,
+    run_interactive_panel,
+    set_fallback_count,
+    set_provider_cost_order,
+    set_routing_strategy,
+)
+from llmrouter.config import get_settings, reload_settings
 from llmrouter.contract_publisher import ContractPublisher
 from llmrouter.cross_repository import (
     BreakingChangeDetector,
@@ -120,6 +127,46 @@ def _parse_args() -> argparse.Namespace:
         help="Logical service name in the snapshot.",
     )
 
+    panel_parser = subparsers.add_parser(
+        "panel",
+        help="Open the routing configuration and statistics CLI panel.",
+    )
+    panel_parser.add_argument(
+        "--models-file",
+        type=str,
+        default=None,
+        help="Model catalog path (default: from config).",
+    )
+    panel_parser.add_argument(
+        "--env-file",
+        type=str,
+        default=".env",
+        help="Environment file updated by configuration actions.",
+    )
+    panel_parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print current routing configuration and statistics, then exit.",
+    )
+    panel_parser.add_argument(
+        "--set-strategy",
+        choices=["cost", "quality", "balanced", "latency"],
+        default=None,
+        help="Persist routing strategy to the env file, then exit.",
+    )
+    panel_parser.add_argument(
+        "--set-fallback-count",
+        type=int,
+        default=None,
+        help="Persist fallback count to the env file, then exit.",
+    )
+    panel_parser.add_argument(
+        "--set-provider-cost-order",
+        type=str,
+        default=None,
+        help="Persist provider cost order, e.g. nvidia,zai,ollama.",
+    )
+
     parser.add_argument(
         "--debug", "-d",
         action="store_true",
@@ -188,6 +235,34 @@ def main() -> None:
             print(f"Published contract {result.contract_path} at {result.commit_sha}")
         else:
             print(f"Contract already up to date: {result.contract_path}")
+        return
+
+    if args.command == "panel":
+        registry = build_registry(args.models_file or settings.models_file)
+        changed = False
+        if args.set_strategy:
+            set_routing_strategy(args.env_file, args.set_strategy)
+            print(f"Updated routing strategy: {args.set_strategy}")
+            changed = True
+        if args.set_fallback_count is not None:
+            set_fallback_count(args.env_file, args.set_fallback_count)
+            print(f"Updated fallback count: {args.set_fallback_count}")
+            changed = True
+        if args.set_provider_cost_order:
+            providers = [
+                item.strip()
+                for item in args.set_provider_cost_order.split(",")
+                if item.strip()
+            ]
+            set_provider_cost_order(args.env_file, providers)
+            print(f"Updated provider cost order: {', '.join(providers)}")
+            changed = True
+        if args.stats or changed:
+            if changed:
+                settings = reload_settings()
+            print(render_panel_summary(settings, registry))
+            return
+        run_interactive_panel(settings, registry, env_path=args.env_file)
         return
 
     # Configure logging based on --debug flag

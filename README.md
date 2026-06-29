@@ -191,6 +191,51 @@ remocao de capability e reducao de janela de contexto. Adicoes de endpoints,
 modelos, roles, capabilities ou aumento de contexto sao tratadas como
 compativeis.
 
+## Routing Preference
+
+Por padrao, o LLMrouter usa a estrategia `cost`. Primeiro ele escolhe o tier e
+as capabilities necessarias para a tarefa; dentro desses candidatos, prefere o
+menor custo. Quando os custos numericos do catalogo empatam ou estao zerados, o
+desempate segue a ordem comercial atual:
+
+```text
+NVIDIA -> Zhipu -> Ollama
+```
+
+Para trocar a estrategia:
+
+```env
+LLMROUTER_ROUTING__STRATEGY=quality
+```
+
+Tambem existe um painel CLI para configurar a priorizacao e ver estatisticas:
+
+```bash
+make panel
+```
+
+Ver somente o resumo atual:
+
+```bash
+make panel-stats
+```
+
+Alterar configuracoes sem menu interativo:
+
+```bash
+llmrouter panel --set-strategy cost
+llmrouter panel --set-fallback-count 3
+llmrouter panel --set-provider-cost-order nvidia,zai,ollama
+```
+
+O painel grava essas preferencias no `.env`:
+
+```env
+LLMROUTER_ROUTING__STRATEGY=cost
+LLMROUTER_ROUTING__FALLBACK_COUNT=3
+LLMROUTER_ROUTING__PROVIDER_COST_ORDER=["nvidia", "zai", "ollama"]
+```
+
 ## Local Server
 
 > **Importante:** Este projeto usa *src layout* (`src/llmrouter/`). Portanto, o
@@ -218,6 +263,8 @@ PYTHONPATH=src python -m uvicorn llmrouter.main:app --host 0.0.0.0 --port 12345
 | `make install-dev` | Instala com dependências de desenvolvimento |
 | `make run`       | Inicia o servidor (porta 12345)            |
 | `make run-reload`| Inicia com auto-reload                     |
+| `make panel` | Abre painel CLI de roteamento e estatisticas |
+| `make panel-stats` | Mostra estatisticas do painel CLI |
 | `make contracts-export` | Exporta contrato cross-repository em JSON |
 | `make contracts-check` | Valida compatibilidade entre snapshots |
 | `make contracts-diff` | Mostra diferencas entre snapshots |

@@ -10,6 +10,7 @@ from llmrouter.core.types import (
     ChatRequest,
     ModelInfo,
     Provider,
+    RoutingConstraints,
     RoutingStrategy,
     Tier,
 )
@@ -72,3 +73,84 @@ async def test_router_scores_code_prompt_into_higher_tier() -> None:
     assert decision.primary.tier == Tier.T3
     assert decision.score > 0
     assert decision.tier == Tier.T2
+
+
+@pytest.mark.asyncio
+async def test_cost_strategy_prefers_nvidia_then_zai_then_ollama_on_equal_cost() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="ollama/reviewer",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=1,
+            ),
+            ModelInfo(
+                name="zhipu/reviewer",
+                provider=Provider.ZAI,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=30,
+            ),
+            ModelInfo(
+                name="nvidia/reviewer",
+                provider=Provider.NVIDIA,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=20,
+            ),
+        )
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this migration architecture.")],
+    )
+    constraints = RoutingConstraints(required_capabilities=frozenset({"review"}))
+    router = MultiModelRouter(registry, PromptScorer(), RoutingStrategy.COST)
+
+    decision = await router.route(request, constraints)
+
+    assert decision.primary.name == "nvidia/reviewer"
+    assert [model.name for model in decision.fallbacks] == [
+        "zhipu/reviewer",
+        "ollama/reviewer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cost_strategy_uses_configured_provider_order_on_equal_cost() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="ollama/reviewer",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=1,
+            ),
+            ModelInfo(
+                name="nvidia/reviewer",
+                provider=Provider.NVIDIA,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=20,
+            ),
+        )
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this migration architecture.")],
+    )
+    constraints = RoutingConstraints(required_capabilities=frozenset({"review"}))
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        RoutingStrategy.COST,
+        provider_cost_order=["ollama", "nvidia"],
+    )
+
+    decision = await router.route(request, constraints)
+
+    assert decision.primary.name == "ollama/reviewer"
+    assert [model.name for model in decision.fallbacks] == ["nvidia/reviewer"]
