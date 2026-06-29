@@ -4,8 +4,11 @@
 PYTHONPATH := src
 HOST ?= 0.0.0.0
 PORT ?= 12345
+CONTRACT ?= contracts/llmrouter.contract.json
+PREVIOUS_CONTRACT ?= contracts/previous.llmrouter.contract.json
+CONTRACTS_REPO ?= https://github.com/Vieli-Tech/phoenix_versions.git
 
-.PHONY: help install install-dev run run-reload run-debug test lint format typecheck clean docker-build docker-run
+.PHONY: help install install-dev run run-reload run-debug contracts-export contracts-check contracts-diff contracts-publish test lint format typecheck clean docker-build docker-run
 
 help: ## Mostra os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -24,6 +27,18 @@ run-reload: ## Inicia o servidor com auto-reload
 
 run-debug: ## Inicia o servidor com debug logging (mostra roteamento, scoring, fallbacks)
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main --debug --host $(HOST) --port $(PORT)
+
+contracts-export: ## Exporta snapshot de contratos cross-repository
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main export-contracts --output $(CONTRACT)
+
+contracts-check: ## Valida compatibilidade entre PREVIOUS_CONTRACT e CONTRACT
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main check-contracts $(PREVIOUS_CONTRACT) $(CONTRACT)
+
+contracts-diff: ## Mostra diferencas entre PREVIOUS_CONTRACT e CONTRACT
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main diff-contracts $(PREVIOUS_CONTRACT) $(CONTRACT)
+
+contracts-publish: ## Publica contrato vigente no repo GitHub central
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main publish-contracts --repo $(CONTRACTS_REPO)
 
 test: ## Executa os testes
 	pytest

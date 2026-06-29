@@ -119,6 +119,78 @@ curl -N -X POST http://localhost:12345/v1/chat/completions \
 
 Guia completo com troubleshooting: [`docs/CLINE_SETUP.md`](docs/CLINE_SETUP.md).
 
+## Cross-Repository Contracts
+
+O item **Cross-Repository** publica um contrato JSON versionavel para que repos
+consumidores validem compatibilidade antes de atualizar o LLMrouter. O snapshot
+inclui endpoints, schema resumido de requests/responses, catalogo de modelos e
+roles de roteamento disponiveis.
+
+O repositorio central planejado e `Vieli-Tech/phoenix_versions`. Cada projeto
+deve ter uma pasta propria e os JSONs vigentes ficam na raiz dessa pasta. A CLI
+resolve o nome da pasta de forma case-insensitive; por exemplo, `llmrouter`,
+`LLMRouter` e `LLMROUTER` apontam para a mesma pasta existente.
+
+Exportar o contrato atual:
+
+```bash
+make contracts-export
+```
+
+Exportar direto para o repositorio central:
+
+```bash
+llmrouter export-contracts \
+  --contracts-root ../phoenix_versions \
+  --project llmrouter \
+  --filename llmrouter.contract.json
+```
+
+Publicar direto no GitHub usando `GITHUB_TOKEN` do `.env`:
+
+```bash
+make contracts-publish
+```
+
+ou:
+
+```bash
+llmrouter publish-contracts \
+  --repo https://github.com/Vieli-Tech/phoenix_versions.git \
+  --project llmrouter \
+  --filename llmrouter.contract.json
+```
+
+Comparar um snapshot anterior com o atual, falhando em breaking changes:
+
+```bash
+make contracts-check \
+  PREVIOUS_CONTRACT=contracts/previous.llmrouter.contract.json \
+  CONTRACT=contracts/llmrouter.contract.json
+```
+
+Ver diferencas sem falhar:
+
+```bash
+make contracts-diff \
+  PREVIOUS_CONTRACT=contracts/previous.llmrouter.contract.json \
+  CONTRACT=contracts/llmrouter.contract.json
+```
+
+Tambem e possivel chamar a CLI diretamente:
+
+```bash
+llmrouter export-contracts --output contracts/llmrouter.contract.json
+llmrouter check-contracts old.json new.json
+llmrouter diff-contracts old.json new.json
+```
+
+O `BreakingChangeDetector` marca como **breaking** remocao de endpoint, modelo ou
+role, mudanca de metodo/schema de endpoint, troca de provider/modelo interno,
+remocao de capability e reducao de janela de contexto. Adicoes de endpoints,
+modelos, roles, capabilities ou aumento de contexto sao tratadas como
+compativeis.
+
 ## Local Server
 
 > **Importante:** Este projeto usa *src layout* (`src/llmrouter/`). Portanto, o
@@ -146,6 +218,10 @@ PYTHONPATH=src python -m uvicorn llmrouter.main:app --host 0.0.0.0 --port 12345
 | `make install-dev` | Instala com dependências de desenvolvimento |
 | `make run`       | Inicia o servidor (porta 12345)            |
 | `make run-reload`| Inicia com auto-reload                     |
+| `make contracts-export` | Exporta contrato cross-repository em JSON |
+| `make contracts-check` | Valida compatibilidade entre snapshots |
+| `make contracts-diff` | Mostra diferencas entre snapshots |
+| `make contracts-publish` | Publica contrato vigente no repo GitHub central |
 | `make test`      | Executa os testes                          |
 | `make lint`      | Executa o linter (ruff)                    |
 | `make format`    | Formata o código                           |
