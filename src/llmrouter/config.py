@@ -135,6 +135,16 @@ class MetricsConfig(BaseModel):
     endpoint: str = "/metrics"
 
 
+class PrecogConfig(BaseModel):
+    """PRecog integration for routing observations and feedback."""
+
+    enabled: bool = False
+    base_url: str = "http://localhost:8888"
+    api_key: str | None = None
+    project: str = "llmrouter"
+    timeout: float = 3.0
+
+
 # ---------------------------------------------------------------------------
 # Main settings
 # ---------------------------------------------------------------------------
@@ -169,6 +179,7 @@ class Settings(BaseSettings):
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     evaluator: EvaluatorConfig = Field(default_factory=EvaluatorConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    precog: PrecogConfig = Field(default_factory=PrecogConfig)
 
     # Model registry file
     models_file: str = "config/models.yaml"

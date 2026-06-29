@@ -56,6 +56,18 @@ class FakeFeedbackLoop:
         return FeedbackReport(evaluated=2, optimal=1, correct=1, overkill=0, underkill=0)
 
 
+class FakePrecogPublisher:
+    def __init__(self) -> None:
+        self.observations: list[dict[str, Any]] = []
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+
+    def record_observation(self, payload: dict[str, Any]) -> None:
+        self.observations.append(payload)
+
+    def update_observation(self, request_id: str, outcome: dict[str, Any]) -> None:
+        self.updates.append((request_id, outcome))
+
+
 def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
     caplog.set_level(logging.INFO, logger="llmrouter.api")
     registry = ModelRegistry(
@@ -91,6 +103,115 @@ def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
     assert 'POST /v1/chat/completions HTTP/1.1" 200 OK' in caplog.text
     assert "selected_model=cheap" in caplog.text
     assert "provider_model=cheap" in caplog.text
+
+
+def test_chat_completions_publishes_precog_observation() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="cheap",
+                provider=Provider.NVIDIA,
+                tier=Tier.T1,
+                cost_per_1k_input=0.5,
+                cost_per_1k_output=1.0,
+            ),
+        )
+    )
+    publisher = FakePrecogPublisher()
+    app = create_app(
+        registry=registry,
+        proxy=FakeProxy(),
+        precog_publisher=publisher,
+        precog_project="llmrouter-tests",
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"X-Request-Id": "req-123"},
+        json={
+            "task_role": "fix",
+            "messages": [{"role": "user", "content": "corrija este arquivo"}],
+            "llmrouter": {
+                "project": "precog",
+                "rag": {
+                    "used": True,
+                    "collection": "project_docs",
+                    "top_k": 3,
+                    "context_tokens": 120,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["llmrouter"]["request_id"] == "req-123"
+    assert body["llmrouter"]["provider"] == "nvidia"
+    assert publisher.observations == [
+        {
+            "request_id": "req-123",
+            "project": "precog",
+            "task_role": "fix",
+            "prompt_hash": publisher.observations[0]["prompt_hash"],
+            "selected_model": "cheap",
+            "provider": "nvidia",
+            "provider_model": "cheap",
+            "latency_ms": publisher.observations[0]["latency_ms"],
+            "prompt_tokens": 2,
+            "completion_tokens": 1,
+            "cost_usd": 0.002,
+            "rag": {
+                "used": True,
+                "collection": "project_docs",
+                "top_k": 3,
+                "context_tokens": 120,
+            },
+        }
+    ]
+    assert len(publisher.observations[0]["prompt_hash"]) == 64
+
+
+def test_llmrouter_feedback_forwards_to_precog() -> None:
+    publisher = FakePrecogPublisher()
+    app = create_app(precog_publisher=publisher)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/llmrouter/feedback",
+        json={
+            "request_id": "req-123",
+            "outcome": {
+                "accepted": True,
+                "tests_passed": True,
+                "validated": True,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "request_id": "req-123"}
+    assert publisher.updates == [
+        (
+            "req-123",
+            {
+                "accepted": True,
+                "tests_passed": True,
+                "validated": True,
+            },
+        )
+    ]
+
+
+def test_llmrouter_feedback_requires_precog_publisher() -> None:
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/v1/llmrouter/feedback",
+        json={"request_id": "req-123", "outcome": {"accepted": True}},
+    )
+
+    assert response.status_code == 503
 
 
 def test_health_reports_model_count() -> None:

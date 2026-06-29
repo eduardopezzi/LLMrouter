@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -71,6 +73,13 @@ class ChatCompletionPayload(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class LLMrouterFeedbackPayload(BaseModel):
+    """Post-execution feedback for an LLMrouter request."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    outcome: dict[str, Any] = Field(default_factory=dict)
+
+
 def create_app(
     *,
     registry: ModelRegistry | None = None,
@@ -81,6 +90,8 @@ def create_app(
     evaluator_interval_seconds: int | None = None,
     api_key: str | None = None,
     cors_origins: list[str] | None = None,
+    precog_publisher: Any | None = None,
+    precog_project: str = "llmrouter",
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -121,6 +132,8 @@ def create_app(
     app.state.collector = collector
     app.state.feedback_loop = feedback_loop
     app.state.api_key = api_key
+    app.state.precog_publisher = precog_publisher
+    app.state.precog_project = precog_project
 
     @app.get("/health")
     async def health() -> dict[str, object]:
@@ -180,9 +193,12 @@ def create_app(
                 proxy=app.state.proxy,
                 app_router=app.state.router,
                 collector=app.state.collector,
+                precog_publisher=app.state.precog_publisher,
+                precog_project=app.state.precog_project,
             )
 
         started = time.perf_counter()
+        request_id = _request_id(request)
         constraints = _routing_constraints(payload)
         decision = await app.state.router.route(chat_request, constraints)
 
@@ -229,7 +245,10 @@ def create_app(
             latency_ms=latency_ms,
             scorer_score=decision.score,
             scorer_tier=decision.tier.value,
-            request_id=request.headers.get("x-request-id"),
+            request_id=request_id,
+            payload=payload,
+            precog_publisher=app.state.precog_publisher,
+            precog_project=app.state.precog_project,
         )
         return {
             "id": response.id,
@@ -243,13 +262,30 @@ def create_app(
                 "total_tokens": response.usage.total_tokens,
             },
             "llmrouter": {
+                "request_id": request_id,
                 "selected_model": decision.primary.name,
+                "provider": decision.primary.provider.value,
                 "provider_model": decision.primary.provider_model_name,
                 "score": decision.score,
                 "tier": decision.tier.value,
                 "reason": decision.reason,
             },
         }
+
+    @app.post("/v1/llmrouter/feedback")
+    async def llmrouter_feedback(
+        payload: LLMrouterFeedbackPayload,
+        request: Request,
+    ) -> dict[str, object]:
+        """Forward caller feedback to PRecog for a previously returned request_id."""
+        _require_api_key(request, app.state.api_key)
+        if app.state.precog_publisher is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PRecog publisher is not configured",
+            )
+        app.state.precog_publisher.update_observation(payload.request_id, payload.outcome)
+        return {"status": "accepted", "request_id": payload.request_id}
 
     @app.post("/admin/evaluator/run-cycle")
     async def run_evaluator_cycle(request: Request, limit: int = 50) -> dict[str, object]:
@@ -279,6 +315,8 @@ async def _stream_response(
     proxy: ProviderProxy,
     app_router: MultiModelRouter,
     collector: ObservationCollector | None,
+    precog_publisher: Any | None = None,
+    precog_project: str = "llmrouter",
 ) -> StreamingResponse:
     """Build a Server-Sent Events streaming response for chat completions.
 
@@ -289,7 +327,7 @@ async def _stream_response(
     decision = await app_router.route(chat_request, constraints)
     selected_model = decision.primary
     started = time.perf_counter()
-    request_id = request.headers.get("x-request-id")
+    request_id = _request_id(request)
 
     _log_chat_access(
         request=request,
@@ -358,6 +396,9 @@ async def _stream_response(
                     scorer_score=decision.score,
                     scorer_tier=decision.tier.value,
                     request_id=request_id,
+                    payload=payload,
+                    precog_publisher=precog_publisher,
+                    precog_project=precog_project,
                 )
 
     return StreamingResponse(
@@ -367,6 +408,7 @@ async def _stream_response(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-LLMrouter-Request-Id": request_id,
         },
     )
 
@@ -562,30 +604,52 @@ def _record_observation(
     scorer_score: float,
     scorer_tier: int,
     request_id: str | None,
+    payload: ChatCompletionPayload,
+    precog_publisher: Any | None = None,
+    precog_project: str = "llmrouter",
 ) -> None:
-    if collector is None:
+    if collector is None and precog_publisher is None:
         return
     response_text = "\n".join(_choice_text(choice) for choice in response_payload)
+    cost_usd = _estimate_cost(selected_model, usage)
     metadata = {
         "provider": selected_model.provider.value,
         "provider_model": selected_model.provider_model_name,
     }
     if request_id:
         metadata["request_id"] = request_id
-    collector.record(
-        RoutingObservation(
-            prompt=chat_request.prompt_text,
-            chosen_model=model,
-            response=response_text,
-            latency_ms=latency_ms,
-            cost_usd=_estimate_cost(selected_model, usage),
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            scorer_score=scorer_score,
-            scorer_tier=scorer_tier,
-            metadata=metadata,
+    if collector is not None:
+        collector.record(
+            RoutingObservation(
+                prompt=chat_request.prompt_text,
+                chosen_model=model,
+                response=response_text,
+                latency_ms=latency_ms,
+                cost_usd=cost_usd,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                scorer_score=scorer_score,
+                scorer_tier=scorer_tier,
+                metadata=metadata,
+            )
         )
-    )
+    if precog_publisher is not None and request_id:
+        precog_publisher.record_observation(
+            {
+                "request_id": request_id,
+                "project": _precog_project(payload, precog_project),
+                "task_role": _task_role(payload),
+                "prompt_hash": _prompt_hash(chat_request.prompt_text),
+                "selected_model": model,
+                "provider": selected_model.provider.value,
+                "provider_model": selected_model.provider_model_name,
+                "latency_ms": latency_ms,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "cost_usd": cost_usd,
+                "rag": _rag_metadata(payload),
+            }
+        )
 
 
 def _choice_text(choice: dict[str, Any]) -> str:
@@ -596,6 +660,47 @@ def _choice_text(choice: dict[str, Any]) -> str:
             return content
     text = choice.get("text")
     return str(text) if text is not None else ""
+
+
+def _request_id(request: Request) -> str:
+    return request.headers.get("x-request-id") or f"llmrouter-{uuid.uuid4().hex}"
+
+
+def _prompt_hash(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _precog_project(payload: ChatCompletionPayload, default: str) -> str:
+    router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    project = router_options.get("project") or payload.extra.get("project") or default
+    return str(project or default)
+
+
+def _task_role(payload: ChatCompletionPayload) -> str:
+    router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    role = (
+        payload.task_role
+        or router_options.get("task_role")
+        or router_options.get("role")
+        or payload.extra.get("role")
+        or payload.extra.get("task_role")
+        or ""
+    )
+    return str(role)
+
+
+def _rag_metadata(payload: ChatCompletionPayload) -> dict[str, Any]:
+    router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    rag = router_options.get("rag")
+    if not isinstance(rag, dict):
+        return {"used": False, "collection": None, "top_k": 0, "context_tokens": 0}
+    used = bool(rag.get("used"))
+    return {
+        "used": used,
+        "collection": rag.get("collection") if used else None,
+        "top_k": int(rag.get("top_k") or 0) if used else 0,
+        "context_tokens": int(rag.get("context_tokens") or 0) if used else 0,
+    }
 
 
 def _routing_constraints(payload: ChatCompletionPayload) -> RoutingConstraints:

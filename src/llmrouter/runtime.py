@@ -19,6 +19,7 @@ from llmrouter.evaluator.collector import ObservationCollector
 from llmrouter.evaluator.feedback import FeedbackLoop
 from llmrouter.evaluator.grader import RoutingDecisionGrader
 from llmrouter.evaluator.judge import QualityJudge
+from llmrouter.precog import PrecogPublisher
 from llmrouter.providers import (
     BaseProvider,
     GeminiProvider,
@@ -66,6 +67,15 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         if collector is not None
         else None
     )
+    precog_publisher = (
+        PrecogPublisher(
+            base_url=resolved_settings.precog.base_url,
+            api_key=resolved_settings.precog.api_key,
+            timeout=resolved_settings.precog.timeout,
+        )
+        if resolved_settings.precog.enabled
+        else None
+    )
     return create_app(
         registry=registry,
         router=router,
@@ -77,6 +87,8 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         else None,
         api_key=resolved_settings.server.api_key,
         cors_origins=resolved_settings.server.cors_origins,
+        precog_publisher=precog_publisher,
+        precog_project=resolved_settings.precog.project,
     )
 
 

@@ -305,6 +305,44 @@ Exemplo:
 }
 ```
 
+No LLMrouter, a publicação para esses endpoints é habilitada por configuração:
+
+```env
+LLMROUTER_PRECOG__ENABLED=true
+LLMROUTER_PRECOG__BASE_URL=http://localhost:8888
+LLMROUTER_PRECOG__API_KEY=<PRECOG_INTERNAL_API_KEY ou LLMROUTER_OBSERVATION_API_KEY>
+LLMROUTER_PRECOG__PROJECT=llmrouter
+```
+
+Após uma chamada em `/v1/chat/completions`, o LLMrouter gera ou reaproveita o
+header `X-Request-Id` e publica a observação em modo best-effort. Em resposta
+não-streaming, o identificador volta em `llmrouter.request_id`; em streaming, o
+identificador volta no header `X-LLMrouter-Request-Id`.
+
+Para feedback explícito vindo de cliente, automação ou CI, chamar o LLMrouter:
+
+```text
+POST /v1/llmrouter/feedback
+```
+
+Payload:
+
+```json
+{
+  "request_id": "llmrouter-...",
+  "outcome": {
+    "accepted": true,
+    "tests_passed": true,
+    "validated": true,
+    "rating": 5
+  }
+}
+```
+
+O LLMrouter encaminha esse feedback para o `PATCH` interno do PRecog. Falhas de
+publicação são registradas em log e não devem quebrar a resposta principal ao
+cliente.
+
 ## Política de Memória/RAG
 
 Não indexar tudo automaticamente.
@@ -359,6 +397,9 @@ O PRecog deve mapear intents comuns do Cline para `task_role`:
 - [ ] Adicionar filtros para segredos/dados sensíveis antes de indexar.
 - [ ] Adicionar testes de integração com LLMrouter mockado.
 - [ ] Adicionar métricas por projeto, task_role, modelo e provider.
+- [ ] Configurar o LLMrouter com `LLMROUTER_PRECOG__ENABLED=true`.
+- [ ] Validar no PRecog uma chamada real registrada em `llmrouter_observations`.
+- [ ] Validar `POST /v1/llmrouter/feedback` atualizando a observação no PRecog.
 
 ## Critérios de Aceite
 

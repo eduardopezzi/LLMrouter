@@ -59,6 +59,50 @@ curl -X POST http://localhost:12345/v1/chat/completions \
 `documentation`, `refactoring`, `security_audit`, `architecture` e `migration`.
 Também é possível enviar o papel em `llmrouter.task_role` ou `extra.task_role`.
 
+### Publicação de observações no PRecog
+
+O LLMrouter também pode enviar observações e feedback para os endpoints internos
+do PRecog. Habilite no `.env`:
+
+```env
+LLMROUTER_PRECOG__ENABLED=true
+LLMROUTER_PRECOG__BASE_URL=http://localhost:8888
+LLMROUTER_PRECOG__API_KEY=mesmo-token-configurado-no-precog
+LLMROUTER_PRECOG__PROJECT=llmrouter
+```
+
+Após cada chamada, o LLMrouter envia em modo best-effort:
+
+```text
+POST /internal/llmrouter/observations
+```
+
+A resposta OpenAI-compatible inclui `llmrouter.request_id`. Para chamadas
+streaming, o mesmo valor é exposto no header `X-LLMrouter-Request-Id`.
+
+Para registrar feedback posterior:
+
+```bash
+curl -X POST http://localhost:12345/v1/llmrouter/feedback \
+  -H "Authorization: Bearer your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "llmrouter-request-id",
+    "outcome": {
+      "accepted": true,
+      "tests_passed": true,
+      "validated": true,
+      "rating": 5
+    }
+  }'
+```
+
+Esse endpoint encaminha para:
+
+```text
+PATCH /internal/llmrouter/observations/{request_id}
+```
+
 Para descobrir os papéis disponíveis no catálogo carregado:
 
 ```bash
