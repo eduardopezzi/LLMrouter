@@ -6,7 +6,9 @@ from llmrouter.cli_panel import (
     FALLBACK_COUNT_ENV,
     PROVIDER_COST_ORDER_ENV,
     ROUTING_STRATEGY_ENV,
+    _log_file_end_offset,
     _parse_provider_selection,
+    _read_log_since,
     _read_log_tail,
     observation_stats,
     render_current_settings,
@@ -208,3 +210,27 @@ def test_read_log_tail_handles_encoding_errors(tmp_path) -> None:
     assert content is not None
     assert "valid line" in content
     assert "another line" in content
+
+
+def test_read_log_since_returns_appended_content(tmp_path) -> None:
+    log_path = tmp_path / "follow.log"
+    log_path.write_text("line1\nline2\n", encoding="utf-8")
+    offset = _log_file_end_offset(log_path)
+
+    log_path.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    chunk, new_offset = _read_log_since(log_path, offset)
+
+    assert chunk == "line3\n"
+    assert new_offset > offset
+
+
+def test_read_log_since_handles_truncated_file(tmp_path) -> None:
+    log_path = tmp_path / "follow.log"
+    log_path.write_text("old line\nold line 2\n", encoding="utf-8")
+    offset = _log_file_end_offset(log_path)
+
+    log_path.write_text("new line\n", encoding="utf-8")
+    chunk, new_offset = _read_log_since(log_path, offset)
+
+    assert chunk == "new line\n"
+    assert new_offset == len("new line\n")

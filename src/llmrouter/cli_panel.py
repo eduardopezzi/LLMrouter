@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -394,31 +395,20 @@ def _prompt_provider_cost_order(
 
 
 def _prompt_view_logs(settings: Settings) -> None:
-    """Interactive prompt to view recent log entries."""
+    """Follow recent log entries until interrupted."""
     import os
 
     log_path = os.environ.get("LLMROUTER_LOG_FILE", DEFAULT_LOG_PATH)
-    lines_count = 50
 
     print()
     print(f"Log file: {log_path}")
-    value = input(f"Lines to show (default {lines_count}): ").strip()
-    if value:
-        try:
-            lines_count = max(1, int(value))
-        except ValueError:
-            print(f"Invalid number, using default {lines_count}")
+    print("Showing last 25 lines. Press Ctrl+C to return to the panel.")
 
-    content = _read_log_tail(log_path, lines_count)
-    if content is None:
-        print(f"Log file not found: {log_path}")
-        print("Tip: logs are written to stderr by default. Set LLMROUTER_LOG_FILE to persist.")
-        return
-
-    print()
-    print(f"=== Last {lines_count} lines of {log_path} ===")
-    print(content)
-    print("=== End of log ===")
+    try:
+        follow_log_file(log_path, lines_count=25)
+    except KeyboardInterrupt:
+        print()
+        print("Stopped following logs.")
 
 
 def _prompt_toggle_debug(env_path: str | Path, settings: Settings) -> None:
@@ -462,6 +452,55 @@ def _read_log_tail(log_path: str, lines_count: int) -> str | None:
         return None
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     return "\n".join(lines[-lines_count:])
+
+
+def follow_log_file(
+    log_path: str,
+    *,
+    lines_count: int = 25,
+    poll_interval_seconds: float = 1.0,
+) -> None:
+    """Print the last lines of a log file and follow appended content."""
+    path = Path(log_path)
+    if not path.exists():
+        print(f"Log file not found: {log_path}")
+        print("Tip: logs are written to stderr by default. Set LLMROUTER_LOG_FILE to persist.")
+        return
+
+    content = _read_log_tail(log_path, lines_count)
+    print()
+    print(f"=== Last {lines_count} lines of {log_path} ===")
+    if content:
+        print(content)
+    else:
+        print("(log is empty)")
+    print("=== Following log ===")
+
+    offset = _log_file_end_offset(path)
+    while True:
+        chunk, offset = _read_log_since(path, offset)
+        if chunk:
+            print(chunk, end="" if chunk.endswith("\n") else "\n", flush=True)
+        time.sleep(max(poll_interval_seconds, 0.1))
+
+
+def _log_file_end_offset(path: Path) -> int:
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        file.seek(0, 2)
+        return file.tell()
+
+
+def _read_log_since(path: Path, offset: int) -> tuple[str, int]:
+    if not path.exists():
+        return "", 0
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        file.seek(0, 2)
+        end = file.tell()
+        if end < offset:
+            offset = 0
+        file.seek(offset)
+        chunk = file.read()
+        return chunk, file.tell()
 
 
 def _reload(settings: Settings) -> Settings:
