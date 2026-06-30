@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -32,6 +33,26 @@ class RoutingPanelConfig:
     provider_cost_order: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ModelPriority:
+    """Display row for catalog priority ordering."""
+
+    rank: int
+    priority: int
+    name: str
+    provider: str
+    tier: str
+    roles: tuple[str, ...]
+
+
+@dataclass
+class _ModelBlock:
+    name: str
+    priority: int
+    name_line_index: int
+    priority_line_index: int | None
+
+
 def routing_panel_config(settings: Settings) -> RoutingPanelConfig:
     """Build display-friendly routing settings."""
     return RoutingPanelConfig(
@@ -58,6 +79,77 @@ def set_provider_cost_order(env_path: str | Path, providers: list[str]) -> None:
     """Persist provider cost tie-break order in the .env file."""
     normalized = _normalize_provider_order(providers)
     update_env_file(env_path, {PROVIDER_COST_ORDER_ENV: json.dumps(normalized)})
+
+
+def model_priorities(registry: ModelRegistry, *, limit: int = 10) -> list[ModelPriority]:
+    """Return models ordered by catalog priority."""
+    ordered = sorted(registry.all(), key=lambda model: (model.priority, model.name))
+    rows: list[ModelPriority] = []
+    for rank, model in enumerate(ordered[: max(limit, 0)], 1):
+        rows.append(
+            ModelPriority(
+                rank=rank,
+                priority=model.priority,
+                name=model.name,
+                provider=model.provider.value,
+                tier=f"T{model.tier.value}",
+                roles=tuple(sorted(model.capabilities)),
+            )
+        )
+    return rows
+
+
+def render_model_priorities(registry: ModelRegistry, *, limit: int = 10) -> str:
+    """Render the highest-priority models in the catalog."""
+    rows = model_priorities(registry, limit=limit)
+    lines = [f"Top {len(rows)} model priorities"]
+    if not rows:
+        lines.append("  (catalog is empty)")
+        return "\n".join(lines)
+    for row in rows:
+        roles = ", ".join(row.roles) if row.roles else "-"
+        lines.append(
+            f"  {row.rank:>2}. priority={row.priority:<3} {row.name} "
+            f"provider={row.provider} tier={row.tier} roles={roles}"
+        )
+    return "\n".join(lines)
+
+
+def promote_model_priority(models_file: str | Path, model_name: str) -> None:
+    """Move a model to priority 1 and shift the remaining catalog priorities down."""
+    path = Path(models_file)
+    blocks = _model_blocks(path)
+    if not blocks:
+        raise ValueError("models file does not contain model entries")
+    if model_name not in {block.name for block in blocks}:
+        raise ValueError(f"model not found in catalog: {model_name}")
+
+    ordered = sorted(blocks, key=lambda block: (block.priority, block.name))
+    promoted = next(block for block in ordered if block.name == model_name)
+    reordered = [promoted] + [block for block in ordered if block.name != model_name]
+    new_priorities = {block.name: index for index, block in enumerate(reordered, 1)}
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for block in blocks:
+        priority = new_priorities[block.name]
+        if block.priority_line_index is None:
+            name_line = lines[block.name_line_index]
+            indent = _line_indent(name_line)
+            lines.insert(block.name_line_index + 1, f"{indent}  priority: {priority}")
+            for other in blocks:
+                if other.name_line_index > block.name_line_index:
+                    other.name_line_index += 1
+                if (
+                    other.priority_line_index is not None
+                    and other.priority_line_index > block.name_line_index
+                ):
+                    other.priority_line_index += 1
+            continue
+        current = lines[block.priority_line_index]
+        indent = _line_indent(current)
+        lines[block.priority_line_index] = f"{indent}priority: {priority}"
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def update_env_file(env_path: str | Path, updates: dict[str, str]) -> None:
@@ -211,7 +303,9 @@ def run_interactive_panel(
         print("4. Show current settings")
         print("5. View logs")
         print("6. Toggle debug mode")
-        print("7. Refresh stats")
+        print("7. Show model priorities")
+        print("8. Promote model priority")
+        print("9. Refresh stats")
         print("0. Exit")
         try:
             choice = input("Select an option: ").strip()
@@ -236,7 +330,14 @@ def run_interactive_panel(
         elif choice == "6":
             _prompt_toggle_debug(env_path, settings)
             settings = _reload(settings)
-        elif choice in {"7", ""}:
+        elif choice == "7":
+            print()
+            print(render_model_priorities(registry, limit=10))
+            _pause_for_enter()
+        elif choice == "8":
+            _prompt_promote_model_priority(settings.models_file, registry)
+            registry = _reload_registry(settings.models_file)
+        elif choice in {"9", ""}:
             continue
         elif choice == "0":
             return
@@ -400,6 +501,32 @@ def _prompt_provider_cost_order(
         print(f"Error: {exc}")
 
 
+def _prompt_promote_model_priority(models_file: str | Path, registry: ModelRegistry) -> None:
+    """Interactive prompt for moving a model to the top catalog priority."""
+    rows = model_priorities(registry, limit=20)
+    print()
+    print(render_model_priorities(registry, limit=20))
+    value = input("Model number or exact name to promote, Enter to cancel: ").strip()
+    if not value:
+        print("No changes.")
+        return
+
+    model_name = value
+    if value.isdigit():
+        index = int(value)
+        if 1 <= index <= len(rows):
+            model_name = rows[index - 1].name
+        else:
+            print("Invalid model number.")
+            return
+
+    try:
+        promote_model_priority(models_file, model_name)
+        print(f"Promoted {model_name} to priority 1 in {models_file}")
+    except Exception as exc:
+        print(f"Error: {exc}")
+
+
 def _prompt_view_logs(settings: Settings) -> None:
     """Follow recent log entries until interrupted."""
     import os
@@ -546,6 +673,12 @@ def _reload(settings: Settings) -> Settings:
     return reload_settings()
 
 
+def _reload_registry(models_file: str | Path) -> ModelRegistry:
+    from llmrouter.core.registry import load_model_registry
+
+    return load_model_registry(models_file)
+
+
 def _normalize_provider_order(providers: list[str]) -> list[str]:
     if not providers:
         raise ValueError("provider order cannot be empty")
@@ -555,6 +688,54 @@ def _normalize_provider_order(providers: list[str]) -> list[str]:
         if value not in normalized:
             normalized.append(value)
     return normalized
+
+
+def _model_blocks(path: Path) -> list[_ModelBlock]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    starts: list[int] = []
+    name_pattern = re.compile(r"^(\s*)-\s+name:\s+(.+?)\s*$")
+    priority_pattern = re.compile(r"^\s+priority:\s+(\d+)\s*$")
+
+    for index, line in enumerate(lines):
+        if name_pattern.match(line):
+            starts.append(index)
+
+    blocks: list[_ModelBlock] = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        name_match = name_pattern.match(lines[start])
+        if name_match is None:
+            continue
+        name = _strip_yaml_scalar(name_match.group(2))
+        priority = 10
+        priority_line_index: int | None = None
+        for index in range(start + 1, end):
+            priority_match = priority_pattern.match(lines[index])
+            if priority_match is not None:
+                priority = int(priority_match.group(1))
+                priority_line_index = index
+                break
+        blocks.append(
+            _ModelBlock(
+                name=name,
+                priority=priority,
+                name_line_index=start,
+                priority_line_index=priority_line_index,
+            )
+        )
+    return blocks
+
+
+def _strip_yaml_scalar(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        return stripped[1:-1]
+    return stripped
+
+
+def _line_indent(value: str) -> str:
+    match = re.match(r"^(\s*)", value)
+    return match.group(1) if match is not None else ""
 
 
 def _table_exists(db: sqlite3.Connection, table: str) -> bool:

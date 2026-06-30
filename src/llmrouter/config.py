@@ -72,7 +72,7 @@ class RoutingConfig(BaseModel):
     strategy: RoutingStrategy = RoutingStrategy.COST
     fallback_count: int = 2
     provider_cost_order: list[str] = Field(
-        default_factory=lambda: ["nvidia", "zai", "ollama"],
+        default_factory=lambda: ["zai", "ollama", "nvidia"],
         description="Provider preference used to break cost ties.",
     )
     max_cost_per_request: float | None = None

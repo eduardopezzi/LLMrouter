@@ -9,6 +9,8 @@ import sys
 import uvicorn
 
 from llmrouter.cli_panel import (
+    promote_model_priority,
+    render_model_priorities,
     render_panel_summary,
     run_interactive_panel,
     set_fallback_count,
@@ -150,6 +152,23 @@ def _parse_args() -> argparse.Namespace:
         help="Print current routing configuration and statistics, then exit.",
     )
     panel_parser.add_argument(
+        "--list-model-priorities",
+        action="store_true",
+        help="Print the highest-priority models, then exit.",
+    )
+    panel_parser.add_argument(
+        "--priority-limit",
+        type=int,
+        default=10,
+        help="Number of model priorities to print with --list-model-priorities.",
+    )
+    panel_parser.add_argument(
+        "--promote-model",
+        type=str,
+        default=None,
+        help="Move a model to priority 1 in the model catalog, then exit.",
+    )
+    panel_parser.add_argument(
         "--set-strategy",
         choices=["cost", "quality", "balanced", "latency"],
         default=None,
@@ -246,8 +265,18 @@ def main() -> None:
         return
 
     if args.command == "panel":
-        registry = build_registry(args.models_file or settings.models_file)
+        models_file = args.models_file or settings.models_file
+        registry = build_registry(models_file)
         changed = False
+        if args.list_model_priorities:
+            print(render_model_priorities(registry, limit=args.priority_limit))
+            return
+        if args.promote_model:
+            promote_model_priority(models_file, args.promote_model)
+            print(f"Promoted model to priority 1: {args.promote_model}")
+            registry = build_registry(models_file)
+            print(render_model_priorities(registry, limit=args.priority_limit))
+            return
         if args.set_strategy:
             set_routing_strategy(args.env_file, args.set_strategy)
             print(f"Updated routing strategy: {args.set_strategy}")

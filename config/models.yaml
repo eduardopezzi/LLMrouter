@@ -25,7 +25,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "migration"]
-    priority: 1
+    priority: 2
     description: "Kimi-K2.7-Code — Tech Lead sênior focado em correções profundas e migrações complexas de ecossistema."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -36,7 +36,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["architecture", "review", "security_audit", "fix"]
-    priority: 2
+    priority: 3
     description: "DeepSeek-V4-Pro — Raciocínio lógico (MoE/MLA) impecável para auditoria de segurança e System Design."
     max_tokens: 1000000
     prompt_cost_per_1m_tokens: 0
@@ -47,7 +47,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["test_generation", "summarization", "refactoring"]
-    priority: 3
+    priority: 4
     description: "DeepSeek V4 Flash — MoE eficiente com contexto longo, rapido para testes, resumos e refatoracoes pontuais."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -58,7 +58,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["test_generation", "refactoring"]
-    priority: 4
+    priority: 5
     description: "Qwen 3 Coder 480B — Engenheiro especialista em grandes refatorações e suítes completas de testes."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -69,7 +69,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["test_generation", "fix", "migration"]
-    priority: 5
+    priority: 6
     description: "GLM-5.2 — Alta densidade de token. Perfeito para converter bases inteiras de código e aplicar patches."
     max_tokens: 1000000
     prompt_cost_per_1m_tokens: 0
@@ -80,7 +80,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["fix", "refactoring"]
-    priority: 6
+    priority: 7
     description: "Cohere North Mini Code (30B) — Especialista ultrarrápido em automações agênticas locais e patches diretos."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -91,7 +91,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["test_generation", "documentation"]
-    priority: 7
+    priority: 8
     description: "Qwen 3.6 (27B) — Escrita ágil e precisa de documentações técnicas de arquivos múltiplos."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -102,7 +102,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "refactoring"]
-    priority: 8
+    priority: 9
     description: "Gemma 4 (31B) — Modelo de nuvem nativo do Ollama com excelente capacidade de agenciamento de código."
     max_tokens: 32000
     prompt_cost_per_1m_tokens: 0
@@ -113,7 +113,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["summarization", "documentation"]
-    priority: 9
+    priority: 10
     description: "Qwen 2.5 Coder 3B — Extremamente rápido e leve para resumos de commits e geração de Docstrings simples."
     max_tokens: 32768
     prompt_cost_per_1m_tokens: 0
@@ -124,7 +124,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["review", "fix"]
-    priority: 10
+    priority: 11
     description: "DeepSeek V3.2 — MoE cloud com thinking e tools, raciocinio avancado para review e correcoes."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -135,7 +135,7 @@ models:
     provider: "ollama"
     api_base: "http://localhost:11434"
     roles: ["test_generation", "summarization"]
-    priority: 11
+    priority: 12
     description: "DeepSeek V3.1 — MoE cloud com thinking e tools, versatil para geracao de testes e resumos."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -149,7 +149,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["architecture", "review", "security_audit", "fix"]
-    priority: 20
+    priority: 13
     description: "Nemotron 3 Ultra 550B — Modelo massivo ideal para auditorias pesadas de código e infraestrutura."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -160,7 +160,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["review", "fix", "migration"]
-    priority: 21
+    priority: 14
     description: "Kimi K2.6 via NVIDIA NIM — Excelente para lidar com contextos de migração horizontal de longo prazo."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -171,7 +171,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["architecture", "review", "fix", "security_audit"]
-    priority: 22
+    priority: 15
     description: "DeepSeek V4 Pro — Fallback de alto nível para segurança e arquitetura na infraestrutura NVIDIA."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -182,7 +182,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["refactoring", "test_generation"]
-    priority: 23
+    priority: 16
     description: "Gemma 4 31B It — Endpoint nativo NVIDIA para refatorações ágeis e forte barreira de código."
     max_tokens: 32000
     prompt_cost_per_1m_tokens: 0
@@ -193,7 +193,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["test_generation", "refactoring"]
-    priority: 24
+    priority: 17
     description: "DeepSeek V4 Flash — Respostas rápidas para refatorações pontuais e geração de testes em lote."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -204,7 +204,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["documentation", "summarization"]
-    priority: 25
+    priority: 18
     description: "Step-3.7-Flash — Modelo esparso MoE voltado para processamento e documentação em larga escala."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -215,7 +215,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["summarization", "documentation"]
-    priority: 26
+    priority: 19
     description: "Mistral Medium 3.5 128B — Capacidade linguística apurada para documentações limpas e resumos estruturados."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -226,7 +226,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["review", "fix", "test_generation", "documentation", "summarization"]
-    priority: 27
+    priority: 20
     description: "MiniMax-M3 — Canivete suíço multimodal de redundância."
     max_tokens: 8192
     prompt_cost_per_1m_tokens: 0
@@ -237,7 +237,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["summarization"]
-    priority: 28
+    priority: 21
     description: "Nemotron 3 Nano Omni 30B — Fallback leve focado exclusivamente em resumos rápidos."
     max_tokens: 8192
     prompt_cost_per_1m_tokens: 0
@@ -250,7 +250,7 @@ models:
   - name: "zhipu/glm-5.2"
     provider: "zai"
     roles: ["review", "fix", "test_generation", "refactoring", "migration"]
-    priority: 30
+    priority: 1
     description: "GLM-5.2 via Z AI — Nova geração com alta densidade por token para reestruturação ativa de código."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0
@@ -260,7 +260,7 @@ models:
   - name: "zhipu/glm-5.1"
     provider: "zai"
     roles: ["review", "fix", "test_generation", "summarization", "documentation"]
-    priority: 31
+    priority: 22
     description: "GLM-5.1 via Z AI — Fallback estável generalista para cobertura completa das tarefas."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0

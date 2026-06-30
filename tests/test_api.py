@@ -4,8 +4,8 @@ import json
 import logging
 from typing import Any
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 from llmrouter.api.routes import create_app
 from llmrouter.core.registry import ModelRegistry

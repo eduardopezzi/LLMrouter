@@ -12,7 +12,9 @@ from llmrouter.cli_panel import (
     _read_log_since,
     _read_log_tail,
     observation_stats,
+    promote_model_priority,
     render_current_settings,
+    render_model_priorities,
     render_panel_summary,
     set_fallback_count,
     set_provider_cost_order,
@@ -55,9 +57,73 @@ def test_panel_renders_catalog_and_empty_observation_stats(tmp_path) -> None:
 
     assert "LLMrouter CLI Panel" in summary
     assert "strategy: cost" in summary
-    assert "provider_cost_order: nvidia, zai, ollama" in summary
+    assert "provider_cost_order: zai, ollama, nvidia" in summary
     assert "providers: nvidia=1" in summary
     assert "observations: 0" in summary
+
+
+def test_render_model_priorities_shows_ordered_catalog() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="third",
+                provider=Provider.OLLAMA,
+                tier=Tier.T2,
+                priority=3,
+                capabilities=frozenset({"documentation"}),
+            ),
+            ModelInfo(
+                name="first",
+                provider=Provider.NVIDIA,
+                tier=Tier.T3,
+                priority=1,
+                capabilities=frozenset({"review"}),
+            ),
+            ModelInfo(
+                name="second",
+                provider=Provider.ZAI,
+                tier=Tier.T1,
+                priority=2,
+                capabilities=frozenset({"summarization"}),
+            ),
+        )
+    )
+
+    output = render_model_priorities(registry, limit=2)
+
+    assert "Top 2 model priorities" in output
+    assert "1. priority=1" in output
+    assert "first provider=nvidia tier=T3 roles=review" in output
+    assert "2. priority=2" in output
+    assert "second provider=zai tier=T1 roles=summarization" in output
+    assert "third" not in output
+
+
+def test_promote_model_priority_updates_catalog_without_dropping_comments(tmp_path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """# keep this comment
+models:
+  - name: "alpha"
+    provider: "ollama"
+    priority: 1
+  - name: "beta"
+    provider: "ollama"
+    priority: 2
+  - name: "gamma"
+    provider: "ollama"
+    priority: 3
+""",
+        encoding="utf-8",
+    )
+
+    promote_model_priority(models_file, "gamma")
+
+    body = models_file.read_text(encoding="utf-8")
+    assert "# keep this comment" in body
+    assert '  - name: "alpha"\n    provider: "ollama"\n    priority: 2' in body
+    assert '  - name: "beta"\n    provider: "ollama"\n    priority: 3' in body
+    assert '  - name: "gamma"\n    provider: "ollama"\n    priority: 1' in body
 
 
 def test_observation_stats_reads_sqlite_database(tmp_path) -> None:
@@ -148,7 +214,7 @@ def test_render_current_settings_shows_all_sections(tmp_path) -> None:
     assert "cost" in output
     assert "fallback_count:" in output
     assert "2" in output
-    assert "provider_cost_order: nvidia, zai, ollama" in output
+    assert "provider_cost_order: zai, ollama, nvidia" in output
     assert "Scorer weights" in output
     assert "Server" in output
     assert "host: 0.0.0.0" in output

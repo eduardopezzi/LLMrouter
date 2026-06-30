@@ -10,12 +10,12 @@ def test_load_model_registry_from_catalog() -> None:
 
     assert len(registry.models) == 22
     first = registry.models[0]
-    assert first.name == "ollama/kimi-k2.7-code:cloud"
-    assert first.provider == Provider.OLLAMA
+    assert first.name == "zhipu/glm-5.2"
+    assert first.provider == Provider.ZAI
     assert first.tier == Tier.T3
     assert "review" in first.capabilities
     assert first.cost_per_1k_input == 0
-    assert first.api_base == "http://localhost:11434"
+    assert first.api_base is None
 
 
 def test_provider_model_name_removes_catalog_namespace() -> None:
