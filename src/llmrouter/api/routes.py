@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
@@ -39,21 +39,26 @@ _logger = get_logger("llmrouter.api")
 
 
 class ChatMessagePayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     role: str
-    content: str | list[dict[str, Any]]
+    content: str | list[Any] | None = None
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
 
 
 class ChatCompletionPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     model: str | None = None
     messages: list[ChatMessagePayload]
-    temperature: float = 1.0
+    temperature: float | None = 1.0
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     stream: bool = False
-    top_p: float = 1.0
-    stop: list[str] | None = None
+    top_p: float | None = 1.0
+    stop: str | list[str] | None = None
     # Pass-through fields for OpenAI-compatible clients (Cline, etc.)
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any | None = None
@@ -518,7 +523,8 @@ def _extract_delta_text(chunk: dict[str, Any], accumulator: list[str]) -> None:
 
 def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
     # Merge explicit pass-through fields into extra
-    extra = dict(payload.extra)
+    extra = dict(payload.model_extra or {})
+    extra.update(payload.extra)
     if payload.tools is not None:
         extra["tools"] = payload.tools
     if payload.tool_choice is not None:
@@ -544,17 +550,31 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
     if payload.llmrouter is not None:
         extra["llmrouter"] = payload.llmrouter
 
-    def _flatten_content(content: str | list[dict[str, Any]]) -> str:
+    def _flatten_content(content: Any) -> str:
         """Flatten content array to a single string for provider compatibility."""
+        if content is None:
+            return ""
         if isinstance(content, str):
             return content
         parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                    continue
+                if not isinstance(block, dict):
+                    continue
                 text = block.get("text") or block.get("content") or ""
                 if isinstance(text, str) and text:
                     parts.append(text)
         return "\n".join(parts)
+
+    def _normalize_stop(stop: str | list[str] | None) -> list[str] | None:
+        if stop is None:
+            return None
+        if isinstance(stop, str):
+            return [stop]
+        return stop
 
     return ChatRequest(
         model=payload.model,
@@ -568,11 +588,11 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
             )
             for message in payload.messages
         ],
-        temperature=payload.temperature,
-        max_tokens=payload.max_tokens,
+        temperature=payload.temperature if payload.temperature is not None else 1.0,
+        max_tokens=payload.max_tokens or payload.max_completion_tokens,
         stream=payload.stream,
-        top_p=payload.top_p,
-        stop=payload.stop,
+        top_p=payload.top_p if payload.top_p is not None else 1.0,
+        stop=_normalize_stop(payload.stop),
         extra=extra,
     )
 

@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from fastapi.testclient import TestClient
+import pytest
 
 from llmrouter.api.routes import create_app
 from llmrouter.core.registry import ModelRegistry
@@ -23,9 +24,11 @@ from llmrouter.evaluator.feedback import FeedbackReport
 
 class FakeProxy:
     def __init__(self) -> None:
+        self.last_request = None
         self.last_decision = None
 
     async def chat_completion(self, request: ChatRequest, decision: Any) -> ChatResponse:
+        self.last_request = request
         self.last_decision = decision
         return ChatResponse(
             id="chatcmpl-test",
@@ -38,7 +41,13 @@ class FakeProxy:
 
 
 class FakeStreamingProxy:
+    def __init__(self) -> None:
+        self.last_request = None
+        self.last_decision = None
+
     async def stream_chat_completion(self, request: ChatRequest, decision: Any) -> Any:
+        self.last_request = request
+        self.last_decision = decision
         yield {
             "choices": [
                 {
@@ -103,6 +112,109 @@ def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
     assert 'POST /v1/chat/completions HTTP/1.1" 200 OK' in caplog.text
     assert "selected_model=cheap" in caplog.text
     assert "provider_model=cheap" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("payload_patch", "expected"),
+    [
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "use a tool"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"README.md"}',
+                                },
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "file contents"},
+                ],
+            },
+            {"message_index": 1, "content": "", "has_tool_calls": True},
+        ),
+        (
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "first block"},
+                            "second block",
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,AA=="},
+                            },
+                        ],
+                    }
+                ],
+            },
+            {"message_index": 0, "content": "first block\nsecond block"},
+        ),
+        ({"stop": "</tool_call>"}, {"stop": ["</tool_call>"]}),
+        ({"temperature": None, "top_p": None}, {"temperature": 1.0, "top_p": 1.0}),
+        (
+            {
+                "max_completion_tokens": 128,
+                "parallel_tool_calls": True,
+                "reasoning_effort": "low",
+            },
+            {
+                "max_tokens": 128,
+                "extra": {
+                    "parallel_tool_calls": True,
+                    "reasoning_effort": "low",
+                },
+            },
+        ),
+    ],
+)
+def test_chat_completions_accepts_cline_openai_compatible_variants(
+    payload_patch: dict[str, Any],
+    expected: dict[str, Any],
+) -> None:
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    proxy = FakeProxy()
+    app = create_app(registry=registry, proxy=proxy)
+    client = TestClient(app)
+    payload = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "use a tool"}],
+        "stream": False,
+    }
+    payload.update(payload_patch)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert proxy.last_request is not None
+    if "message_index" in expected:
+        message = proxy.last_request.messages[expected["message_index"]]
+        assert message.content == expected["content"]
+        if expected.get("has_tool_calls"):
+            assert message.tool_calls is not None
+    if "stop" in expected:
+        assert proxy.last_request.stop == expected["stop"]
+    if "temperature" in expected:
+        assert proxy.last_request.temperature == expected["temperature"]
+    if "top_p" in expected:
+        assert proxy.last_request.top_p == expected["top_p"]
+    if "max_tokens" in expected:
+        assert proxy.last_request.max_tokens == expected["max_tokens"]
+    for key, value in expected.get("extra", {}).items():
+        assert proxy.last_request.extra[key] == value
 
 
 def test_chat_completions_publishes_precog_observation() -> None:
@@ -334,4 +446,54 @@ def test_streaming_chunks_are_normalized_for_openai_clients() -> None:
     assert body["object"] == "chat.completion.chunk"
     assert body["model"] == "cheap"
     assert body["choices"][0]["delta"] == {"role": "assistant", "content": "hello"}
+    assert lines[-1] == "data: [DONE]"
+
+
+def test_streaming_chat_completions_accepts_cline_tool_call_payload() -> None:
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    proxy = FakeStreamingProxy()
+    app = create_app(registry=registry, proxy=proxy)
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [
+                {"role": "user", "content": "use a tool"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "file contents"},
+            ],
+            "stream": True,
+            "temperature": None,
+            "top_p": None,
+            "stop": "</tool_call>",
+            "max_completion_tokens": 128,
+            "parallel_tool_calls": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line for line in response.iter_lines() if line.startswith("data: ")]
+
+    assert proxy.last_request is not None
+    assert proxy.last_request.messages[1].content == ""
+    assert proxy.last_request.messages[1].tool_calls is not None
+    assert proxy.last_request.stop == ["</tool_call>"]
+    assert proxy.last_request.max_tokens == 128
+    assert proxy.last_request.temperature == 1.0
+    assert proxy.last_request.top_p == 1.0
+    assert proxy.last_request.extra["parallel_tool_calls"] is True
     assert lines[-1] == "data: [DONE]"
