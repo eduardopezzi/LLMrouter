@@ -154,3 +154,43 @@ async def test_cost_strategy_uses_configured_provider_order_on_equal_cost() -> N
 
     assert decision.primary.name == "ollama/reviewer"
     assert [model.name for model in decision.fallbacks] == ["nvidia/reviewer"]
+
+
+@pytest.mark.asyncio
+async def test_router_deduplicates_fallback_models_by_name() -> None:
+    duplicated = ModelInfo(
+        name="zhipu/glm",
+        provider=Provider.ZAI,
+        tier=Tier.T3,
+        capabilities=frozenset({"review"}),
+        priority=1,
+    )
+    registry = ModelRegistry(
+        models=(
+            duplicated,
+            duplicated,
+            ModelInfo(
+                name="ollama/reviewer",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=2,
+            ),
+        )
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this migration architecture.")],
+    )
+    constraints = RoutingConstraints(required_capabilities=frozenset({"review"}))
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        RoutingStrategy.COST,
+        provider_cost_order=["zai", "ollama"],
+    )
+
+    decision = await router.route(request, constraints)
+
+    assert decision.primary.name == "zhipu/glm"
+    assert [model.name for model in decision.fallbacks] == ["ollama/reviewer"]

@@ -35,21 +35,34 @@ class OpenAICompatibleProvider(BaseProvider):
             )
             response.raise_for_status()
         except httpx.ConnectError as exc:
-            _logger.debug("%s connection FAILED in %.0fms", self._name, (time.perf_counter() - started) * 1000)
+            _logger.debug(
+                "%s connection FAILED in %.0fms",
+                self._name,
+                (time.perf_counter() - started) * 1000,
+            )
             raise RetryableProviderError(
                 f"Could not connect to {self._name} at {self._base_url}: {exc}",
                 status_code=503,
                 provider=self._name,
             ) from exc
         except httpx.TimeoutException as exc:
-            _logger.debug("%s TIMEOUT after %.0fms", self._name, (time.perf_counter() - started) * 1000)
+            _logger.debug(
+                "%s TIMEOUT after %.0fms",
+                self._name,
+                (time.perf_counter() - started) * 1000,
+            )
             raise RetryableProviderError(
                 f"Request to {self._name} timed out after {self._timeout}s: {exc}",
                 status_code=504,
                 provider=self._name,
             ) from exc
         except httpx.HTTPStatusError as exc:
-            _logger.debug("%s HTTP %d in %.0fms", self._name, exc.response.status_code, (time.perf_counter() - started) * 1000)
+            _logger.debug(
+                "%s HTTP %d in %.0fms",
+                self._name,
+                exc.response.status_code,
+                (time.perf_counter() - started) * 1000,
+            )
             raise ProviderError(
                 f"{self._name} returned HTTP {exc.response.status_code}: {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
@@ -85,6 +98,13 @@ class OpenAICompatibleProvider(BaseProvider):
                 json=payload,
                 headers=self._build_headers(),
             ) as response:
+                if response.status_code >= 400:
+                    error_body = (await response.aread()).decode(errors="replace")
+                    raise ProviderError(
+                        f"{self._name} returned HTTP {response.status_code}: {error_body[:500]}",
+                        status_code=response.status_code,
+                        provider=self._name,
+                    )
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -120,12 +140,6 @@ class OpenAICompatibleProvider(BaseProvider):
             raise RetryableProviderError(
                 f"Stream request to {self._name} timed out after {self._timeout}s: {exc}",
                 status_code=504,
-                provider=self._name,
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise ProviderError(
-                f"{self._name} returned HTTP {exc.response.status_code}: {exc.response.text[:500]}",
-                status_code=exc.response.status_code,
                 provider=self._name,
             ) from exc
         except httpx.HTTPError as exc:

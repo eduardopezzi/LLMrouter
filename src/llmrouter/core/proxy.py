@@ -29,7 +29,7 @@ class ProviderProxy:
         decision: RoutingDecision,
     ) -> ChatResponse:
         """Call the primary model and configured fallbacks."""
-        attempts = [decision.primary, *decision.fallbacks]
+        attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
 
         for i, model in enumerate(attempts):
@@ -57,12 +57,17 @@ class ProviderProxy:
                 )
                 return await provider.chat_completion(request, model.provider_model_name)
             except ProviderError as exc:
+                fallback_message = (
+                    f" → falling back to '{attempts[i + 1].name}'"
+                    if i + 1 < len(attempts)
+                    else " (no more fallbacks)"
+                )
                 _logger.warning(
                     "Provider '%s' failed: %s (status=%d)%s",
                     model.provider.value,
                     exc,
                     exc.status_code,
-                    f" → falling back to '{attempts[i + 1].name}'" if i + 1 < len(attempts) else " (no more fallbacks)",
+                    fallback_message,
                 )
                 last_error = exc
 
@@ -80,7 +85,7 @@ class ProviderProxy:
         Yields parsed SSE chunk dictionaries in OpenAI format. On retryable errors
         from the primary model, falls back to the next model in the decision chain.
         """
-        attempts = [decision.primary, *decision.fallbacks]
+        attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
 
         for i, model in enumerate(attempts):
@@ -114,12 +119,17 @@ class ProviderProxy:
                     yield chunk
                 return  # Success — stop trying fallbacks
             except ProviderError as exc:
+                fallback_message = (
+                    f" → falling back to '{attempts[i + 1].name}'"
+                    if i + 1 < len(attempts)
+                    else " (no more fallbacks)"
+                )
                 _logger.warning(
                     "Stream provider '%s' failed: %s (status=%d)%s",
                     model.provider.value,
                     exc,
                     exc.status_code,
-                    f" → falling back to '{attempts[i + 1].name}'" if i + 1 < len(attempts) else " (no more fallbacks)",
+                    fallback_message,
                 )
                 last_error = exc
                 continue
@@ -132,3 +142,15 @@ class ProviderProxy:
         """Close all provider clients."""
         for provider in self._providers.values():
             await provider.close()
+
+
+def _unique_attempts(models: list[Any]) -> list[Any]:
+    attempts: list[Any] = []
+    seen: set[str] = set()
+    for model in models:
+        key = model.name
+        if key in seen:
+            continue
+        attempts.append(model)
+        seen.add(key)
+    return attempts

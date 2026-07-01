@@ -6,6 +6,7 @@ import pytest
 from llmrouter.config import Settings
 from llmrouter.core.registry import load_model_registry
 from llmrouter.core.types import ChatMessage, ChatRequest, Provider
+from llmrouter.providers.base import ProviderError
 from llmrouter.providers.ollama_provider import OllamaProvider
 from llmrouter.runtime import build_providers
 
@@ -63,3 +64,29 @@ def test_runtime_builds_ollama_without_api_key() -> None:
     providers = build_providers(Settings(), registry)
 
     assert Provider.OLLAMA in providers
+
+
+@pytest.mark.asyncio
+async def test_streaming_http_error_reads_error_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "bad model"}})
+
+    provider = OllamaProvider(base_url="http://ollama.test")
+    provider._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://ollama.test",
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        async for _ in provider.stream_completion(
+            ChatRequest(
+                model=None,
+                messages=[ChatMessage(role="user", content="hello")],
+            ),
+            "missing-model",
+        ):
+            pass
+
+    await provider.close()
+    assert exc_info.value.status_code == 400
+    assert "bad model" in str(exc_info.value)

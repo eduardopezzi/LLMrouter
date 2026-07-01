@@ -234,7 +234,7 @@ class MultiModelRouter:
         )
 
         # Apply selection strategy
-        ordered = self._strategy.select(candidates, constraints)
+        ordered = _unique_models(self._strategy.select(candidates, constraints))
         primary = ordered[0]
         fallbacks = ordered[1 : 1 + self._fallback_count]
 
@@ -302,7 +302,7 @@ class MultiModelRouter:
         all_models = self._registry.all()
         if primary in all_models:
             all_models = [m for m in all_models if m.name != primary.name]
-        ordered = self._strategy.select(all_models, constraints)
+        ordered = _unique_models(self._strategy.select(all_models, constraints))
         return ordered[: self._fallback_count]
 
     @staticmethod
@@ -328,3 +328,14 @@ def _provider_cost_rank(provider_cost_order: list[str] | None) -> dict[Provider,
     for provider, rank in _PROVIDER_COST_RANK.items():
         result.setdefault(provider, len(result) + rank)
     return result
+
+
+def _unique_models(models: list[ModelInfo]) -> list[ModelInfo]:
+    unique: list[ModelInfo] = []
+    seen: set[str] = set()
+    for model in models:
+        if model.name in seen:
+            continue
+        unique.append(model)
+        seen.add(model.name)
+    return unique
