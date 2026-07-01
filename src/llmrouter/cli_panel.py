@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -14,7 +15,8 @@ from pathlib import Path
 
 from llmrouter.config import Settings
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.types import Provider, RoutingStrategy
+from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
+from llmrouter.providers.ollama_provider import OllamaProvider
 
 ROUTING_STRATEGY_ENV = "LLMROUTER_ROUTING__STRATEGY"
 FALLBACK_COUNT_ENV = "LLMROUTER_ROUTING__FALLBACK_COUNT"
@@ -150,6 +152,100 @@ def promote_model_priority(models_file: str | Path, model_name: str) -> None:
         lines[block.priority_line_index] = f"{indent}priority: {priority}"
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def set_model_priority_order(models_file: str | Path, ordered_model_names: list[str]) -> None:
+    """Apply a complete priority order to the catalog."""
+    path = Path(models_file)
+    blocks = _model_blocks(path)
+    if not blocks:
+        raise ValueError("models file does not contain model entries")
+
+    catalog_names = [block.name for block in blocks]
+    _validate_model_order(ordered_model_names, catalog_names)
+    new_priorities = {name: index for index, name in enumerate(ordered_model_names, 1)}
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for block in blocks:
+        priority = new_priorities[block.name]
+        if block.priority_line_index is None:
+            name_line = lines[block.name_line_index]
+            indent = _line_indent(name_line)
+            lines.insert(block.name_line_index + 1, f"{indent}  priority: {priority}")
+            for other in blocks:
+                if other.name_line_index > block.name_line_index:
+                    other.name_line_index += 1
+                if (
+                    other.priority_line_index is not None
+                    and other.priority_line_index > block.name_line_index
+                ):
+                    other.priority_line_index += 1
+            continue
+        current = lines[block.priority_line_index]
+        indent = _line_indent(current)
+        lines[block.priority_line_index] = f"{indent}priority: {priority}"
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def reset_model_priorities_to_catalog_order(models_file: str | Path) -> None:
+    """Reset priorities to the original model order in the YAML catalog."""
+    blocks = _model_blocks(Path(models_file))
+    if not blocks:
+        raise ValueError("models file does not contain model entries")
+    set_model_priority_order(models_file, [block.name for block in blocks])
+
+
+async def request_llm_model_priority_order(
+    settings: Settings,
+    registry: ModelRegistry,
+    *,
+    llm_model: str | None = None,
+) -> list[str]:
+    """Ask the evaluator LLM for a complete model priority order."""
+    models = registry.all()
+    if not models:
+        raise ValueError("models file does not contain model entries")
+    chat_model = llm_model or settings.evaluator.ollama.model
+
+    provider = OllamaProvider(
+        base_url=settings.evaluator.ollama.base_url,
+        timeout=settings.evaluator.ollama.timeout,
+    )
+    try:
+        response = await provider.chat_completion(
+            ChatRequest(
+                model=chat_model,
+                messages=[
+                    ChatMessage(
+                        role="system",
+                        content=(
+                            "You rank LLM router model catalogs. Return only strict JSON, "
+                            "with no markdown or commentary."
+                        ),
+                    ),
+                    ChatMessage(
+                        role="user",
+                        content=_build_llm_priority_prompt(
+                            models,
+                            strategy=settings.routing.strategy.value,
+                            provider_cost_order=settings.routing.provider_cost_order,
+                        ),
+                    ),
+                ],
+                temperature=settings.evaluator.ollama.temperature,
+                max_tokens=4096,
+                extra={"response_format": {"type": "json_object"}},
+            ),
+            chat_model,
+        )
+    finally:
+        await provider.close()
+
+    content = _response_text(response.choices)
+    ordered_names = _parse_llm_priority_order(content)
+    _validate_model_order(ordered_names, [model.name for model in models])
+    return ordered_names
 
 
 def update_env_file(env_path: str | Path, updates: dict[str, str]) -> None:
@@ -335,8 +431,7 @@ def run_interactive_panel(
             print(render_model_priorities(registry, limit=10))
             _pause_for_enter()
         elif choice == "8":
-            _prompt_promote_model_priority(settings.models_file, registry)
-            registry = _reload_registry(settings.models_file)
+            registry = _prompt_model_priority_panel(settings, registry)
         elif choice in {"9", ""}:
             continue
         elif choice == "0":
@@ -501,11 +596,41 @@ def _prompt_provider_cost_order(
         print(f"Error: {exc}")
 
 
+def _prompt_model_priority_panel(settings: Settings, registry: ModelRegistry) -> ModelRegistry:
+    """Submenu for model priority operations."""
+    while True:
+        print()
+        print("=== Promote model priority ===")
+        print(render_model_priorities(registry, limit=20))
+        print()
+        print("1. Promote a model to priority 1")
+        print("2. Reset priorities to original catalog order")
+        print("3. Ask evaluator LLM to reorder for current strategy")
+        print("0. Return to main menu")
+        try:
+            choice = input("Select an option: ").strip()
+        except EOFError:
+            return registry
+
+        if choice == "1":
+            _prompt_promote_model_priority(settings.models_file, registry)
+            registry = _reload_registry(settings.models_file)
+        elif choice == "2":
+            _prompt_reset_model_priorities(settings.models_file)
+            registry = _reload_registry(settings.models_file)
+        elif choice == "3":
+            _prompt_llm_model_priority_order(settings, registry)
+            registry = _reload_registry(settings.models_file)
+        elif choice in {"0", ""}:
+            return registry
+        else:
+            print("Invalid option")
+
+
 def _prompt_promote_model_priority(models_file: str | Path, registry: ModelRegistry) -> None:
     """Interactive prompt for moving a model to the top catalog priority."""
     rows = model_priorities(registry, limit=20)
     print()
-    print(render_model_priorities(registry, limit=20))
     value = input("Model number or exact name to promote, Enter to cancel: ").strip()
     if not value:
         print("No changes.")
@@ -525,6 +650,78 @@ def _prompt_promote_model_priority(models_file: str | Path, registry: ModelRegis
         print(f"Promoted {model_name} to priority 1 in {models_file}")
     except Exception as exc:
         print(f"Error: {exc}")
+
+
+def _prompt_reset_model_priorities(models_file: str | Path) -> None:
+    """Interactive prompt for resetting priorities to catalog order."""
+    value = input("Reset priorities to the original YAML order? [y/N]: ").strip().lower()
+    if value not in {"y", "yes", "s", "sim"}:
+        print("No changes.")
+        return
+
+    try:
+        reset_model_priorities_to_catalog_order(models_file)
+        print(f"Reset priorities to original catalog order in {models_file}")
+    except Exception as exc:
+        print(f"Error: {exc}")
+
+
+def _prompt_llm_model_priority_order(settings: Settings, registry: ModelRegistry) -> None:
+    """Ask the configured evaluator LLM to reorder model priorities."""
+    default_llm_model = settings.evaluator.ollama.model
+    print()
+    print(
+        "This will ask the evaluator LLM "
+        f"({default_llm_model} at {settings.evaluator.ollama.base_url}) "
+        f"to reorder models for strategy '{settings.routing.strategy.value}'."
+    )
+    llm_model = _prompt_ollama_llm_model(registry, default_llm_model)
+    if llm_model is None:
+        print("No changes.")
+        return
+    value = input("Apply the LLM-suggested order if valid? [y/N]: ").strip().lower()
+    if value not in {"y", "yes", "s", "sim"}:
+        print("No changes.")
+        return
+
+    try:
+        ordered_names = asyncio.run(
+            request_llm_model_priority_order(settings, registry, llm_model=llm_model)
+        )
+        set_model_priority_order(settings.models_file, ordered_names)
+        print(f"Applied LLM-suggested priority order to {settings.models_file}")
+        print("New top priorities:")
+        print(render_model_priorities(_reload_registry(settings.models_file), limit=10))
+    except Exception as exc:
+        print(f"Error: {exc}")
+
+
+def _prompt_ollama_llm_model(registry: ModelRegistry, default_model: str) -> str | None:
+    """Prompt for the Ollama model used to rank priorities."""
+    ollama_models = [model for model in registry.all() if model.provider == Provider.OLLAMA]
+    if ollama_models:
+        print("Available Ollama models for the ranking request:")
+        ordered_ollama_models = sorted(ollama_models, key=lambda item: (item.priority, item.name))
+        for idx, model in enumerate(ordered_ollama_models, 1):
+            print(f"  {idx}) {model.name}")
+    value = input(
+        f"LLM model to ask, number/name, Enter for {default_model}, or 0 to cancel: "
+    ).strip()
+    if value == "0":
+        return None
+    if not value:
+        return default_model
+    if value.isdigit():
+        index = int(value)
+        ordered = sorted(ollama_models, key=lambda item: (item.priority, item.name))
+        if 1 <= index <= len(ordered):
+            return ordered[index - 1].provider_model_name
+        print("Invalid model number.")
+        return None
+    matched = next((model for model in ollama_models if model.name == value), None)
+    if matched is not None:
+        return matched.provider_model_name
+    return value
 
 
 def _prompt_view_logs(settings: Settings) -> None:
@@ -558,6 +755,117 @@ def _prompt_toggle_debug(env_path: str | Path, settings: Settings) -> None:
     update_env_file(env_path, {DEBUG_ENV: "true" if new_value else "false"})
     print(f"Debug mode: {'ENABLED' if new_value else 'DISABLED'}")
     print(f"Updated {DEBUG_ENV}={'true' if new_value else 'false'}")
+
+
+def _build_llm_priority_prompt(
+    models: list[ModelInfo],
+    *,
+    strategy: str,
+    provider_cost_order: list[str],
+) -> str:
+    strategy_guidance = {
+        "cost": (
+            "Prefer the lowest total token cost. Use provider_cost_order as a tie-breaker "
+            "when costs are equal, then prefer smaller/fast models."
+        ),
+        "quality": (
+            "Prefer the strongest and most capable models first. Use roles, context window, "
+            "tier, and descriptions as quality signals."
+        ),
+        "balanced": (
+            "Balance quality, breadth of roles, context window, and cost. Avoid putting an "
+            "expensive specialist ahead of a strong generalist unless the metadata justifies it."
+        ),
+        "latency": (
+            "Prefer likely faster models first. Favor local Ollama models and smaller models "
+            "when quality is similar."
+        ),
+    }.get(strategy, "Rank models according to the selected routing strategy.")
+    rows = []
+    for model in sorted(models, key=lambda item: (item.priority, item.name)):
+        rows.append(
+            {
+                "name": model.name,
+                "provider": model.provider.value,
+                "tier": model.tier.value,
+                "priority": model.priority,
+                "roles": sorted(model.capabilities),
+                "context_window": model.context_window,
+                "max_tokens": model.max_tokens,
+                "cost_ratio": model.cost_ratio,
+                "description": model.description,
+            }
+        )
+    return (
+        f"Current routing strategy: {strategy}\n"
+        f"Provider cost tie-break order: {', '.join(provider_cost_order)}\n"
+        f"Strategy guidance: {strategy_guidance}\n\n"
+        "Return a complete priority order for every model below. Lower position means higher "
+        "priority. Do not add, remove, rename, or duplicate models.\n\n"
+        "Respond exactly as JSON with this shape:\n"
+        '{"models":["exact model name","exact model name"]}\n\n'
+        f"Models:\n{json.dumps(rows, ensure_ascii=False, indent=2)}"
+    )
+
+
+def _response_text(choices: object) -> str:
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("LLM response did not include choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError("LLM response choice is not a mapping")
+    message = first.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+    text = first.get("text")
+    if isinstance(text, str):
+        return text
+    raise ValueError("LLM response did not include text content")
+
+
+def _parse_llm_priority_order(content: str) -> list[str]:
+    parsed: object
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+        if match is None:
+            raise ValueError("LLM response was not valid JSON") from None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise ValueError("LLM response was not valid JSON") from exc
+
+    if isinstance(parsed, dict):
+        models = parsed.get("models")
+    else:
+        models = parsed
+    if not isinstance(models, list) or not all(isinstance(item, str) for item in models):
+        raise ValueError('LLM response must contain a "models" list of strings')
+    return list(models)
+
+
+def _validate_model_order(ordered_model_names: list[str], catalog_names: list[str]) -> None:
+    expected = set(catalog_names)
+    received = set(ordered_model_names)
+    if len(ordered_model_names) != len(catalog_names):
+        raise ValueError(
+            f"model order must include exactly {len(catalog_names)} models; "
+            f"received {len(ordered_model_names)}"
+        )
+    if received != expected:
+        missing = sorted(expected - received)
+        extra = sorted(received - expected)
+        details = []
+        if missing:
+            details.append(f"missing: {', '.join(missing)}")
+        if extra:
+            details.append(f"unknown: {', '.join(extra)}")
+        raise ValueError("model order does not match catalog (" + "; ".join(details) + ")")
+    if len(received) != len(ordered_model_names):
+        raise ValueError("model order contains duplicate models")
 
 
 def _parse_provider_selection(value: str, available: list[str]) -> list[str]:

@@ -8,6 +8,7 @@ from llmrouter.cli_panel import (
     ROUTING_STRATEGY_ENV,
     _journalctl_follow_command,
     _log_file_end_offset,
+    _parse_llm_priority_order,
     _parse_provider_selection,
     _read_log_since,
     _read_log_tail,
@@ -16,7 +17,9 @@ from llmrouter.cli_panel import (
     render_current_settings,
     render_model_priorities,
     render_panel_summary,
+    reset_model_priorities_to_catalog_order,
     set_fallback_count,
+    set_model_priority_order,
     set_provider_cost_order,
     set_routing_strategy,
 )
@@ -124,6 +127,65 @@ models:
     assert '  - name: "alpha"\n    provider: "ollama"\n    priority: 2' in body
     assert '  - name: "beta"\n    provider: "ollama"\n    priority: 3' in body
     assert '  - name: "gamma"\n    provider: "ollama"\n    priority: 1' in body
+
+
+def test_set_model_priority_order_updates_all_priorities(tmp_path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """models:
+  - name: "alpha"
+    provider: "ollama"
+    priority: 1
+  - name: "beta"
+    provider: "ollama"
+    priority: 2
+  - name: "gamma"
+    provider: "ollama"
+    priority: 3
+""",
+        encoding="utf-8",
+    )
+
+    set_model_priority_order(models_file, ["beta", "gamma", "alpha"])
+
+    body = models_file.read_text(encoding="utf-8")
+    assert '  - name: "alpha"\n    provider: "ollama"\n    priority: 3' in body
+    assert '  - name: "beta"\n    provider: "ollama"\n    priority: 1' in body
+    assert '  - name: "gamma"\n    provider: "ollama"\n    priority: 2' in body
+
+
+def test_reset_model_priorities_to_catalog_order_uses_yaml_order(tmp_path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """models:
+  - name: "alpha"
+    provider: "ollama"
+    priority: 3
+  - name: "beta"
+    provider: "ollama"
+    priority: 1
+  - name: "gamma"
+    provider: "ollama"
+    priority: 2
+""",
+        encoding="utf-8",
+    )
+
+    reset_model_priorities_to_catalog_order(models_file)
+
+    body = models_file.read_text(encoding="utf-8")
+    assert '  - name: "alpha"\n    provider: "ollama"\n    priority: 1' in body
+    assert '  - name: "beta"\n    provider: "ollama"\n    priority: 2' in body
+    assert '  - name: "gamma"\n    provider: "ollama"\n    priority: 3' in body
+
+
+def test_parse_llm_priority_order_accepts_json_object() -> None:
+    assert _parse_llm_priority_order('{"models":["beta","alpha"]}') == ["beta", "alpha"]
+
+
+def test_parse_llm_priority_order_extracts_json_from_text() -> None:
+    content = 'Here is the order:\n{"models":["beta","alpha"]}\nDone.'
+    assert _parse_llm_priority_order(content) == ["beta", "alpha"]
 
 
 def test_observation_stats_reads_sqlite_database(tmp_path) -> None:
