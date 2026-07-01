@@ -162,6 +162,10 @@ class MultiModelRouter:
         self._strategy = get_strategy(strategy, provider_cost_order)
         self._fallback_count = fallback_count
 
+    def replace_registry(self, registry: ModelRegistry) -> None:
+        """Replace the live model registry used for future routing decisions."""
+        self._registry = registry
+
     async def route(
         self,
         request: ChatRequest,

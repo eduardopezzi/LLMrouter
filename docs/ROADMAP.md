@@ -3,6 +3,13 @@
 | Item | Status | Implantacao |
 | --- | ---: | --- |
 | **5. Cross-Repository** | 100% | `ContractRegistry`, `BreakingChangeDetector`, snapshot versionavel, scripts `make` e CLI implementados e cobertos por testes |
+| **6. Model Health & Performance Tracking** | 0% | `ModelHealthTracker` com métricas em tempo real (latência P50/P99, taxa de erro, qualidade média, custo real) e `HealthScore` para roteamento adaptativo |
+| **7. Semantic Prompt Routing via Embeddings** | 0% | `SemanticPromptScorer` usando sentence-transformers para classificar prompts semanticamente por role/tarefa e rotear ao tier/modelo ideal |
+| **8. Response Caching com Chave Semântica** | 0% | Cache LRU/TTL com embedding do prompt como chave; reutiliza respostas para prompts semanticamente equivalentes (>0.95 cosine) |
+| **9. Canary/Blue-Green Model Rollout** | 0% | Campo `rollout_percentage` no `ModelInfo`; router faz seleção ponderada; CLI para configurar rollout gradual (ex.: 5% → 25% → 100%) |
+| **10. Cost Budgets & Alertas por Projeto/Usuário** | 0% | `BudgetManager` com backend Redis/SQLite; headers `X-Project-ID`/`X-User-ID`; auto-fallback para modelos gratuitos ao exceder budget |
+
+---
 
 ## 5. Cross-Repository
 
@@ -13,3 +20,79 @@ O fluxo cross-repository esta operacional de ponta a ponta:
 - CLI: `llmrouter export-contracts`, `llmrouter check-contracts`, `llmrouter diff-contracts`.
 - Makefile: `make contracts-export`, `make contracts-check`, `make contracts-diff`.
 - Testes: `tests/test_cross_repository.py`.
+
+---
+
+## 6. Model Health & Performance Tracking
+
+**Objetivo**: Tornar o roteamento adaptativo baseado em performance real (latência, erro, qualidade) e não apenas configuração estática.
+
+**Componentes novos**:
+- `src/llmrouter/core/health.py` — `ModelHealthTracker`, `ModelHealth` dataclass, `HealthScore` composite
+- Integração no `MultiModelRouter._get_candidates()` e estratégias (`BalancedStrategy`, `CostStrategy`)
+- Persistência em SQLite/Redis com TTL sliding window
+- Endpoint `/health/models` e CLI `llmrouter health` para inspeção
+
+**Métricas coletadas por modelo**:
+- Latência P50, P95, P99 (ms)
+- Taxa de erro (provider errors, timeouts, validation errors)
+- Score médio de qualidade (via evaluator/PRecog feedback)
+- Custo real por request (USD)
+- Contagem de requests na janela deslizante (últimos N minutos)
+
+---
+
+## 7. Semantic Prompt Routing via Embeddings
+
+**Objetivo**: Substituir/complementar heurísticas de keywords por compreensão semântica real da tarefa.
+
+**Componentes novos**:
+- `src/llmrouter/core/semantic_scorer.py` — `SemanticPromptScorer` implementando `PromptScorer`
+- Embedder padrão: `sentence-transformers/all-MiniLM-L6-v2` (384-dim, ~80MB, CPU-friendly)
+- Task embeddings pré-computados por role: `review`, `architecture`, `test_generation`, `fix`, `security_audit`, `refactoring`, `documentation`, `summarization`, `migration`
+- Mapeamento similarity → tier + suggested role
+
+**Modo híbrido**: `HybridScorer` combina `PromptScorer` (rápido, rule-based) + `SemanticPromptScorer` (preciso) com peso configurável.
+
+---
+
+## 8. Response Caching com Chave Semântica
+
+**Objetivo**: Eliminar chamadas redundantes para prompts iguais/semanticamente equivalentes.
+
+**Componentes novos**:
+- `src/llmrouter/core/cache.py` — `SemanticCache` com backend Redis (produção) ou SQLite/LRU (dev)
+- Chave: `hash(embedding(prompt) + model + temperature + top_p + max_tokens)`
+- Busca exata → busca semântica (cosine > 0.95) → compute + store
+- TTL configurável por tier (T1: 1h, T2: 4h, T3: 24h)
+- Métricas: hit rate, tokens saved, cost saved
+- Endpoint `/cache/stats` e CLI `llmrouter cache stats`
+
+---
+
+## 9. Canary/Blue-Green Model Rollout
+
+**Objetivo**: Permitir promoção gradual e segura de novos modelos no catálogo.
+
+**Mudanças**:
+- `ModelInfo.rollout_percentage: float = 100.0` (0-100)
+- `MultiModelRouter._apply_rollout()` filtra candidatos por weighted random
+- CLI panel: opção "Set model rollout percentage" + `llmrouter panel --set-rollout <model> <pct>`
+- Log estruturado: `routing_decision.rollout_sampled=model_name:pct`
+- Rollback instantâneo: `rollout_percentage = 0`
+
+---
+
+## 10. Cost Budgets & Alertas por Projeto/Usuário
+
+**Objetivo**: Governança de custo multi-tenant com enforcement automático.
+
+**Componentes novos**:
+- `src/llmrouter/core/budget.py` — `BudgetManager` (Redis backend recomendado)
+- Headers: `X-Project-ID`, `X-User-ID` (opcional, fallback para `default`)
+- Configuração via `.env` ou API: `daily_limit_usd`, `monthly_limit_usd`, `alert_threshold_pct`
+- Comportamento ao exceder:
+  - `soft`: log warning + header `X-Budget-Warning`
+  - `hard`: auto-fallback para modelos Ollama (custo 0) + header `X-Budget-Exceeded`
+- Endpoints: `GET /v1/llmrouter/budgets/{project_id}`, `POST /v1/llmrouter/budgets`
+- CLI: `llmrouter budget set <project> --daily 10 --monthly 200`, `llmrouter budget status <project>`

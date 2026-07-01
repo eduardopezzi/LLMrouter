@@ -8,7 +8,7 @@ from llmrouter.core.registry import load_model_registry
 from llmrouter.core.types import ChatMessage, ChatRequest, Provider
 from llmrouter.providers.base import ProviderError
 from llmrouter.providers.ollama_provider import OllamaProvider
-from llmrouter.runtime import build_providers
+from llmrouter.runtime import _is_insufficient_balance_error, build_providers
 
 
 @pytest.mark.asyncio
@@ -64,6 +64,17 @@ def test_runtime_builds_ollama_without_api_key() -> None:
     providers = build_providers(Settings(), registry)
 
     assert Provider.OLLAMA in providers
+
+
+def test_runtime_detects_zai_insufficient_balance_error() -> None:
+    error = ProviderError(
+        "zai returned HTTP 429: "
+        '{"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}',
+        status_code=429,
+        provider="zai",
+    )
+
+    assert _is_insufficient_balance_error(error) is True
 
 
 @pytest.mark.asyncio

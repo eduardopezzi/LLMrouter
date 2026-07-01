@@ -6,12 +6,15 @@ from llmrouter.cli_panel import (
     FALLBACK_COUNT_ENV,
     PROVIDER_COST_ORDER_ENV,
     ROUTING_STRATEGY_ENV,
+    _available_ranker_models,
+    _build_llm_priority_prompt,
     _journalctl_follow_command,
     _log_file_end_offset,
     _parse_llm_priority_order,
     _parse_provider_selection,
     _read_log_since,
     _read_log_tail,
+    demote_model_priority,
     observation_stats,
     promote_model_priority,
     render_current_settings,
@@ -179,6 +182,32 @@ def test_reset_model_priorities_to_catalog_order_uses_yaml_order(tmp_path) -> No
     assert '  - name: "gamma"\n    provider: "ollama"\n    priority: 3' in body
 
 
+def test_demote_model_priority_moves_model_to_bottom(tmp_path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """models:
+  - name: "alpha"
+    provider: "ollama"
+    priority: 1
+  - name: "beta"
+    provider: "ollama"
+    priority: 2
+  - name: "gamma"
+    provider: "ollama"
+    priority: 3
+""",
+        encoding="utf-8",
+    )
+
+    demoted = demote_model_priority(models_file, "alpha")
+
+    body = models_file.read_text(encoding="utf-8")
+    assert demoted is True
+    assert '  - name: "alpha"\n    provider: "ollama"\n    priority: 3' in body
+    assert '  - name: "beta"\n    provider: "ollama"\n    priority: 1' in body
+    assert '  - name: "gamma"\n    provider: "ollama"\n    priority: 2' in body
+
+
 def test_parse_llm_priority_order_accepts_json_object() -> None:
     assert _parse_llm_priority_order('{"models":["beta","alpha"]}') == ["beta", "alpha"]
 
@@ -186,6 +215,48 @@ def test_parse_llm_priority_order_accepts_json_object() -> None:
 def test_parse_llm_priority_order_extracts_json_from_text() -> None:
     content = 'Here is the order:\n{"models":["beta","alpha"]}\nDone.'
     assert _parse_llm_priority_order(content) == ["beta", "alpha"]
+
+
+def test_available_ranker_models_include_configured_provider_apis() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="ollama/local", provider=Provider.OLLAMA, tier=Tier.T3, priority=1),
+            ModelInfo(name="nvidia_nim/test", provider=Provider.NVIDIA, tier=Tier.T3, priority=2),
+            ModelInfo(name="zhipu/test", provider=Provider.ZAI, tier=Tier.T3, priority=3),
+            ModelInfo(name="gpt-test", provider=Provider.OPENAI, tier=Tier.T3, priority=4),
+            ModelInfo(name="gemini/test", provider=Provider.GEMINI, tier=Tier.T3, priority=5),
+        )
+    )
+    settings = Settings(
+        providers={
+            "nvidia": {"api_key": "nvidia-key"},
+            "zai": {"api_key": "zai-key"},
+            "openai": {"api_key": "openai-key"},
+        }
+    )
+
+    rankers = _available_ranker_models(settings, registry)
+
+    assert [(ranker.display_name, ranker.provider.value) for ranker in rankers] == [
+        ("ollama/local", "ollama"),
+        ("nvidia_nim/test", "nvidia"),
+        ("zhipu/test", "zai"),
+        ("gpt-test", "openai"),
+    ]
+
+
+def test_quality_priority_prompt_allows_promoting_any_provider_api() -> None:
+    prompt = _build_llm_priority_prompt(
+        [
+            ModelInfo(name="cheap", provider=Provider.OLLAMA, tier=Tier.T1, priority=1),
+            ModelInfo(name="quality", provider=Provider.NVIDIA, tier=Tier.T3, priority=2),
+        ],
+        strategy="quality",
+        provider_cost_order=["ollama", "nvidia"],
+    )
+
+    assert "changes the current order substantially" in prompt
+    assert "promote any provider/API" in prompt
 
 
 def test_observation_stats_reads_sqlite_database(tmp_path) -> None:

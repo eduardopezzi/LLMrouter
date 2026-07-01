@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from llmrouter.core.types import ChatRequest, ChatResponse, Provider, RoutingDecision
@@ -15,8 +15,14 @@ _logger = get_logger("llmrouter.proxy")
 class ProviderProxy:
     """Dispatch routed requests to providers, trying fallbacks on retryable errors."""
 
-    def __init__(self, providers: dict[Provider, BaseProvider]) -> None:
+    def __init__(
+        self,
+        providers: dict[Provider, BaseProvider],
+        *,
+        on_provider_error: Callable[[Any, ProviderError], None] | None = None,
+    ) -> None:
         self._providers = providers
+        self._on_provider_error = on_provider_error
 
     @property
     def providers(self) -> frozenset[Provider]:
@@ -57,6 +63,7 @@ class ProviderProxy:
                 )
                 return await provider.chat_completion(request, model.provider_model_name)
             except ProviderError as exc:
+                self._handle_provider_error(model, exc)
                 fallback_message = (
                     f" → falling back to '{attempts[i + 1].name}'"
                     if i + 1 < len(attempts)
@@ -119,6 +126,7 @@ class ProviderProxy:
                     yield chunk
                 return  # Success — stop trying fallbacks
             except ProviderError as exc:
+                self._handle_provider_error(model, exc)
                 fallback_message = (
                     f" → falling back to '{attempts[i + 1].name}'"
                     if i + 1 < len(attempts)
@@ -142,6 +150,18 @@ class ProviderProxy:
         """Close all provider clients."""
         for provider in self._providers.values():
             await provider.close()
+
+    def _handle_provider_error(self, model: Any, exc: ProviderError) -> None:
+        if self._on_provider_error is None:
+            return
+        try:
+            self._on_provider_error(model, exc)
+        except Exception as callback_exc:  # pragma: no cover - defensive logging
+            _logger.warning(
+                "Provider error callback failed for model '%s': %s",
+                getattr(model, "name", "(unknown)"),
+                callback_exc,
+            )
 
 
 def _unique_attempts(models: list[Any]) -> list[Any]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -13,10 +14,14 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from llmrouter.config import Settings
+from llmrouter.config import ProviderConfig, Settings
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
+from llmrouter.providers.base import BaseProvider
+from llmrouter.providers.nvidia_provider import NvidiaProvider
 from llmrouter.providers.ollama_provider import OllamaProvider
+from llmrouter.providers.openai_provider import OpenAIProvider
+from llmrouter.providers.zai_provider import ZaiProvider
 
 ROUTING_STRATEGY_ENV = "LLMROUTER_ROUTING__STRATEGY"
 FALLBACK_COUNT_ENV = "LLMROUTER_ROUTING__FALLBACK_COUNT"
@@ -53,6 +58,13 @@ class _ModelBlock:
     priority: int
     name_line_index: int
     priority_line_index: int | None
+
+
+@dataclass(frozen=True)
+class _RankerModel:
+    display_name: str
+    provider: Provider
+    provider_model_name: str
 
 
 def routing_panel_config(settings: Settings) -> RoutingPanelConfig:
@@ -196,26 +208,49 @@ def reset_model_priorities_to_catalog_order(models_file: str | Path) -> None:
     set_model_priority_order(models_file, [block.name for block in blocks])
 
 
+def demote_model_priority(models_file: str | Path, model_name: str) -> bool:
+    """Move a model to the lowest catalog priority.
+
+    Returns ``True`` when the model was found and rewritten, or ``False`` when
+    it was already the lowest-priority model.
+    """
+    blocks = _model_blocks(Path(models_file))
+    if not blocks:
+        raise ValueError("models file does not contain model entries")
+    if model_name not in {block.name for block in blocks}:
+        raise ValueError(f"model not found in catalog: {model_name}")
+
+    ordered = sorted(blocks, key=lambda block: (block.priority, block.name))
+    if ordered[-1].name == model_name:
+        return False
+    reordered = [block.name for block in ordered if block.name != model_name] + [model_name]
+    set_model_priority_order(models_file, reordered)
+    return True
+
+
 async def request_llm_model_priority_order(
     settings: Settings,
     registry: ModelRegistry,
     *,
     llm_model: str | None = None,
+    ranker_model: _RankerModel | None = None,
 ) -> list[str]:
     """Ask the evaluator LLM for a complete model priority order."""
     models = registry.all()
     if not models:
         raise ValueError("models file does not contain model entries")
-    chat_model = llm_model or settings.evaluator.ollama.model
+    if ranker_model is None:
+        ranker_model = _RankerModel(
+            display_name=llm_model or settings.evaluator.ollama.model,
+            provider=Provider.OLLAMA,
+            provider_model_name=llm_model or settings.evaluator.ollama.model,
+        )
 
-    provider = OllamaProvider(
-        base_url=settings.evaluator.ollama.base_url,
-        timeout=settings.evaluator.ollama.timeout,
-    )
+    provider = _build_ranker_provider(settings, ranker_model.provider)
     try:
         response = await provider.chat_completion(
             ChatRequest(
-                model=chat_model,
+                model=ranker_model.provider_model_name,
                 messages=[
                     ChatMessage(
                         role="system",
@@ -237,7 +272,7 @@ async def request_llm_model_priority_order(
                 max_tokens=4096,
                 extra={"response_format": {"type": "json_object"}},
             ),
-            chat_model,
+            ranker_model.provider_model_name,
         )
     finally:
         await provider.close()
@@ -671,12 +706,12 @@ def _prompt_llm_model_priority_order(settings: Settings, registry: ModelRegistry
     default_llm_model = settings.evaluator.ollama.model
     print()
     print(
-        "This will ask the evaluator LLM "
-        f"({default_llm_model} at {settings.evaluator.ollama.base_url}) "
+        "This will ask an LLM "
+        f"(default: {default_llm_model} at {settings.evaluator.ollama.base_url}) "
         f"to reorder models for strategy '{settings.routing.strategy.value}'."
     )
-    llm_model = _prompt_ollama_llm_model(registry, default_llm_model)
-    if llm_model is None:
+    ranker_model = _prompt_ranker_model(settings, registry, default_llm_model)
+    if ranker_model is None:
         print("No changes.")
         return
     value = input("Apply the LLM-suggested order if valid? [y/N]: ").strip().lower()
@@ -686,7 +721,7 @@ def _prompt_llm_model_priority_order(settings: Settings, registry: ModelRegistry
 
     try:
         ordered_names = asyncio.run(
-            request_llm_model_priority_order(settings, registry, llm_model=llm_model)
+            request_llm_model_priority_order(settings, registry, ranker_model=ranker_model)
         )
         set_model_priority_order(settings.models_file, ordered_names)
         print(f"Applied LLM-suggested priority order to {settings.models_file}")
@@ -696,32 +731,128 @@ def _prompt_llm_model_priority_order(settings: Settings, registry: ModelRegistry
         print(f"Error: {exc}")
 
 
-def _prompt_ollama_llm_model(registry: ModelRegistry, default_model: str) -> str | None:
-    """Prompt for the Ollama model used to rank priorities."""
-    ollama_models = [model for model in registry.all() if model.provider == Provider.OLLAMA]
-    if ollama_models:
-        print("Available Ollama models for the ranking request:")
-        ordered_ollama_models = sorted(ollama_models, key=lambda item: (item.priority, item.name))
-        for idx, model in enumerate(ordered_ollama_models, 1):
-            print(f"  {idx}) {model.name}")
+def _prompt_ranker_model(
+    settings: Settings,
+    registry: ModelRegistry,
+    default_model: str,
+) -> _RankerModel | None:
+    """Prompt for the model/API used to rank priorities."""
+    rankers = _available_ranker_models(settings, registry)
+    if rankers:
+        print("Available models/APIs for the ranking request:")
+        for idx, ranker in enumerate(rankers, 1):
+            print(f"  {idx}) {ranker.display_name} provider={ranker.provider.value}")
     value = input(
         f"LLM model to ask, number/name, Enter for {default_model}, or 0 to cancel: "
     ).strip()
     if value == "0":
         return None
     if not value:
-        return default_model
+        return _RankerModel(
+            display_name=default_model,
+            provider=Provider.OLLAMA,
+            provider_model_name=default_model,
+        )
     if value.isdigit():
         index = int(value)
-        ordered = sorted(ollama_models, key=lambda item: (item.priority, item.name))
-        if 1 <= index <= len(ordered):
-            return ordered[index - 1].provider_model_name
+        if 1 <= index <= len(rankers):
+            return rankers[index - 1]
         print("Invalid model number.")
         return None
-    matched = next((model for model in ollama_models if model.name == value), None)
+    matched = next((ranker for ranker in rankers if ranker.display_name == value), None)
     if matched is not None:
-        return matched.provider_model_name
-    return value
+        return matched
+    return _RankerModel(display_name=value, provider=Provider.OLLAMA, provider_model_name=value)
+
+
+def _available_ranker_models(settings: Settings, registry: ModelRegistry) -> list[_RankerModel]:
+    rankers: list[_RankerModel] = []
+    for model in sorted(registry.all(), key=lambda item: (item.priority, item.name)):
+        if not _ranker_provider_available(settings, model.provider):
+            continue
+        if model.provider == Provider.GEMINI:
+            continue
+        rankers.append(
+            _RankerModel(
+                display_name=model.name,
+                provider=model.provider,
+                provider_model_name=model.provider_model_name,
+            )
+        )
+    return rankers
+
+
+def _ranker_provider_available(settings: Settings, provider: Provider) -> bool:
+    if provider == Provider.OLLAMA:
+        return settings.providers.ollama.enabled
+    if provider == Provider.OPENAI:
+        return (
+            settings.providers.openai.enabled
+            and _api_key(settings.providers.openai, "OPENAI_API_KEY") is not None
+        )
+    if provider == Provider.NVIDIA:
+        return settings.providers.nvidia.enabled and _api_key(
+            settings.providers.nvidia,
+            "NVIDIA_NIM_API_KEY",
+            "NVIDIA_API_KEY",
+        ) is not None
+    if provider == Provider.ZAI:
+        return (
+            settings.providers.zai.enabled
+            and _api_key(settings.providers.zai, "ZAI_API_KEY") is not None
+        )
+    return False
+
+
+def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvider:
+    if provider == Provider.OLLAMA:
+        return OllamaProvider(
+            api_key=settings.providers.ollama.api_key,
+            base_url=settings.providers.ollama.base_url,
+            timeout=settings.providers.ollama.timeout,
+            max_retries=settings.providers.ollama.max_retries,
+        )
+    if provider == Provider.OPENAI:
+        api_key = _api_key(settings.providers.openai, "OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI API key is not configured")
+        return OpenAIProvider(
+            api_key=api_key,
+            base_url=settings.providers.openai.base_url,
+            timeout=settings.providers.openai.timeout,
+            max_retries=settings.providers.openai.max_retries,
+        )
+    if provider == Provider.NVIDIA:
+        api_key = _api_key(settings.providers.nvidia, "NVIDIA_NIM_API_KEY", "NVIDIA_API_KEY")
+        if not api_key:
+            raise ValueError("NVIDIA API key is not configured")
+        return NvidiaProvider(
+            api_key=api_key,
+            base_url=settings.providers.nvidia.base_url,
+            timeout=settings.providers.nvidia.timeout,
+            max_retries=settings.providers.nvidia.max_retries,
+        )
+    if provider == Provider.ZAI:
+        api_key = _api_key(settings.providers.zai, "ZAI_API_KEY")
+        if not api_key:
+            raise ValueError("ZAI API key is not configured")
+        return ZaiProvider(
+            api_key=api_key,
+            base_url=settings.providers.zai.base_url,
+            timeout=settings.providers.zai.timeout,
+            max_retries=settings.providers.zai.max_retries,
+        )
+    raise ValueError(f"Provider {provider.value} cannot be used for priority ranking")
+
+
+def _api_key(config: ProviderConfig, *env_names: str) -> str | None:
+    if config.api_key:
+        return config.api_key
+    for env_name in env_names:
+        value = os.environ.get(env_name)
+        if value:
+            return value
+    return None
 
 
 def _prompt_view_logs(settings: Settings) -> None:
@@ -769,8 +900,11 @@ def _build_llm_priority_prompt(
             "when costs are equal, then prefer smaller/fast models."
         ),
         "quality": (
-            "Prefer the strongest and most capable models first. Use roles, context window, "
-            "tier, and descriptions as quality signals."
+            "Prefer the strongest and most capable models first, even when that changes the "
+            "current order substantially. Use roles, context window, tier, provider, and "
+            "descriptions as quality signals. You may move models from any provider/API "
+            "(Ollama, NVIDIA, ZAI, OpenAI, etc.) to the top when their metadata suggests "
+            "better quality."
         ),
         "balanced": (
             "Balance quality, breadth of roles, context window, and cost. Avoid putting an "
@@ -801,7 +935,8 @@ def _build_llm_priority_prompt(
         f"Provider cost tie-break order: {', '.join(provider_cost_order)}\n"
         f"Strategy guidance: {strategy_guidance}\n\n"
         "Return a complete priority order for every model below. Lower position means higher "
-        "priority. Do not add, remove, rename, or duplicate models.\n\n"
+        "priority. The order may differ from the current priority and may promote any "
+        "provider/API. Do not add, remove, rename, or duplicate models.\n\n"
         "Respond exactly as JSON with this shape:\n"
         '{"models":["exact model name","exact model name"]}\n\n'
         f"Models:\n{json.dumps(rows, ensure_ascii=False, indent=2)}"

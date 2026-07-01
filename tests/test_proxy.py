@@ -43,3 +43,31 @@ async def test_proxy_deduplicates_repeated_model_attempts() -> None:
         )
 
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_proxy_notifies_provider_error_callback() -> None:
+    provider = FailingProvider()
+    model = ModelInfo(name="openai/test", provider=Provider.OPENAI, tier=Tier.T3)
+    seen: list[tuple[str, int]] = []
+    proxy = ProviderProxy(
+        {Provider.OPENAI: provider},
+        on_provider_error=lambda failed_model, exc: seen.append(
+            (failed_model.name, exc.status_code)
+        ),
+    )
+    decision = RoutingDecision(
+        primary=model,
+        fallbacks=[],
+        score=0.0,
+        tier=Tier.T3,
+        reason="test",
+    )
+
+    with pytest.raises(ProviderError):
+        await proxy.chat_completion(
+            ChatRequest(model=None, messages=[ChatMessage(role="user", content="hello")]),
+            decision,
+        )
+
+    assert seen == [("openai/test", 500)]
