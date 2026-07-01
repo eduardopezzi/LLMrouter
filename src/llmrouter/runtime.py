@@ -6,6 +6,7 @@ import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from fastapi import FastAPI
 
@@ -31,6 +32,10 @@ from llmrouter.providers import (
     ZaiProvider,
 )
 from llmrouter.providers.base import ProviderError
+
+
+class _ApiKeyConfig(Protocol):
+    api_key: str | None
 
 
 def build_app(settings: Settings | None = None) -> FastAPI:
@@ -64,6 +69,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
             collector=collector,
             judge=QualityJudge(
                 base_url=resolved_settings.evaluator.ollama.base_url,
+                api_key=_api_key(resolved_settings.evaluator.ollama, "OLLAMA_API_KEY"),
                 model=resolved_settings.evaluator.ollama.model,
                 timeout=resolved_settings.evaluator.ollama.timeout,
                 temperature=resolved_settings.evaluator.ollama.temperature,
@@ -215,14 +221,14 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
 
 def _ollama(config: ProviderConfig) -> OllamaProvider:
     return OllamaProvider(
-        api_key=config.api_key,
+        api_key=_api_key(config, "OLLAMA_API_KEY"),
         base_url=config.base_url,
         timeout=config.timeout,
         max_retries=config.max_retries,
     )
 
 
-def _api_key(config: ProviderConfig, *env_names: str) -> str | None:
+def _api_key(config: _ApiKeyConfig, *env_names: str) -> str | None:
     if config.api_key:
         return config.api_key
     for env_name in env_names:

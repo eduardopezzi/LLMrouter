@@ -807,7 +807,7 @@ def _ranker_provider_available(settings: Settings, provider: Provider) -> bool:
 def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvider:
     if provider == Provider.OLLAMA:
         return OllamaProvider(
-            api_key=settings.providers.ollama.api_key,
+            api_key=_api_key(settings.providers.ollama, "OLLAMA_API_KEY"),
             base_url=settings.providers.ollama.base_url,
             timeout=settings.providers.ollama.timeout,
             max_retries=settings.providers.ollama.max_retries,

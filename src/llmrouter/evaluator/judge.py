@@ -41,12 +41,14 @@ class QualityJudge:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
+        api_key: str | None = None,
         model: str = "qwen2.5-coder:3b",
         timeout: float = 60.0,
         temperature: float = 0.1,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
         self._model = model
         self._timeout = timeout
         self._temperature = temperature
@@ -105,7 +107,7 @@ class QualityJudge:
             ],
         }
         if self._client is not None:
-            response = await self._client.post("/api/chat", json=payload)
+            response = await self._client.post("/api/chat", json=payload, headers=self._headers())
             response.raise_for_status()
             return _extract_json(_ollama_content(response.json()))
 
@@ -113,9 +115,14 @@ class QualityJudge:
             base_url=self._base_url,
             timeout=httpx.Timeout(self._timeout),
         ) as client:
-            response = await client.post("/api/chat", json=payload)
+            response = await client.post("/api/chat", json=payload, headers=self._headers())
             response.raise_for_status()
             return _extract_json(_ollama_content(response.json()))
+
+    def _headers(self) -> dict[str, str]:
+        if not self._api_key:
+            return {}
+        return {"Authorization": f"Bearer {self._api_key}"}
 
 
 def _ollama_content(body: dict[str, Any]) -> str:

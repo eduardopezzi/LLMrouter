@@ -6,6 +6,7 @@ import pytest
 from llmrouter.config import Settings
 from llmrouter.core.registry import load_model_registry
 from llmrouter.core.types import ChatMessage, ChatRequest, Provider
+from llmrouter.evaluator.judge import QualityJudge
 from llmrouter.providers.base import ProviderError
 from llmrouter.providers.ollama_provider import OllamaProvider
 from llmrouter.providers.zai_provider import ZaiProvider
@@ -67,6 +68,15 @@ def test_runtime_builds_ollama_without_api_key() -> None:
     assert Provider.OLLAMA in providers
 
 
+def test_runtime_uses_ollama_api_key_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-secret")
+    registry = load_model_registry("config/models.yaml")
+    providers = build_providers(Settings(), registry)
+    provider = providers[Provider.OLLAMA]
+
+    assert provider._build_headers()["Authorization"] == "Bearer ollama-secret"
+
+
 def test_runtime_detects_zai_insufficient_balance_error() -> None:
     error = ProviderError(
         "zai returned HTTP 429: "
@@ -121,6 +131,34 @@ async def test_zai_provider_uses_current_openai_compatible_endpoint() -> None:
     assert seen["authorization"] == "Bearer token"
     assert seen["accept_language"] == "en-US,en"
     assert response.id == "chatcmpl-zai"
+
+
+@pytest.mark.asyncio
+async def test_quality_judge_sends_ollama_authorization_header() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers.get("authorization")
+        content = (
+            '{"relevance":5,"accuracy":5,"completeness":5,'
+            '"concision":5,"safety":5,"rationale":"ok"}'
+        )
+        return httpx.Response(
+            200,
+            json={"message": {"content": content}},
+        )
+
+    judge = QualityJudge(base_url="http://ollama.test", api_key="ollama-secret")
+    judge._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://ollama.test",
+    )
+
+    score = await judge.evaluate("prompt", "response", "model")
+
+    await judge._client.aclose()
+    assert seen["authorization"] == "Bearer ollama-secret"
+    assert score.relevance == 5
 
 
 @pytest.mark.asyncio

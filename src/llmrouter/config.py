@@ -91,6 +91,7 @@ class EvaluatorOllamaConfig(BaseModel):
     """Local Ollama model used for evaluation only."""
 
     base_url: str = "http://localhost:11434"
+    api_key: str | None = None
     model: str = "qwen2.5-coder:3b"
     timeout: float = 60.0
     temperature: float = 0.1
