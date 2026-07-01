@@ -149,7 +149,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["architecture", "review", "security_audit", "fix"]
-    priority: 13
+    priority: 14
     description: "Nemotron 3 Ultra 550B — Modelo massivo ideal para auditorias pesadas de código e infraestrutura."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -160,7 +160,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["review", "fix", "migration"]
-    priority: 14
+    priority: 15
     description: "Kimi K2.6 via NVIDIA NIM — Excelente para lidar com contextos de migração horizontal de longo prazo."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -171,7 +171,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["architecture", "review", "fix", "security_audit"]
-    priority: 15
+    priority: 16
     description: "DeepSeek V4 Pro — Fallback de alto nível para segurança e arquitetura na infraestrutura NVIDIA."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -182,7 +182,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["refactoring", "test_generation"]
-    priority: 16
+    priority: 17
     description: "Gemma 4 31B It — Endpoint nativo NVIDIA para refatorações ágeis e forte barreira de código."
     max_tokens: 32000
     prompt_cost_per_1m_tokens: 0
@@ -193,7 +193,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["test_generation", "refactoring"]
-    priority: 17
+    priority: 18
     description: "DeepSeek V4 Flash — Respostas rápidas para refatorações pontuais e geração de testes em lote."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -204,7 +204,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["documentation", "summarization"]
-    priority: 18
+    priority: 19
     description: "Step-3.7-Flash — Modelo esparso MoE voltado para processamento e documentação em larga escala."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -215,7 +215,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["summarization", "documentation"]
-    priority: 19
+    priority: 20
     description: "Mistral Medium 3.5 128B — Capacidade linguística apurada para documentações limpas e resumos estruturados."
     max_tokens: 16384
     prompt_cost_per_1m_tokens: 0
@@ -226,7 +226,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["review", "fix", "test_generation", "documentation", "summarization"]
-    priority: 20
+    priority: 21
     description: "MiniMax-M3 — Canivete suíço multimodal de redundância."
     max_tokens: 8192
     prompt_cost_per_1m_tokens: 0
@@ -237,7 +237,7 @@ models:
     provider: "nvidia"
     api_base: "https://integrate.api.nvidia.com/v1"
     roles: ["summarization"]
-    priority: 21
+    priority: 22
     description: "Nemotron 3 Nano Omni 30B — Fallback leve focado exclusivamente em resumos rápidos."
     max_tokens: 8192
     prompt_cost_per_1m_tokens: 0
@@ -260,7 +260,7 @@ models:
   - name: "zhipu/glm-5.1"
     provider: "zai"
     roles: ["review", "fix", "test_generation", "summarization", "documentation"]
-    priority: 22
+    priority: 13
     description: "GLM-5.1 via Z AI — Fallback estável generalista para cobertura completa das tarefas."
     max_tokens: 128000
     prompt_cost_per_1m_tokens: 0

@@ -11,10 +11,10 @@ from llmrouter.providers.openai_compatible import OpenAICompatibleProvider
 class ZaiProvider(OpenAICompatibleProvider):
     """Provider for the Z.ai (Zhipu AI) API.
 
-    API docs: https://open.bigmodel.cn/dev/api
+    API docs: https://docs.z.ai/
     """
 
-    DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+    DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4"
 
     def __init__(
         self,
@@ -36,4 +36,5 @@ class ZaiProvider(OpenAICompatibleProvider):
         headers = super()._build_headers()
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        headers["Accept-Language"] = "en-US,en"
         return headers
