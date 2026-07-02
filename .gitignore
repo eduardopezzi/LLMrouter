@@ -8,13 +8,17 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
+pip-log.txt
+pip-delete-this-directory.txt
 
 # Virtual environments
 .venv/
 venv/
 env/
+.envrc
 
 # Build artifacts
 build/
@@ -31,11 +35,29 @@ data/
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Runtime logs and process files
+*.log
+logs/
+*.pid
+*.pid.lock
+
+# Accidental shell-command leftovers in the repository root
+/pip
+/python
 
 # Editors and OS files
 .DS_Store
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # Docker/local runtime
 docker-compose.override.yaml
