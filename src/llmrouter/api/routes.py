@@ -719,7 +719,19 @@ def _memory_project(
         or _infer_project_from_prompt(prompt)
         or default
     )
-    return str(project or default)
+    result = str(project or default)
+    _logger.debug(
+        "Memory project resolved: project=%s sources=headers=%s router=%s metadata=%s "
+        "extra=%s directive=%s inferred=%s",
+        result,
+        bool(request.headers.get("x-llmrouter-project")),
+        router_options.get("project") is not None,
+        metadata.get("project") is not None,
+        payload.extra.get("project") is not None,
+        directives.get("project") is not None,
+        _infer_project_from_prompt(prompt) is not None,
+    )
+    return result
 
 
 def _prompt_directives(prompt: str) -> dict[str, str]:
@@ -795,16 +807,27 @@ def _retrieve_memory(
     chat_request: ChatRequest,
     payload: ChatCompletionPayload,
 ) -> list[MemoryEntry]:
-    if memory_store is None or _memory_disabled(payload):
+    if memory_store is None:
+        _logger.debug("Memory retrieval skipped: memory store not configured")
         return []
+    if _memory_disabled(payload):
+        _logger.debug(
+            "Memory retrieval skipped: project=%s reason=memory_disabled via payload", project
+        )
+        return []
+    query_len = len(chat_request.prompt_text)
     entries = memory_store.retrieve(project=project, query=chat_request.prompt_text)
     if entries:
         _logger.debug(
-            "Memory retrieval: project=%s hits=%d ids=%s",
+            "Memory retrieval: project=%s query_len=%d hits=%d ids=%s scores=%s",
             project,
+            query_len,
             len(entries),
             [entry.id for entry in entries],
+            [round(entry.score, 3) for entry in entries],
         )
+    else:
+        _logger.debug("Memory retrieval empty: project=%s query_len=%d", project, query_len)
     return entries
 
 
@@ -821,7 +844,19 @@ def _with_memory_context(
         max_chars=memory_store.config.max_context_chars,
     )
     if not context:
+        _logger.debug(
+            "Memory context empty after rendering: project=%s entries=%d",
+            memory_store.config.default_project if memory_store else None,
+            len(memory_entries),
+        )
         return chat_request
+    _logger.debug(
+        "Memory context injected: project=%s entries=%d context_chars=%d ids=%s",
+        memory_store.config.default_project if memory_store else "unknown",
+        len(memory_entries),
+        len(context),
+        [entry.id for entry in memory_entries],
+    )
     messages = [
         ChatMessage(role="system", content=context),
         *chat_request.messages,
@@ -848,21 +883,39 @@ def _record_memory(
     if memory_store is None or _memory_disabled(payload):
         return
     response_text = "\n".join(_choice_text(choice) for choice in response_payload).strip()
+    metadata = {
+        "request_id": request_id,
+        "task_role": _task_role(payload, _prompt_directives(chat_request.prompt_text)),
+        "selected_model": selected_model.name,
+        "provider": selected_model.provider.value,
+        "provider_model": selected_model.provider_model_name,
+        "retrieved_memory_ids": [entry.id for entry in memory_entries],
+    }
+    _logger.debug(
+        "Memory recording attempt: project=%s prompt_len=%d response_len=%d model=%s "
+        "retrieved_ids=%s",
+        project,
+        len(chat_request.prompt_text),
+        len(response_text),
+        selected_model.name,
+        [entry.id for entry in memory_entries],
+    )
     recorded = memory_store.record_interaction(
         project=project,
         prompt=chat_request.prompt_text,
         response=response_text,
-        metadata={
-            "request_id": request_id,
-            "task_role": _task_role(payload, _prompt_directives(chat_request.prompt_text)),
-            "selected_model": selected_model.name,
-            "provider": selected_model.provider.value,
-            "provider_model": selected_model.provider_model_name,
-            "retrieved_memory_ids": [entry.id for entry in memory_entries],
-        },
+        metadata=metadata,
     )
     if recorded:
-        _logger.debug("Memory recorded: project=%s model=%s", project, selected_model.name)
+        _logger.debug(
+        "Memory recorded successfully: project=%s model=%s", project, selected_model.name
+    )
+    else:
+        _logger.debug(
+            "Memory not recorded: project=%s model=%s reason=min_size_or_filters",
+            project,
+            selected_model.name,
+        )
 
 
 def _memory_disabled(payload: ChatCompletionPayload) -> bool:

@@ -33,14 +33,6 @@ from llmrouter.logging_config import get_logger
 _logger = get_logger("llmrouter.router")
 
 
-def asyncio_run(coro: Any) -> Any:
-    """Run an async coroutine regardless of whether an event loop is running."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    return loop.run_until_complete(coro)
-
 
 class SelectionStrategy(Protocol):
     """Protocol for tier-internal model selection strategies."""
@@ -345,9 +337,14 @@ class MultiModelRouter:
             "Scoring: score=%.2f tier=%s | signals: %s",
             scoring.score,
             scoring.tier.name,
-            ", ".join(f"{k}={v:.2f}" for k, v in sorted(
-                scoring.signals.items(), key=lambda x: x[1], reverse=True
-            )) or "none",
+            ", ".join(
+                f"{k}={v:.2f}" if isinstance(v, (int, float)) else f"{k}={v}"
+                for k, v in sorted(
+                    scoring.signals.items(),
+                    key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0.0,
+                    reverse=True,
+                )
+            ) or "none",
         )
 
         # Get candidate models for the recommended tier
@@ -454,11 +451,20 @@ class MultiModelRouter:
     @staticmethod
     def _build_reason(scoring: ScoringResult, model: ModelInfo) -> str:
         """Build a human-readable reason string."""
-        top_signals = sorted(scoring.signals.items(), key=lambda x: x[1], reverse=True)[:2]
+        numeric_signals = {
+            k: v for k, v in scoring.signals.items() if isinstance(v, (int, float))
+        }
+        top_signals = sorted(numeric_signals.items(), key=lambda x: x[1], reverse=True)[:2]
         signal_str = ", ".join(f"{name}={val:.2f}" for name, val in top_signals)
+        semantic_role = scoring.signals.get("semantic_role")
+        role_part = (
+            f"role={semantic_role}, "
+            if isinstance(semantic_role, str) and semantic_role != "none"
+            else ""
+        )
         return (
             f"Prompt scored {scoring.score:.2f} (tier {scoring.tier.name}), "
-            f"signals: {signal_str}. Selected {model.name} via {model.provider.value}."
+            f"{role_part}signals: {signal_str}. Selected {model.name} via {model.provider.value}."
         )
 
 

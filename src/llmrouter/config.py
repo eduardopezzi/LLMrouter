@@ -176,6 +176,25 @@ class HealthConfig(BaseModel):
     cost_weight: float = 0.10
 
 
+class SemanticConfig(BaseModel):
+    """Semantic prompt scoring configuration."""
+
+    enabled: bool = False
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    device: str = "cpu"  # cpu | cuda | mps
+    cache_dir: str | None = None
+    embedding_cache_path: str = "data/semantic_role_embeddings.json"
+    fallback_to_rule_based: bool = True
+
+
+class HybridScorerConfig(BaseModel):
+    """Hybrid scorer weights between rule-based and semantic scorers."""
+
+    rule_weight: float = 0.30
+    semantic_weight: float = 0.70
+    semantic_confidence_threshold: float = 0.35
+
+
 # ---------------------------------------------------------------------------
 # Main settings
 # ---------------------------------------------------------------------------
@@ -213,6 +232,8 @@ class Settings(BaseSettings):
     precog: PrecogConfig = Field(default_factory=PrecogConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
+    semantic: SemanticConfig = Field(default_factory=SemanticConfig)
+    hybrid: HybridScorerConfig = Field(default_factory=HybridScorerConfig)
 
     # Model registry file
     models_file: str = "config/models.yaml"

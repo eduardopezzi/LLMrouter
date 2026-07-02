@@ -4,7 +4,7 @@
 | --- | ---: | --- |
 | **5. Cross-Repository** | 100% | `ContractRegistry`, `BreakingChangeDetector`, snapshot versionavel, scripts `make` e CLI implementados e cobertos por testes |
 | **6. Model Health & Performance Tracking** | 100% | `ModelHealthTracker` com métricas em tempo real (latência P50/P95/P99, taxa de erro, qualidade média, custo real) e `HealthScore` para roteamento adaptativo |
-| **7. Semantic Prompt Routing via Embeddings** | 0% | `SemanticPromptScorer` usando sentence-transformers para classificar prompts semanticamente por role/tarefa e rotear ao tier/modelo ideal |
+| **7. Semantic Prompt Routing via Embeddings** | 80% | `SemanticPromptScorer` + `HybridScorer` usando sentence-transformers para classificar prompts semanticamente por role/tarefa e rotear ao tier/modelo ideal |
 | **8. Response Caching com Chave Semântica** | 0% | Cache LRU/TTL com embedding do prompt como chave; reutiliza respostas para prompts semanticamente equivalentes (>0.95 cosine) |
 | **9. Canary/Blue-Green Model Rollout** | 0% | Campo `rollout_percentage` no `ModelInfo`; router faz seleção ponderada; CLI para configurar rollout gradual (ex.: 5% → 25% → 100%) |
 | **10. Cost Budgets & Alertas por Projeto/Usuário** | 0% | `BudgetManager` com backend Redis/SQLite; headers `X-Project-ID`/`X-User-ID`; auto-fallback para modelos gratuitos ao exceder budget |
@@ -74,15 +74,36 @@ e integração das estratégias com health tracker.
 
 ## 7. Semantic Prompt Routing via Embeddings
 
+**Status**: 80% concluído — componentes implementados e testes unitários passando.
+
 **Objetivo**: Substituir/complementar heurísticas de keywords por compreensão semântica real da tarefa.
 
-**Componentes novos**:
-- `src/llmrouter/core/semantic_scorer.py` — `SemanticPromptScorer` implementando `PromptScorer`
-- Embedder padrão: `sentence-transformers/all-MiniLM-L6-v2` (384-dim, ~80MB, CPU-friendly)
-- Task embeddings pré-computados por role: `review`, `architecture`, `test_generation`, `fix`, `security_audit`, `refactoring`, `documentation`, `summarization`, `migration`
-- Mapeamento similarity → tier + suggested role
+**Componentes entregues**:
+- `src/llmrouter/core/semantic_scorer.py`
+  - `SemanticPromptScorer` com interface compatível com `PromptScorer`
+  - Embedder lazy `sentence-transformers/all-MiniLM-L6-v2` (~80MB, CPU/GPU)
+  - Role embeddings pré-computados: `architecture`, `security_audit`, `review`, `fix`, `refactoring`, `test_generation`, `migration`, `documentation`, `summarization`
+  - Mapeamento similarity → tier com calibração de confiança
+  - Cache de embeddings em `data/semantic_role_embeddings.json`
+  - Fallback automático para score neutro se o modelo falhar
+- `HybridScorer` combina `PromptScorer` (rule-based) + `SemanticPromptScorer` com pesos configuráveis
+- Configuração via `.env`:
+  ```env
+  LLMROUTER_SEMANTIC__ENABLED=true
+  LLMROUTER_SEMANTIC__DEVICE=cuda  # ou cpu/mps
+  LLMROUTER_HYBRID__RULE_WEIGHT=0.3
+  LLMROUTER_HYBRID__SEMANTIC_WEIGHT=0.7
+  LLMROUTER_HYBRID__SEMANTIC_CONFIDENCE_THRESHOLD=0.35
+  ```
+- `MultiModelRouter._build_reason` inclui `role=<semantic_role>` nas decisões de roteamento
+- `Settings` ganhou `SemanticConfig` e `HybridScorerConfig`
 
-**Modo híbrido**: `HybridScorer` combina `PromptScorer` (rápido, rule-based) + `SemanticPromptScorer` (preciso) com peso configurável.
+**Pendências / próximos passos**:
+- Atualizar `runtime.py` para construir `HybridScorer` automaticamente quando `semantic.enabled=true`
+- Adicionar CLI/endpoint para inspecionar a role semântica inferida por prompt
+- Coletar feedback do roteamento real para ajustar os embeddings por role
+
+**Testes**: `tests/test_semantic_scorer.py` cobre classificação, fallback, cache, integração com router e carregamento de config.
 
 ---
 
