@@ -8,6 +8,7 @@ from llmrouter.cli_panel import (
     ROUTING_STRATEGY_ENV,
     _available_ranker_models,
     _build_llm_priority_prompt,
+    _extract_json_object,
     _journalctl_follow_command,
     _log_file_end_offset,
     _parse_llm_priority_order,
@@ -215,6 +216,48 @@ def test_parse_llm_priority_order_accepts_json_object() -> None:
 def test_parse_llm_priority_order_extracts_json_from_text() -> None:
     content = 'Here is the order:\n{"models":["beta","alpha"]}\nDone.'
     assert _parse_llm_priority_order(content) == ["beta", "alpha"]
+
+
+def test_parse_llm_priority_order_extracts_fenced_json() -> None:
+    content = '\n```json\n{"models":["gamma","beta","alpha"]}\n```\n'
+    assert _parse_llm_priority_order(content) == ["gamma", "beta", "alpha"]
+
+
+def test_parse_llm_priority_order_extracts_unlabeled_fenced_json() -> None:
+    content = 'Some text then ```\n{"models":["gamma","beta"]}\n``` trailing text'
+    assert _parse_llm_priority_order(content) == ["gamma", "beta"]
+
+
+def test_extract_json_object_returns_none_when_no_braces() -> None:
+    assert _extract_json_object("no json here") is None
+    assert _extract_json_object("also [not an object]") is None
+
+
+def test_priority_prompt_includes_benchmark_scores() -> None:
+    prompt = _build_llm_priority_prompt(
+        [
+            ModelInfo(
+                name="ollama/deepseek-v4-pro:cloud",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                priority=2,
+            ),
+            ModelInfo(
+                name="ollama/qwen2.5-coder:3b",
+                provider=Provider.OLLAMA,
+                tier=Tier.T1,
+                priority=1,
+            ),
+        ],
+        strategy="balanced",
+        provider_cost_order=["ollama"],
+    )
+
+    assert '"scores":' in prompt
+    assert "strategy_score" in prompt
+    assert "benchmark_score" in prompt
+    assert "ollama/deepseek-v4-pro:cloud" in prompt
+    assert "ollama/qwen2.5-coder:3b" in prompt
 
 
 def test_available_ranker_models_include_configured_provider_apis() -> None:
