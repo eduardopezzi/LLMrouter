@@ -194,3 +194,42 @@ async def test_router_deduplicates_fallback_models_by_name() -> None:
 
     assert decision.primary.name == "zhipu/glm"
     assert [model.name for model in decision.fallbacks] == ["ollama/reviewer"]
+
+
+@pytest.mark.asyncio
+async def test_router_skips_unavailable_provider_for_auto_routes() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="zhipu/glm",
+                provider=Provider.ZAI,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=1,
+            ),
+            ModelInfo(
+                name="ollama/reviewer",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=2,
+            ),
+        )
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this migration architecture.")],
+    )
+    constraints = RoutingConstraints(required_capabilities=frozenset({"review"}))
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        RoutingStrategy.COST,
+        provider_cost_order=["zai", "ollama"],
+    )
+
+    router.mark_provider_unavailable(Provider.ZAI)
+    decision = await router.route(request, constraints)
+
+    assert decision.primary.name == "ollama/reviewer"
+    assert decision.fallbacks == []

@@ -52,10 +52,17 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         provider_cost_order=resolved_settings.routing.provider_cost_order,
     )
     app_holder: dict[str, FastAPI] = {}
+    proxy_holder: dict[str, ProviderProxy] = {}
     proxy = ProviderProxy(
         build_providers(resolved_settings, registry),
-        on_provider_error=_priority_demoter(resolved_settings.models_file, router, app_holder),
+        on_provider_error=_priority_demoter(
+            resolved_settings.models_file,
+            router,
+            app_holder,
+            proxy_holder,
+        ),
     )
+    proxy_holder["proxy"] = proxy
     collector = (
         ObservationCollector(
             db_path=resolved_settings.evaluator.db_path,
@@ -143,10 +150,15 @@ def _priority_demoter(
     models_file: str,
     router: MultiModelRouter,
     app_holder: dict[str, FastAPI] | None = None,
+    proxy_holder: dict[str, ProviderProxy] | None = None,
 ) -> Callable[[ModelInfo, ProviderError], None]:
     def demoter(model: ModelInfo, exc: ProviderError) -> None:
         if not _is_insufficient_balance_error(exc):
             return
+        router.mark_provider_unavailable(model.provider)
+        proxy = proxy_holder.get("proxy") if proxy_holder is not None else None
+        if proxy is not None:
+            proxy.disable_provider(model.provider)
         demoted = demote_model_priority(models_file, model.name)
         if demoted:
             registry = build_registry(models_file)
@@ -154,11 +166,13 @@ def _priority_demoter(
             app = app_holder.get("app") if app_holder is not None else None
             if app is not None:
                 app.state.registry = registry
-            logging.getLogger("llmrouter.runtime").warning(
-                "Demoted model '%s' after provider balance/quota error: %s",
-                model.name,
-                exc,
-            )
+        logging.getLogger("llmrouter.runtime").warning(
+            "Disabled provider '%s' and %s model '%s' after balance/quota error: %s",
+            model.provider.value,
+            "demoted" if demoted else "kept lowest-priority",
+            model.name,
+            exc,
+        )
 
     return demoter
 

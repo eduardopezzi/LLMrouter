@@ -161,10 +161,15 @@ class MultiModelRouter:
         self._scorer = scorer
         self._strategy = get_strategy(strategy, provider_cost_order)
         self._fallback_count = fallback_count
+        self._unavailable_providers: set[Provider] = set()
 
     def replace_registry(self, registry: ModelRegistry) -> None:
         """Replace the live model registry used for future routing decisions."""
         self._registry = registry
+
+    def mark_provider_unavailable(self, provider: Provider) -> None:
+        """Exclude a provider from future automatic routing decisions."""
+        self._unavailable_providers.add(provider)
 
     async def route(
         self,
@@ -219,7 +224,7 @@ class MultiModelRouter:
 
         if not candidates:
             # Fallback: try any model available
-            candidates = self._registry.all()
+            candidates = self._available_models(self._registry.all())
             _logger.debug(
                 "No candidates in tier %s, using all %d models",
                 scoring.tier.name,
@@ -264,7 +269,7 @@ class MultiModelRouter:
     ) -> list[ModelInfo]:
         """Get candidate models for a tier, filtered by constraints."""
         # Start with models in the recommended tier
-        candidates = self._registry.by_tier(tier)
+        candidates = self._available_models(self._registry.by_tier(tier))
 
         # If no models in tier, try adjacent tiers
         if not candidates:
@@ -280,7 +285,7 @@ class MultiModelRouter:
                 )
             )
             for fallback_tier in fallback_tiers:
-                candidates = self._registry.by_tier(fallback_tier)
+                candidates = self._available_models(self._registry.by_tier(fallback_tier))
                 if candidates:
                     break
 
@@ -294,6 +299,7 @@ class MultiModelRouter:
                     m for m in self._registry.all()
                     if constraints.required_capabilities <= m.capabilities
                 ]
+                candidates = self._available_models(candidates)
 
         return candidates
 
@@ -303,11 +309,16 @@ class MultiModelRouter:
         constraints: RoutingConstraints,
     ) -> list[ModelInfo]:
         """Build fallback chain excluding the primary model."""
-        all_models = self._registry.all()
+        all_models = self._available_models(self._registry.all())
         if primary in all_models:
             all_models = [m for m in all_models if m.name != primary.name]
         ordered = _unique_models(self._strategy.select(all_models, constraints))
         return ordered[: self._fallback_count]
+
+    def _available_models(self, models: list[ModelInfo]) -> list[ModelInfo]:
+        if not self._unavailable_providers:
+            return models
+        return [model for model in models if model.provider not in self._unavailable_providers]
 
     @staticmethod
     def _build_reason(scoring: ScoringResult, model: ModelInfo) -> str:

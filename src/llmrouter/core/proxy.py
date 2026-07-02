@@ -23,11 +23,20 @@ class ProviderProxy:
     ) -> None:
         self._providers = providers
         self._on_provider_error = on_provider_error
+        self._disabled_providers: set[Provider] = set()
 
     @property
     def providers(self) -> frozenset[Provider]:
         """Configured provider identifiers."""
-        return frozenset(self._providers)
+        return frozenset(
+            provider
+            for provider in self._providers
+            if provider not in self._disabled_providers
+        )
+
+    def disable_provider(self, provider: Provider) -> None:
+        """Stop sending new attempts to a provider for this process lifetime."""
+        self._disabled_providers.add(provider)
 
     async def chat_completion(
         self,
@@ -40,6 +49,18 @@ class ProviderProxy:
 
         for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
+            if model.provider in self._disabled_providers:
+                _logger.warning(
+                    "Provider '%s' disabled for model '%s'",
+                    model.provider.value,
+                    model.name,
+                )
+                last_error = ProviderError(
+                    f"Provider {model.provider.value} is disabled",
+                    status_code=503,
+                    provider=model.provider.value,
+                )
+                continue
             if provider is None:
                 _logger.warning(
                     "Provider '%s' not configured for model '%s'",
@@ -97,6 +118,13 @@ class ProviderProxy:
 
         for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
+            if model.provider in self._disabled_providers:
+                last_error = ProviderError(
+                    f"Provider {model.provider.value} is disabled",
+                    status_code=503,
+                    provider=model.provider.value,
+                )
+                continue
             if provider is None:
                 last_error = ProviderError(
                     f"Provider {model.provider.value} is not configured",
