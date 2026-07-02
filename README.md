@@ -120,7 +120,8 @@ com **streaming SSE** e **function calling** (tool calls), basta usar o provider
 
 1. **LLMrouter rodando** na porta `12345` (ver [Local Server](#local-server)).
 2. **Ollama** rodando em `http://localhost:11434` com os modelos do catálogo
-   (`config/models.yaml`).
+   local (`config/models.yaml`). Se ele não existir, o LLMrouter cria uma cópia
+   a partir de `config/models.example.yaml`.
 3. **API Key** configurada no LLMrouter via `LLMROUTER_SERVER__API_KEY` no `.env`.
 
 ### Configuração no Cline (VS Code)
@@ -243,7 +244,7 @@ menor custo. Quando os custos numericos do catalogo empatam ou estao zerados, o
 desempate segue a ordem comercial atual:
 
 ```text
-NVIDIA -> Zhipu -> Ollama
+Zhipu -> Ollama -> NVIDIA
 ```
 
 Para trocar a estrategia:

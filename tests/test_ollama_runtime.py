@@ -62,7 +62,7 @@ async def test_ollama_provider_uses_openai_compatible_endpoint() -> None:
 
 
 def test_runtime_builds_ollama_without_api_key() -> None:
-    registry = load_model_registry("config/models.yaml")
+    registry = load_model_registry("config/models.example.yaml")
     providers = build_providers(Settings(), registry)
 
     assert Provider.OLLAMA in providers
@@ -70,7 +70,7 @@ def test_runtime_builds_ollama_without_api_key() -> None:
 
 def test_runtime_uses_ollama_api_key_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OLLAMA_API_KEY", "ollama-secret")
-    registry = load_model_registry("config/models.yaml")
+    registry = load_model_registry("config/models.example.yaml")
     providers = build_providers(Settings(), registry)
     provider = providers[Provider.OLLAMA]
 

@@ -15,7 +15,7 @@ make run
 PYTHONPATH=src python -m uvicorn llmrouter.main:app --host 0.0.0.0 --port 12345
 ```
 
-2. **Ollama** rodando localmente em `http://localhost:11434` com os modelos do catálogo (`config/models.yaml`).
+2. **Ollama** rodando localmente em `http://localhost:11434` com os modelos do catálogo local (`config/models.yaml`). Se ele não existir, o LLMrouter cria uma cópia a partir de `config/models.example.yaml`.
 
 3. **API Key** configurada no LLMrouter (variável `LLMROUTER_SERVER__API_KEY` no `.env`).
 
@@ -77,7 +77,7 @@ curl -N -X POST http://localhost:12345/v1/chat/completions \
 Quando o Cline envia `"model": "auto"`:
 
 1. O **PromptScorer** analisa a complexidade do prompt
-2. O **MultiModelRouter** seleciona o modelo ideal do catálogo (`config/models.yaml`)
+2. O **MultiModelRouter** seleciona o modelo ideal do catálogo local (`config/models.yaml`)
 3. O **ProviderProxy** executa a requisição com fallback automático
 4. A resposta retorna no formato OpenAI padrão, com metadados extras em `llmrouter`:
 
@@ -108,7 +108,7 @@ Quando o Cline envia `"model": "auto"`:
 
 ### Modelos não aparecem
 - Verifique se o Ollama está rodando: `ollama list`
-- Confirme os modelos em `config/models.yaml`
+- Confirme os modelos em `config/models.yaml` ou no template versionado `config/models.example.yaml`
 
 ### Tool calls (function calling) não funcionam
 - O LLMrouter agora faz passthrough de `tools`, `tool_choice` e `response_format`

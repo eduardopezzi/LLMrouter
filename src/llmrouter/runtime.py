@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -121,10 +122,21 @@ def _ensure_runtime_logging(*, debug: bool) -> None:
 
 def build_registry(models_file: str) -> ModelRegistry:
     """Load the model registry, returning an empty registry when no file exists."""
-    path = Path(models_file)
+    path = _ensure_models_file(Path(models_file))
     if not path.exists():
         return ModelRegistry()
     return load_model_registry(path)
+
+
+def _ensure_models_file(path: Path) -> Path:
+    if path.exists():
+        return path
+    template = path.with_name(f"{path.stem}.example{path.suffix}")
+    if not template.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(template, path)
+    return path
 
 
 def _priority_demoter(
