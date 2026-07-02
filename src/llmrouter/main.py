@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import logging
 import sys
 
@@ -10,6 +12,7 @@ import uvicorn
 
 from llmrouter.cli_panel import (
     promote_model_priority,
+    render_model_health,
     render_model_priorities,
     render_panel_summary,
     run_interactive_panel,
@@ -17,6 +20,7 @@ from llmrouter.cli_panel import (
     set_provider_cost_order,
     set_routing_strategy,
 )
+from llmrouter.core.health import InMemoryHealthStore, ModelHealthTracker
 from llmrouter.config import get_settings, reload_settings
 from llmrouter.contract_publisher import ContractPublisher
 from llmrouter.cross_repository import (
@@ -187,6 +191,34 @@ def _parse_args() -> argparse.Namespace:
         help="Persist provider cost order, e.g. nvidia,zai,ollama.",
     )
 
+    health_parser = subparsers.add_parser(
+        "health",
+        help="Show realtime per-model health metrics and HealthScore.",
+    )
+    health_parser.add_argument(
+        "--backend",
+        choices=["memory", "sqlite"],
+        default="memory",
+        help="Health storage backend to use.",
+    )
+    health_parser.add_argument(
+        "--db-path",
+        type=str,
+        default="data/health.db",
+        help="SQLite DB path when backend is sqlite.",
+    )
+    health_parser.add_argument(
+        "--window-minutes",
+        type=int,
+        default=15,
+        help="Sliding window in minutes for aggregation.",
+    )
+    health_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output metrics as JSON for scripting.",
+    )
+
     parser.add_argument(
         "--debug", "-d",
         action="store_true",
@@ -267,6 +299,7 @@ def main() -> None:
     if args.command == "panel":
         models_file = args.models_file or settings.models_file
         registry = build_registry(models_file)
+        health_tracker = _build_health_tracker_from_settings(settings)
         changed = False
         if args.list_model_priorities:
             print(render_model_priorities(registry, limit=args.priority_limit))
@@ -299,7 +332,33 @@ def main() -> None:
                 settings = reload_settings()
             print(render_panel_summary(settings, registry))
             return
+        # Expose tracker on settings so the interactive panel can read it.
+        settings.health_tracker = health_tracker  # type: ignore[attr-defined]
         run_interactive_panel(settings, registry, env_path=args.env_file)
+        return
+
+    if args.command == "health":
+        tracker = _build_health_tracker(args)
+        rows = asyncio.run(tracker.list_health())
+        scores = asyncio.run(tracker.score_map())
+        if args.json:
+            payload = {
+                "window_minutes": tracker.window_minutes,
+                "models": [
+                    {**h.to_dict(), "score": scores.get(h.model_name, None)}
+                    for h in rows
+                ],
+            }
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(render_model_health(tracker))
+            if rows:
+                print()
+                print("Composite HealthScore (higher is better)")
+                for h in rows:
+                    score = scores.get(h.model_name)
+                    score_str = f"{score.score:.4f}" if score else "n/a"
+                    print(f"  {h.model_name}: {score_str}")
         return
 
     # Configure logging based on --debug flag
@@ -324,6 +383,37 @@ def main() -> None:
         reload=reload,
         workers=workers,
         log_level="debug" if args.debug else "info",
+    )
+
+
+def _build_health_tracker_from_settings(settings: Settings) -> ModelHealthTracker:
+    """Build an in-memory tracker reflecting configured health weights."""
+    from llmrouter.core.health import HealthWeights
+
+    return ModelHealthTracker(
+        store=InMemoryHealthStore(),
+        window_minutes=settings.health.window_minutes,
+        weights=HealthWeights(
+            latency=settings.health.latency_weight,
+            error=settings.health.error_weight,
+            quality=settings.health.quality_weight,
+            cost=settings.health.cost_weight,
+        ),
+    )
+
+
+def _build_health_tracker(args: argparse.Namespace) -> ModelHealthTracker:
+    """Build a health tracker from CLI arguments."""
+    from llmrouter.core.health import HealthWeights, SQLiteHealthStore
+
+    if args.backend == "sqlite":
+        store = SQLiteHealthStore(db_path=args.db_path)
+    else:
+        store = InMemoryHealthStore()
+    return ModelHealthTracker(
+        store=store,
+        window_minutes=args.window_minutes,
+        weights=HealthWeights(),
     )
 
 

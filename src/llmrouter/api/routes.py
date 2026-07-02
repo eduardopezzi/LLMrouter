@@ -6,10 +6,12 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -17,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter
@@ -33,6 +36,7 @@ from llmrouter.evaluator.collector import ObservationCollector
 from llmrouter.evaluator.feedback import FeedbackLoop
 from llmrouter.evaluator.types import RoutingObservation
 from llmrouter.logging_config import get_logger
+from llmrouter.memory import MemoryEntry, MemoryStore, render_memory_context
 from llmrouter.providers.base import ProviderError
 
 _logger = get_logger("llmrouter.api")
@@ -97,6 +101,8 @@ def create_app(
     cors_origins: list[str] | None = None,
     precog_publisher: Any | None = None,
     precog_project: str = "llmrouter",
+    memory_store: MemoryStore | None = None,
+    health_tracker: ModelHealthTracker | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -139,6 +145,36 @@ def create_app(
     app.state.api_key = api_key
     app.state.precog_publisher = precog_publisher
     app.state.precog_project = precog_project
+    app.state.memory_store = memory_store
+    app.state.health_tracker = health_tracker
+
+    @app.get("/health/models")
+    async def health_models(request: Request) -> dict[str, object]:
+        _require_api_key(request, app.state.api_key)
+        tracker: ModelHealthTracker | None = getattr(app.state, "health_tracker", None)
+        if tracker is None:
+            return {"models": []}
+        return {
+            "window_minutes": tracker.window_minutes,
+            "models": [h.to_dict() for h in await tracker.list_health()],
+        }
+
+    @app.get("/health/models/{model_name}")
+    async def health_model_detail(model_name: str, request: Request) -> dict[str, object]:
+        _require_api_key(request, app.state.api_key)
+        tracker: ModelHealthTracker | None = getattr(app.state, "health_tracker", None)
+        if tracker is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Health tracker is not configured",
+            )
+        score = await tracker.health_score(model_name)
+        health = await tracker.get_health(model_name)
+        return {
+            "model": model_name,
+            "score": score.to_dict(),
+            "health": health.to_dict(),
+        }
 
     @app.get("/health")
     async def health() -> dict[str, object]:
@@ -151,6 +187,8 @@ def create_app(
             if app.state.proxy is not None
             else [],
             "evaluator": app.state.feedback_loop is not None,
+            "memory": app.state.memory_store is not None,
+            "health_tracker": app.state.health_tracker is not None,
             "openai_compatible": {
                 "chat_completions": "/v1/chat/completions",
                 "models": "/v1/models",
@@ -179,6 +217,24 @@ def create_app(
             )
 
         chat_request = _to_chat_request(payload)
+        original_chat_request = chat_request
+        memory_project = _memory_project(
+            payload,
+            request,
+            default=_memory_default_project(app.state.memory_store, app.state.precog_project),
+            prompt=chat_request.prompt_text,
+        )
+        memory_entries = _retrieve_memory(
+            app.state.memory_store,
+            project=memory_project,
+            chat_request=chat_request,
+            payload=payload,
+        )
+        chat_request = _with_memory_context(
+            chat_request,
+            memory_entries,
+            memory_store=app.state.memory_store,
+        )
 
         # Debug: log incoming request
         _logger.debug(
@@ -200,6 +256,10 @@ def create_app(
                 collector=app.state.collector,
                 precog_publisher=app.state.precog_publisher,
                 precog_project=app.state.precog_project,
+                memory_store=app.state.memory_store,
+                memory_project=memory_project,
+                original_chat_request=original_chat_request,
+                memory_entries=memory_entries,
             )
 
         started = time.perf_counter()
@@ -254,6 +314,17 @@ def create_app(
             payload=payload,
             precog_publisher=app.state.precog_publisher,
             precog_project=app.state.precog_project,
+            memory_entries=memory_entries,
+        )
+        _record_memory(
+            app.state.memory_store,
+            project=memory_project,
+            chat_request=original_chat_request,
+            response_payload=response.choices,
+            selected_model=decision.primary,
+            request_id=request_id,
+            payload=payload,
+            memory_entries=memory_entries,
         )
         return {
             "id": response.id,
@@ -274,6 +345,7 @@ def create_app(
                 "score": decision.score,
                 "tier": decision.tier.value,
                 "reason": decision.reason,
+                "memory": _memory_payload(memory_entries, memory_project),
             },
         }
 
@@ -322,6 +394,10 @@ async def _stream_response(
     collector: ObservationCollector | None,
     precog_publisher: Any | None = None,
     precog_project: str = "llmrouter",
+    memory_store: MemoryStore | None = None,
+    memory_project: str = "default",
+    original_chat_request: ChatRequest | None = None,
+    memory_entries: list[MemoryEntry] | None = None,
 ) -> StreamingResponse:
     """Build a Server-Sent Events streaming response for chat completions.
 
@@ -333,6 +409,8 @@ async def _stream_response(
     selected_model = decision.primary
     started = time.perf_counter()
     request_id = _request_id(request)
+    original_chat_request = original_chat_request or chat_request
+    memory_entries = memory_entries or []
 
     _log_chat_access(
         request=request,
@@ -381,15 +459,15 @@ async def _stream_response(
             yield "data: [DONE]\n\n"
             # Record observation (best-effort)
             latency_ms = (time.perf_counter() - started) * 1000
+            response_text = "".join(collected_content)
+            # Approximate token count for observation and memory metadata.
+            approx_tokens = max(len(response_text) // 4, 1)
+            usage = Usage(
+                prompt_tokens=len(chat_request.prompt_text) // 4,
+                completion_tokens=approx_tokens,
+                total_tokens=(len(chat_request.prompt_text) // 4) + approx_tokens,
+            )
             if collector is not None:
-                response_text = "".join(collected_content)
-                # Approximate token count for observation
-                approx_tokens = max(len(response_text) // 4, 1)
-                usage = Usage(
-                    prompt_tokens=len(chat_request.prompt_text) // 4,
-                    completion_tokens=approx_tokens,
-                    total_tokens=(len(chat_request.prompt_text) // 4) + approx_tokens,
-                )
                 _record_observation(
                     collector=collector,
                     chat_request=chat_request,
@@ -404,7 +482,18 @@ async def _stream_response(
                     payload=payload,
                     precog_publisher=precog_publisher,
                     precog_project=precog_project,
+                    memory_entries=memory_entries,
                 )
+            _record_memory(
+                memory_store,
+                project=memory_project,
+                chat_request=original_chat_request,
+                response_payload=[{"message": {"content": response_text}}],
+                selected_model=selected_model,
+                request_id=request_id,
+                payload=payload,
+                memory_entries=memory_entries,
+            )
 
     return StreamingResponse(
         event_generator(),
@@ -597,6 +686,143 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
     )
 
 
+def _memory_default_project(
+    memory_store: MemoryStore | None,
+    fallback: str,
+) -> str:
+    if memory_store is None:
+        return fallback
+    return memory_store.config.default_project or fallback
+
+
+def _memory_project(
+    payload: ChatCompletionPayload,
+    request: Request,
+    *,
+    default: str,
+    prompt: str = "",
+) -> str:
+    router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    metadata = payload.metadata if isinstance(payload.metadata, dict) else {}
+    project = (
+        request.headers.get("x-llmrouter-project")
+        or router_options.get("project")
+        or metadata.get("project")
+        or payload.extra.get("project")
+        or _infer_project_from_prompt(prompt)
+        or default
+    )
+    return str(project or default)
+
+
+def _infer_project_from_prompt(prompt: str) -> str | None:
+    if not prompt:
+        return None
+    patterns = (
+        r"Current Workspace Directory\s*\(([^)]+)\)",
+        r"(?:workspace|project root|working directory|cwd)\s*[:=]\s*`?([^\n`]+)",
+        r"/(?:github|repos|projects)/([A-Za-z0-9_.-]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, prompt, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        raw = match.group(1).strip().strip("\"'")
+        if "/" in raw:
+            raw = raw.rstrip("/").rsplit("/", 1)[-1]
+        project = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-")
+        if project:
+            return project
+    return None
+
+
+def _retrieve_memory(
+    memory_store: MemoryStore | None,
+    *,
+    project: str,
+    chat_request: ChatRequest,
+    payload: ChatCompletionPayload,
+) -> list[MemoryEntry]:
+    if memory_store is None or _memory_disabled(payload):
+        return []
+    entries = memory_store.retrieve(project=project, query=chat_request.prompt_text)
+    if entries:
+        _logger.debug(
+            "Memory retrieval: project=%s hits=%d ids=%s",
+            project,
+            len(entries),
+            [entry.id for entry in entries],
+        )
+    return entries
+
+
+def _with_memory_context(
+    chat_request: ChatRequest,
+    memory_entries: list[MemoryEntry],
+    *,
+    memory_store: MemoryStore | None,
+) -> ChatRequest:
+    if memory_store is None or not memory_entries:
+        return chat_request
+    context = render_memory_context(
+        memory_entries,
+        max_chars=memory_store.config.max_context_chars,
+    )
+    if not context:
+        return chat_request
+    messages = [
+        ChatMessage(role="system", content=context),
+        *chat_request.messages,
+    ]
+    extra = dict(chat_request.extra)
+    extra["llmrouter_memory"] = {
+        "used": True,
+        "ids": [entry.id for entry in memory_entries],
+    }
+    return replace(chat_request, messages=messages, extra=extra)
+
+
+def _record_memory(
+    memory_store: MemoryStore | None,
+    *,
+    project: str,
+    chat_request: ChatRequest,
+    response_payload: list[dict[str, Any]],
+    selected_model: ModelInfo,
+    request_id: str,
+    payload: ChatCompletionPayload,
+    memory_entries: list[MemoryEntry],
+) -> None:
+    if memory_store is None or _memory_disabled(payload):
+        return
+    response_text = "\n".join(_choice_text(choice) for choice in response_payload).strip()
+    recorded = memory_store.record_interaction(
+        project=project,
+        prompt=chat_request.prompt_text,
+        response=response_text,
+        metadata={
+            "request_id": request_id,
+            "task_role": _task_role(payload),
+            "selected_model": selected_model.name,
+            "provider": selected_model.provider.value,
+            "provider_model": selected_model.provider_model_name,
+            "retrieved_memory_ids": [entry.id for entry in memory_entries],
+        },
+    )
+    if recorded:
+        _logger.debug("Memory recorded: project=%s model=%s", project, selected_model.name)
+
+
+def _memory_disabled(payload: ChatCompletionPayload) -> bool:
+    router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    memory = router_options.get("memory")
+    if isinstance(memory, dict):
+        return memory.get("enabled") is False or memory.get("used") is False
+    if isinstance(memory, bool):
+        return not memory
+    return False
+
+
 def _model_payload(model: ModelInfo) -> dict[str, object]:
     return {
         "id": model.name,
@@ -627,6 +853,7 @@ def _record_observation(
     payload: ChatCompletionPayload,
     precog_publisher: Any | None = None,
     precog_project: str = "llmrouter",
+    memory_entries: list[MemoryEntry] | None = None,
 ) -> None:
     if collector is None and precog_publisher is None:
         return
@@ -638,6 +865,8 @@ def _record_observation(
     }
     if request_id:
         metadata["request_id"] = request_id
+    if memory_entries:
+        metadata["memory_ids"] = ",".join(str(entry.id) for entry in memory_entries)
     if collector is not None:
         collector.record(
             RoutingObservation(
@@ -668,6 +897,10 @@ def _record_observation(
                 "completion_tokens": usage.completion_tokens,
                 "cost_usd": cost_usd,
                 "rag": _rag_metadata(payload),
+                "memory": _memory_payload(
+                    memory_entries or [],
+                    _precog_project(payload, precog_project),
+                ),
             }
         )
 
@@ -720,6 +953,15 @@ def _rag_metadata(payload: ChatCompletionPayload) -> dict[str, Any]:
         "collection": rag.get("collection") if used else None,
         "top_k": int(rag.get("top_k") or 0) if used else 0,
         "context_tokens": int(rag.get("context_tokens") or 0) if used else 0,
+    }
+
+
+def _memory_payload(entries: list[MemoryEntry], project: str) -> dict[str, Any]:
+    return {
+        "used": bool(entries),
+        "project": project,
+        "top_k": len(entries),
+        "ids": [entry.id for entry in entries],
     }
 
 

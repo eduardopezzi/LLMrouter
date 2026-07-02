@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llmrouter.config import ProviderConfig, Settings
+from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
 from llmrouter.providers.base import BaseProvider
@@ -323,6 +324,32 @@ def catalog_stats(registry: ModelRegistry) -> dict[str, object]:
     }
 
 
+async def model_health(tracker: ModelHealthTracker | None) -> list[dict[str, object]]:
+    """Return aggregated health metrics for all models in the current window."""
+    if tracker is None:
+        return []
+    return [h.to_dict() for h in await tracker.list_health()]
+
+
+def render_model_health(tracker: ModelHealthTracker | None) -> str:
+    """Render model health metrics for the CLI panel."""
+    if tracker is None:
+        return "Model health: unavailable (tracker not configured)"
+    rows = asyncio.run(model_health(tracker))
+    if not rows:
+        return f"Model health (window={tracker.window_minutes}m): no data yet"
+    lines = [f"Model health (window={tracker.window_minutes}m)"]
+    for row in rows:
+        lines.append(
+            f"  {row['model']}: requests={row['request_count']} "
+            f"p50={row['p50_ms']:.0f}ms p95={row['p95_ms']:.0f}ms "
+            f"err={row['error_rate']:.1%} "
+            f"quality={row['avg_quality']:.2f} "
+            f"cost={row['avg_cost_usd']:.6f}"
+        )
+    return "\n".join(lines)
+
+
 def observation_stats(db_path: str | Path) -> dict[str, object]:
     """Return persisted routing observation statistics."""
     path = Path(db_path)
@@ -437,6 +464,7 @@ def run_interactive_panel(
         print("7. Show model priorities")
         print("8. Promote model priority")
         print("9. Refresh stats")
+        print("10. Show model health")
         print("0. Exit")
         try:
             choice = input("Select an option: ").strip()
@@ -467,6 +495,10 @@ def run_interactive_panel(
             _pause_for_enter()
         elif choice == "8":
             registry = _prompt_model_priority_panel(settings, registry)
+        elif choice == "10":
+            print()
+            print(render_model_health(getattr(settings, "health_tracker", None)))
+            _pause_for_enter()
         elif choice in {"9", ""}:
             continue
         elif choice == "0":

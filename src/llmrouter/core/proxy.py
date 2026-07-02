@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.types import ChatRequest, ChatResponse, Provider, RoutingDecision
 from llmrouter.logging_config import get_logger
 from llmrouter.providers.base import BaseProvider, ProviderError
@@ -20,9 +22,11 @@ class ProviderProxy:
         providers: dict[Provider, BaseProvider],
         *,
         on_provider_error: Callable[[Any, ProviderError], None] | None = None,
+        health_tracker: ModelHealthTracker | None = None,
     ) -> None:
         self._providers = providers
         self._on_provider_error = on_provider_error
+        self._health_tracker = health_tracker
         self._disabled_providers: set[Provider] = set()
 
     @property
@@ -82,8 +86,11 @@ class ProviderProxy:
                     i + 1,
                     len(attempts),
                 )
-                return await provider.chat_completion(request, model.provider_model_name)
+                response = await provider.chat_completion(request, model.provider_model_name)
+                await self._record_success(model, response)
+                return response
             except ProviderError as exc:
+                await self._record_error(model, exc)
                 self._handle_provider_error(model, exc)
                 fallback_message = (
                     f" → falling back to '{attempts[i + 1].name}'"
@@ -150,10 +157,16 @@ class ProviderProxy:
                     i + 1,
                     len(attempts),
                 )
+                started = time.perf_counter()
+                success = False
                 async for chunk in provider.stream_completion(request, model.provider_model_name):
                     yield chunk
+                    success = True
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                await self._record_stream_success(model, elapsed_ms)
                 return  # Success — stop trying fallbacks
             except ProviderError as exc:
+                await self._record_error(model, exc)
                 self._handle_provider_error(model, exc)
                 fallback_message = (
                     f" → falling back to '{attempts[i + 1].name}'"
@@ -190,6 +203,51 @@ class ProviderProxy:
                 getattr(model, "name", "(unknown)"),
                 callback_exc,
             )
+
+    async def _record_success(self, model: Any, response: ChatResponse) -> None:
+        if self._health_tracker is None:
+            return
+        try:
+            cost_usd = self._estimate_cost(model, response.usage)
+            await self._health_tracker.record_success(
+                model_name=model.name,
+                latency_ms=response.latency_ms,
+                cost_usd=cost_usd,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            _logger.warning("Health success recording failed for '%s': %s", model.name, exc)
+
+    async def _record_stream_success(self, model: Any, elapsed_ms: float) -> None:
+        if self._health_tracker is None:
+            return
+        try:
+            await self._health_tracker.record_success(
+                model_name=model.name,
+                latency_ms=elapsed_ms,
+                cost_usd=0.0,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            _logger.warning("Health stream success recording failed for '%s': %s", model.name, exc)
+
+    async def _record_error(self, model: Any, exc: ProviderError) -> None:
+        if self._health_tracker is None:
+            return
+        try:
+            error_type = "timeout" if exc.status_code in {408, 504} else f"http_{exc.status_code}"
+            await self._health_tracker.record_error(
+                model_name=model.name,
+                error_type=error_type,
+            )
+        except Exception as rec_exc:  # pragma: no cover - defensive logging
+            _logger.warning("Health error recording failed for '%s': %s", model.name, rec_exc)
+
+    @staticmethod
+    def _estimate_cost(model: Any, usage: Any) -> float:
+        input_cost = getattr(model, "cost_per_1k_input", 0.0) or 0.0
+        output_cost = getattr(model, "cost_per_1k_output", 0.0) or 0.0
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        return (prompt_tokens / 1000) * input_cost + (completion_tokens / 1000) * output_cost
 
 
 def _unique_attempts(models: list[Any]) -> list[Any]:

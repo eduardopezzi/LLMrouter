@@ -146,6 +146,36 @@ class PrecogConfig(BaseModel):
     timeout: float = 3.0
 
 
+class MemoryConfig(BaseModel):
+    """Local project memory/RAG settings."""
+
+    enabled: bool = False
+    backend: str = "local"  # local | precog
+    db_path: str = "data/llmrouter_memory.db"
+    default_project: str = "default"
+    top_k: int = 4
+    min_score: float = 0.12
+    max_context_chars: int = 2400
+    min_prompt_chars: int = 80
+    min_response_chars: int = 40
+    query_path: str = "/internal/rag/query"
+    record_path: str = "/internal/llmrouter/observations"
+
+
+class HealthConfig(BaseModel):
+    """Model health tracking configuration."""
+
+    enabled: bool = True
+    backend: str = "memory"  # memory | sqlite | redis
+    db_path: str = "data/health.db"
+    window_minutes: int = 15
+    ttl_minutes: int = 60
+    latency_weight: float = 0.30
+    error_weight: float = 0.35
+    quality_weight: float = 0.25
+    cost_weight: float = 0.10
+
+
 # ---------------------------------------------------------------------------
 # Main settings
 # ---------------------------------------------------------------------------
@@ -181,6 +211,8 @@ class Settings(BaseSettings):
     evaluator: EvaluatorConfig = Field(default_factory=EvaluatorConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     precog: PrecogConfig = Field(default_factory=PrecogConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    health: HealthConfig = Field(default_factory=HealthConfig)
 
     # Model registry file
     models_file: str = "config/models.yaml"

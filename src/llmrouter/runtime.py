@@ -14,6 +14,14 @@ from fastapi import FastAPI
 from llmrouter.api.routes import create_app
 from llmrouter.cli_panel import demote_model_priority
 from llmrouter.config import ProviderConfig, Settings, get_settings
+from llmrouter.core.health import (
+    HealthBackend,
+    HealthWeights,
+    InMemoryHealthStore,
+    ModelHealthTracker,
+    ReviewQualitySource,
+    SQLiteHealthStore,
+)
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry, load_model_registry
 from llmrouter.core.router import MultiModelRouter
@@ -23,6 +31,7 @@ from llmrouter.evaluator.collector import ObservationCollector
 from llmrouter.evaluator.feedback import FeedbackLoop
 from llmrouter.evaluator.grader import RoutingDecisionGrader
 from llmrouter.evaluator.judge import QualityJudge
+from llmrouter.memory import MemoryConfig, PrecogMemoryConfig, PrecogMemoryStore, SQLiteMemoryStore
 from llmrouter.precog import PrecogPublisher
 from llmrouter.providers import (
     BaseProvider,
@@ -44,12 +53,18 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or get_settings()
     _ensure_runtime_logging(debug=resolved_settings.debug)
     registry = build_registry(resolved_settings.models_file)
+    health_tracker = (
+        _build_health_tracker(resolved_settings)
+        if resolved_settings.health.enabled
+        else None
+    )
     router = MultiModelRouter(
         registry=registry,
         scorer=PromptScorer(_scorer_weights(resolved_settings.routing.scorer_weights)),
         strategy=resolved_settings.routing.strategy,
         fallback_count=resolved_settings.routing.fallback_count,
         provider_cost_order=resolved_settings.routing.provider_cost_order,
+        health_tracker=health_tracker,
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
@@ -61,6 +76,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
             app_holder,
             proxy_holder,
         ),
+        health_tracker=health_tracker,
     )
     proxy_holder["proxy"] = proxy
     collector = (
@@ -97,6 +113,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         if resolved_settings.precog.enabled
         else None
     )
+    memory_store = _build_memory_store(resolved_settings)
     app = create_app(
         registry=registry,
         router=router,
@@ -110,9 +127,45 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         cors_origins=resolved_settings.server.cors_origins,
         precog_publisher=precog_publisher,
         precog_project=resolved_settings.precog.project,
+        memory_store=memory_store,
+        health_tracker=health_tracker,
     )
     app_holder["app"] = app
     return app
+
+
+def _build_memory_store(settings: Settings) -> SQLiteMemoryStore | PrecogMemoryStore | None:
+    if not settings.memory.enabled:
+        return None
+    backend = settings.memory.backend.lower()
+    if backend == "precog":
+        return PrecogMemoryStore(
+            PrecogMemoryConfig(
+                enabled=True,
+                base_url=settings.precog.base_url,
+                api_key=settings.precog.api_key,
+                timeout=settings.precog.timeout,
+                default_project=settings.memory.default_project,
+                top_k=settings.memory.top_k,
+                min_score=settings.memory.min_score,
+                max_context_chars=settings.memory.max_context_chars,
+                query_path=settings.memory.query_path,
+                record_path=settings.memory.record_path,
+            )
+        )
+    return SQLiteMemoryStore(
+        MemoryConfig(
+            enabled=True,
+            backend="local",
+            db_path=settings.memory.db_path,
+            default_project=settings.memory.default_project,
+            top_k=settings.memory.top_k,
+            min_score=settings.memory.min_score,
+            max_context_chars=settings.memory.max_context_chars,
+            min_prompt_chars=settings.memory.min_prompt_chars,
+            min_response_chars=settings.memory.min_response_chars,
+        )
+    )
 
 
 def _ensure_runtime_logging(*, debug: bool) -> None:
@@ -262,6 +315,43 @@ def _api_key(config: _ApiKeyConfig, *env_names: str) -> str | None:
         if value:
             return value
     return None
+
+
+def _build_health_tracker(settings: Settings) -> ModelHealthTracker:
+    """Create a health tracker from settings, choosing the right backend."""
+    weights = HealthWeights(
+        latency=settings.health.latency_weight,
+        error=settings.health.error_weight,
+        quality=settings.health.quality_weight,
+        cost=settings.health.cost_weight,
+    )
+    backend = HealthBackend(settings.health.backend.lower())
+    if backend == HealthBackend.SQLITE:
+        store = SQLiteHealthStore(
+            db_path=settings.health.db_path,
+            ttl_minutes=settings.health.ttl_minutes,
+        )
+    elif backend == HealthBackend.REDIS:
+        # Redis backend not yet implemented; fall back to memory with a warning.
+        logging.getLogger("llmrouter.runtime").warning(
+            "Redis health backend is not implemented yet; falling back to in-memory store"
+        )
+        store = InMemoryHealthStore()
+    else:
+        store = InMemoryHealthStore()
+
+    quality_source = None
+    if settings.evaluator.enabled:
+        quality_source = ReviewQualitySource(
+            db_path=settings.evaluator.db_path,
+            window_minutes=settings.health.ttl_minutes,
+        )
+    return ModelHealthTracker(
+        store=store,
+        window_minutes=settings.health.window_minutes,
+        weights=weights,
+        quality_source=quality_source,
+    )
 
 
 def _scorer_weights(raw_weights: dict[str, float]) -> ScorerWeights:

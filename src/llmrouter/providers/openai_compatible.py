@@ -77,7 +77,7 @@ class OpenAICompatibleProvider(BaseProvider):
         elapsed_ms = (time.perf_counter() - started) * 1000
         _logger.debug("%s ← HTTP 200 in %.0fms", self._name, elapsed_ms)
         body = response.json()
-        return self._normalize_response(body, model)
+        return self._normalize_response(body, model, latency_ms=elapsed_ms)
 
     async def stream_completion(
         self, request: ChatRequest, model: str
@@ -186,7 +186,12 @@ class OpenAICompatibleProvider(BaseProvider):
             result["tool_call_id"] = message.tool_call_id
         return result
 
-    def _normalize_response(self, body: dict[str, object], model: str) -> ChatResponse:
+    def _normalize_response(
+        self,
+        body: dict[str, object],
+        model: str,
+        latency_ms: float = 0.0,
+    ) -> ChatResponse:
         choices = body.get("choices", [])
         metadata = body.get("usage", {})
         usage = Usage(
@@ -204,4 +209,5 @@ class OpenAICompatibleProvider(BaseProvider):
             usage=usage,
             finish_reason=finish_reason,
             created=int(body.get("created", 0) or 0),
+            latency_ms=latency_ms,
         )

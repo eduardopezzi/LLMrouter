@@ -183,6 +183,7 @@ class ChatResponse:
     usage: Usage
     finish_reason: FinishReason = FinishReason.STOP
     created: int = 0
+    latency_ms: float = 0.0
 
 
 # ---------------------------------------------------------------------------

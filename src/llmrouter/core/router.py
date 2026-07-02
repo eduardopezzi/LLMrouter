@@ -13,8 +13,10 @@ Design goals:
 
 from __future__ import annotations
 
-from typing import Protocol
+import asyncio
+from typing import Any, Protocol
 
+from llmrouter.core.health import HealthScore, ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.types import (
@@ -31,8 +33,21 @@ from llmrouter.logging_config import get_logger
 _logger = get_logger("llmrouter.router")
 
 
+def asyncio_run(coro: Any) -> Any:
+    """Run an async coroutine regardless of whether an event loop is running."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    return loop.run_until_complete(coro)
+
+
 class SelectionStrategy(Protocol):
     """Protocol for tier-internal model selection strategies."""
+
+    def set_health_tracker(self, tracker: ModelHealthTracker | None) -> None:
+        """Optionally wire a health tracker for adaptive routing."""
+        ...
 
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
         """Order models by preference. Returns the full sorted list."""
@@ -50,22 +65,62 @@ _PROVIDER_COST_RANK = {
 }
 
 
+def asyncio_run(coro: Any) -> Any:
+    """Run an async coroutine regardless of whether an event loop is running."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    # If we are inside a running loop (e.g. pytest-asyncio), create a new
+    # event loop in a dedicated thread to avoid blocking the current one.
+    if loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result(timeout=5)
+    return loop.run_until_complete(coro)
+
+
+def _health_scores_from_tracker(
+    tracker: ModelHealthTracker | None, models: list[ModelInfo]
+) -> dict[str, float]:
+    """Load composite health scores for the given models."""
+    if tracker is None:
+        return {}
+
+    async def _fetch() -> dict[str, float]:
+        score_map = await tracker.score_map()
+        return {name: score.score for name, score in score_map.items()}
+
+    return asyncio_run(_fetch())
+
+
 class CostStrategy:
     """Prefer the cheapest model within the tier.
 
     Numeric model costs are primary. When the catalog has equal or zero costs,
     providers are ranked by the current commercial preference:
     NVIDIA, then Zhipu, then Ollama.
+
+    When a health tracker is wired, the composite HealthScore (0-1, higher is
+    better) is used to demote sick models before the final priority tie-break.
     """
 
     def __init__(self, provider_cost_order: list[str] | None = None) -> None:
         self._provider_cost_rank = _provider_cost_rank(provider_cost_order)
+        self._health_tracker: ModelHealthTracker | None = None
+
+    def set_health_tracker(self, tracker: ModelHealthTracker | None) -> None:
+        self._health_tracker = tracker
 
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
+        scores = _health_scores_from_tracker(self._health_tracker, models)
         return sorted(
             models,
             key=lambda m: (
                 m.cost_ratio,
+                -scores.get(m.name, 1.0),  # higher score is better
                 self._provider_cost_rank.get(m.provider, 99),
                 m.priority,
             ),
@@ -76,38 +131,94 @@ class QualityStrategy:
     """Prefer the highest-tier / most capable model.
 
     Within a tier, uses lower priority number as a proxy for higher quality.
+    When a health tracker is wired, healthier models are preferred between
+    models with the same catalog priority.
     """
 
+    def __init__(self) -> None:
+        self._health_tracker: ModelHealthTracker | None = None
+
+    def set_health_tracker(self, tracker: ModelHealthTracker | None) -> None:
+        self._health_tracker = tracker
+
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
-        return sorted(models, key=lambda m: (m.priority, -m.max_tokens))
+        scores = _health_scores_from_tracker(self._health_tracker, models)
+        return sorted(
+            models,
+            key=lambda m: (
+                m.priority,
+                -scores.get(m.name, 1.0),
+                -m.max_tokens,
+            ),
+        )
 
 
 class LatencyStrategy:
     """Prefer models that are likely faster (lower cost ratio as proxy).
 
     Local models (Ollama) are preferred when available since they have no
-    network latency.
+    network latency. When a health tracker is wired, real P95 latency is used
+    as a tie-break instead of the static cost ratio.
     """
 
+    def __init__(self) -> None:
+        self._health_tracker: ModelHealthTracker | None = None
+
+    def set_health_tracker(self, tracker: ModelHealthTracker | None) -> None:
+        self._health_tracker = tracker
+
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
-        return sorted(models, key=lambda m: (m.provider != Provider.OLLAMA, m.cost_ratio))
+        scores = _health_scores_from_tracker(self._health_tracker, models)
+        # Prefer real P95 from health tracker when available
+        health_map = self._health_p95_map(models)
+        return sorted(
+            models,
+            key=lambda m: (
+                health_map.get(m.name, float("inf")),
+                m.provider != Provider.OLLAMA,
+                -scores.get(m.name, 1.0),
+                m.cost_ratio,
+            ),
+        )
+
+    def _health_p95_map(self, models: list[ModelInfo]) -> dict[str, float]:
+        if self._health_tracker is None:
+            return {}
+
+        async def _fetch() -> dict[str, float]:
+            health_list = await self._health_tracker.list_health()
+            return {h.model_name: h.p95_ms for h in health_list if h.p95_ms > 0}
+
+        return asyncio_run(_fetch())
 
 
 class BalancedStrategy:
     """Balance cost and quality using a composite score.
 
     Score = normalized_cost * 0.5 + normalized_priority * 0.5
-    Lower score is better.
+    Lower score is better. When a health tracker is wired, priority is
+    replaced by (1 - HealthScore) so unhealthy models are penalized.
     """
+
+    def __init__(self) -> None:
+        self._health_tracker: ModelHealthTracker | None = None
+
+    def set_health_tracker(self, tracker: ModelHealthTracker | None) -> None:
+        self._health_tracker = tracker
 
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
         if not models:
             return []
 
+        scores = _health_scores_from_tracker(self._health_tracker, models)
         max_cost = max(m.cost_ratio for m in models) or 1.0
         return sorted(
             models,
-            key=lambda m: (m.cost_ratio / max_cost) * 0.5 + (m.priority / 10.0) * 0.5,
+            key=lambda m: (
+                (m.cost_ratio / max_cost) * 0.5
+                + ((1.0 - scores.get(m.name, 1.0)) * 0.25)
+                + (m.priority / 10.0) * 0.25
+            ),
         )
 
 
@@ -135,6 +246,17 @@ def get_strategy(
 # ---------------------------------------------------------------------------
 
 
+async def health_tracker_scores(
+    tracker: ModelHealthTracker, models: list[ModelInfo]
+) -> dict[str, HealthScore]:
+    """Convenience async helper to load health scores for a candidate list."""
+    all_scores = await tracker.score_map()
+    return {
+        m.name: all_scores.get(m.name, HealthScore(m.name, 1.0, 1.0, 1.0, 0.5, 1.0, 0))
+        for m in models
+    }
+
+
 class MultiModelRouter:
     """Routes requests to the best available model.
 
@@ -156,12 +278,16 @@ class MultiModelRouter:
         strategy: RoutingStrategy = RoutingStrategy.COST,
         fallback_count: int = 2,
         provider_cost_order: list[str] | None = None,
+        health_tracker: ModelHealthTracker | None = None,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
         self._strategy = get_strategy(strategy, provider_cost_order)
         self._fallback_count = fallback_count
         self._unavailable_providers: set[Provider] = set()
+        self._health_tracker = health_tracker
+        if health_tracker is not None:
+            self._strategy.set_health_tracker(health_tracker)
 
     def replace_registry(self, registry: ModelRegistry) -> None:
         """Replace the live model registry used for future routing decisions."""
@@ -170,6 +296,11 @@ class MultiModelRouter:
     def mark_provider_unavailable(self, provider: Provider) -> None:
         """Exclude a provider from future automatic routing decisions."""
         self._unavailable_providers.add(provider)
+
+    def set_health_tracker(self, tracker: ModelHealthTracker | None) -> None:
+        """Wire the health tracker into the selection strategy for adaptive routing."""
+        self._health_tracker = tracker
+        self._strategy.set_health_tracker(tracker)
 
     async def route(
         self,

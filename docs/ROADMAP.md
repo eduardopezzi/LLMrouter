@@ -3,7 +3,7 @@
 | Item | Status | Implantacao |
 | --- | ---: | --- |
 | **5. Cross-Repository** | 100% | `ContractRegistry`, `BreakingChangeDetector`, snapshot versionavel, scripts `make` e CLI implementados e cobertos por testes |
-| **6. Model Health & Performance Tracking** | 0% | `ModelHealthTracker` com métricas em tempo real (latência P50/P99, taxa de erro, qualidade média, custo real) e `HealthScore` para roteamento adaptativo |
+| **6. Model Health & Performance Tracking** | 100% | `ModelHealthTracker` com métricas em tempo real (latência P50/P95/P99, taxa de erro, qualidade média, custo real) e `HealthScore` para roteamento adaptativo |
 | **7. Semantic Prompt Routing via Embeddings** | 0% | `SemanticPromptScorer` usando sentence-transformers para classificar prompts semanticamente por role/tarefa e rotear ao tier/modelo ideal |
 | **8. Response Caching com Chave Semântica** | 0% | Cache LRU/TTL com embedding do prompt como chave; reutiliza respostas para prompts semanticamente equivalentes (>0.95 cosine) |
 | **9. Canary/Blue-Green Model Rollout** | 0% | Campo `rollout_percentage` no `ModelInfo`; router faz seleção ponderada; CLI para configurar rollout gradual (ex.: 5% → 25% → 100%) |
@@ -25,13 +25,19 @@ O fluxo cross-repository esta operacional de ponta a ponta:
 
 ## 6. Model Health & Performance Tracking
 
+**Status**: 100% concluído — suite de testes passando (87 passed).
+
 **Objetivo**: Tornar o roteamento adaptativo baseado em performance real (latência, erro, qualidade) e não apenas configuração estática.
 
-**Componentes novos**:
+**Componentes entregues**:
 - `src/llmrouter/core/health.py` — `ModelHealthTracker`, `ModelHealth` dataclass, `HealthScore` composite
-- Integração no `MultiModelRouter._get_candidates()` e estratégias (`BalancedStrategy`, `CostStrategy`)
-- Persistência em SQLite/Redis com TTL sliding window
-- Endpoint `/health/models` e CLI `llmrouter health` para inspeção
+- Backends `InMemoryHealthStore` (default/testes) e `SQLiteHealthStore` (persistente, com TTL)
+- Integração nas estratégias (`BalancedStrategy`, `CostStrategy`, `QualityStrategy`, `LatencyStrategy`) & no `MultiModelRouter`
+- Coleta automática de métricas no `ProviderProxy` para requisições de sucesso e erro
+- `latency_ms` real preenchido nos `ChatResponse` normalizados
+- Configuração via `HealthConfig` (`config.py`) e runtime (`runtime.py`)
+- Endpoint `GET /health/models` e `GET /health/models/{model_name}`
+- CLI `llmrouter health` + opção "10. Show model health" no painel interativo
 
 **Métricas coletadas por modelo**:
 - Latência P50, P95, P99 (ms)
@@ -39,6 +45,30 @@ O fluxo cross-repository esta operacional de ponta a ponta:
 - Score médio de qualidade (via evaluator/PRecog feedback)
 - Custo real por request (USD)
 - Contagem de requests na janela deslizante (últimos N minutos)
+
+**Peso padrão do HealthScore**: latência 30%, erro 35%, qualidade 25%, custo 10%. Configurável via
+`LLMROUTER_HEALTH__LATENCY_WEIGHT`, `ERROR_WEIGHT`, `QUALITY_WEIGHT`, `COST_WEIGHT`.
+
+**Uso da API**:
+```bash
+curl http://localhost:12345/health/models
+# ou detalhe de um modelo específico
+curl http://localhost:12345/health/models/gpt-4o
+```
+
+**Uso do CLI**:
+```bash
+llmrouter health                         # texto
+llmrouter health --json                # JSON para scripts
+llmrouter health --backend sqlite --db-path data/health.db --window-minutes 15
+```
+
+**Persistência**: o backend `sqlite` mantém eventos dentro da janela de TTL configurada (padrão 60 min)
+e expira dados antigos automaticamente. O backend `redis` está reservado para implementação futura e
+faz fallback para memória com aviso no log.
+
+**Testes**: `tests/test_health.py` cobre percentis, score, expiração de janela, backends in-memory/SQLite
+e integração das estratégias com health tracker.
 
 ---
 

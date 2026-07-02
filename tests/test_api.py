@@ -20,6 +20,7 @@ from llmrouter.core.types import (
 )
 from llmrouter.evaluator.collector import ObservationCollector
 from llmrouter.evaluator.feedback import FeedbackReport
+from llmrouter.memory import MemoryConfig, SQLiteMemoryStore
 
 
 class FakeProxy:
@@ -37,6 +38,7 @@ class FakeProxy:
             usage=Usage(prompt_tokens=2, completion_tokens=1, total_tokens=3),
             finish_reason=FinishReason.STOP,
             created=123,
+            latency_ms=50.0,
         )
 
 
@@ -279,6 +281,12 @@ def test_chat_completions_publishes_precog_observation() -> None:
                 "top_k": 3,
                 "context_tokens": 120,
             },
+            "memory": {
+                "used": False,
+                "project": "precog",
+                "top_k": 0,
+                "ids": [],
+            },
         }
     ]
     assert len(publisher.observations[0]["prompt_hash"]) == 64
@@ -340,6 +348,8 @@ def test_health_reports_model_count() -> None:
         "models": 1,
         "providers": [],
         "evaluator": False,
+        "memory": False,
+        "health_tracker": False,
         "openai_compatible": {
             "chat_completions": "/v1/chat/completions",
             "models": "/v1/models",
@@ -421,6 +431,128 @@ def test_chat_completions_respects_task_role() -> None:
     body = response.json()
     assert body["model"] == "reviewer"
     assert body["llmrouter"]["selected_model"] == "reviewer"
+
+
+def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    proxy = FakeProxy()
+    memory_store = SQLiteMemoryStore(
+        MemoryConfig(
+            enabled=True,
+            db_path=str(tmp_path / "memory.db"),
+            min_prompt_chars=1,
+            min_response_chars=1,
+            min_score=0.05,
+        )
+    )
+    app = create_app(registry=registry, proxy=proxy, memory_store=memory_store)
+    client = TestClient(app)
+
+    first = client.post(
+        "/v1/chat/completions",
+        json={
+            "llmrouter": {"project": "alpha"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Remember the alpha project database schema uses users.email UUID keys."
+                    ),
+                }
+            ],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["llmrouter"]["memory"]["used"] is False
+
+    second = client.post(
+        "/v1/chat/completions",
+        json={
+            "llmrouter": {"project": "alpha"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "For alpha, what did we decide about users email schema keys?",
+                }
+            ],
+        },
+    )
+
+    assert second.status_code == 200
+    assert second.json()["llmrouter"]["memory"]["used"] is True
+    assert proxy.last_request is not None
+    assert proxy.last_request.messages[0].role == "system"
+    assert "Relevant project memory" in str(proxy.last_request.messages[0].content)
+    assert "users.email UUID keys" in str(proxy.last_request.messages[0].content)
+
+    third = client.post(
+        "/v1/chat/completions",
+        json={
+            "llmrouter": {"project": "beta"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "For beta, what did we decide about users email schema keys?",
+                }
+            ],
+        },
+    )
+
+    assert third.status_code == 200
+    assert third.json()["llmrouter"]["memory"]["used"] is False
+
+
+def test_chat_completions_infers_memory_project_from_workspace_prompt(tmp_path) -> None:
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    proxy = FakeProxy()
+    memory_store = SQLiteMemoryStore(
+        MemoryConfig(
+            enabled=True,
+            db_path=str(tmp_path / "memory.db"),
+            min_prompt_chars=1,
+            min_response_chars=1,
+            min_score=0.05,
+        )
+    )
+    app = create_app(registry=registry, proxy=proxy, memory_store=memory_store)
+    client = TestClient(app)
+
+    client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Current Workspace Directory (/Users/me/github/PRecog)\n"
+                        "Remember Phoenix service owns contracts."
+                    ),
+                }
+            ],
+        },
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Current Workspace Directory (/Users/me/github/PRecog)\n"
+                        "Who owns contracts?"
+                    ),
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["llmrouter"]["memory"]["project"] == "PRecog"
+    assert response.json()["llmrouter"]["memory"]["used"] is True
 
 
 def test_streaming_chunks_are_normalized_for_openai_clients() -> None:
