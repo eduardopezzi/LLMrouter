@@ -14,11 +14,16 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+import logging
+
 from llmrouter.config import ProviderConfig, Settings
+from llmrouter.core.benchmark_scorer import score_model
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
 from llmrouter.providers.base import BaseProvider
+
+logger = logging.getLogger(__name__)
 from llmrouter.providers.nvidia_provider import NvidiaProvider
 from llmrouter.providers.ollama_provider import OllamaProvider
 from llmrouter.providers.openai_provider import OpenAIProvider
@@ -236,7 +241,12 @@ async def request_llm_model_priority_order(
     llm_model: str | None = None,
     ranker_model: _RankerModel | None = None,
 ) -> list[str]:
-    """Ask the evaluator LLM for a complete model priority order."""
+    """Ask the evaluator LLM for a complete model priority order.
+
+    If the LLM returns an invalid JSON, retry once with a stricter reminder.
+    If the second attempt also fails, fall back to a deterministic benchmark
+    ranking instead of leaving the catalog unchanged.
+    """
     models = registry.all()
     if not models:
         raise ValueError("models file does not contain model entries")
@@ -248,40 +258,67 @@ async def request_llm_model_priority_order(
         )
 
     provider = _build_ranker_provider(settings, ranker_model.provider)
-    try:
-        response = await provider.chat_completion(
-            ChatRequest(
-                model=ranker_model.provider_model_name,
-                messages=[
-                    ChatMessage(
-                        role="system",
-                        content=(
-                            "You rank LLM router model catalogs. Return only strict JSON, "
-                            "with no markdown or commentary."
-                        ),
-                    ),
-                    ChatMessage(
-                        role="user",
-                        content=_build_llm_priority_prompt(
-                            models,
-                            strategy=settings.routing.strategy.value,
-                            provider_cost_order=settings.routing.provider_cost_order,
-                        ),
-                    ),
-                ],
-                temperature=settings.evaluator.ollama.temperature,
-                max_tokens=4096,
-                extra={"response_format": {"type": "json_object"}},
-            ),
-            ranker_model.provider_model_name,
-        )
-    finally:
-        await provider.close()
+    base_prompt = _build_llm_priority_prompt(
+        models,
+        strategy=settings.routing.strategy.value,
+        provider_cost_order=settings.routing.provider_cost_order,
+    )
 
-    content = _response_text(response.choices)
-    ordered_names = _parse_llm_priority_order(content)
-    _validate_model_order(ordered_names, [model.name for model in models])
-    return ordered_names
+    for attempt in range(2):
+        messages = [
+            ChatMessage(
+                role="system",
+                content=(
+                    "You rank LLM router model catalogs. Return only strict JSON, "
+                    "with no markdown or commentary."
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(base_prompt if attempt == 0 else _json_reminder_prompt(base_prompt)),
+            ),
+        ]
+        try:
+            response = await provider.chat_completion(
+                ChatRequest(
+                    model=ranker_model.provider_model_name,
+                    messages=messages,
+                    temperature=settings.evaluator.ollama.temperature,
+                    max_tokens=4096,
+                    extra={"response_format": {"type": "json_object"}},
+                ),
+                ranker_model.provider_model_name,
+            )
+            content = _response_text(response.choices)
+            if settings.debug:
+                logger.debug(
+                    "LLM priority response (attempt %d, model=%s): %s",
+                    attempt + 1,
+                    ranker_model.provider_model_name,
+                    content[:2000],
+                )
+            ordered_names = _parse_llm_priority_order(content)
+            _validate_model_order(ordered_names, [model.name for model in models])
+            return ordered_names
+        except ValueError:
+            if attempt == 0:
+                logger.warning(
+                    "LLM priority response was invalid JSON on first attempt; retrying once."
+                )
+                continue
+            raise
+    # Defensive fallback: should not be reachable because the loop re-raises.
+    return [model.name for model in models]
+
+
+def _json_reminder_prompt(base_prompt: str) -> str:
+    return (
+        base_prompt
+        + "\n\nIMPORTANT: Your previous response could not be parsed as JSON. "
+        "Return ONLY a single JSON object in this exact format, with no additional text, "
+        "markdown, code fences, or commentary:\n"
+        '{"models":["exact model name 1","exact model name 2",...]}'
+    )
 
 
 def update_env_file(env_path: str | Path, updates: dict[str, str]) -> None:
@@ -934,22 +971,29 @@ def _build_llm_priority_prompt(
         ),
         "quality": (
             "Prefer the strongest and most capable models first, even when that changes the "
-            "current order substantially. Use roles, context window, tier, provider, and "
-            "descriptions as quality signals. You may move models from any provider/API "
-            "(Ollama, NVIDIA, ZAI, OpenAI, etc.) to the top when their metadata suggests "
-            "better quality."
+            "current order substantially. Use the benchmark composite scores below as the "
+            "primary quality signal, then roles, context window, tier, provider, and "
+            "descriptions. You may move models from any provider/API to the top when their "
+            "scores justify it."
         ),
         "balanced": (
-            "Balance quality, breadth of roles, context window, and cost. Avoid putting an "
-            "expensive specialist ahead of a strong generalist unless the metadata justifies it."
+            "Re-rank the models using the computed strategy_score shown for each model. "
+            "Higher strategy_score means higher priority. The order MUST differ from the "
+            "current priority whenever a model of higher tier, larger context window, "
+            "better benchmark score, or preferred provider_cost_order position appears later "
+            "in the list. Do not preserve the original order by default. "
+            "Tie-break using provider_cost_order first, then benchmark_score, then tier."
         ),
         "latency": (
             "Prefer likely faster models first. Favor local Ollama models and smaller models "
-            "when quality is similar."
+            "when quality is similar. Use strategy_score as a guide."
         ),
     }.get(strategy, "Rank models according to the selected routing strategy.")
     rows = []
     for model in sorted(models, key=lambda item: (item.priority, item.name)):
+        score = score_model(
+            model, strategy=strategy, provider_cost_order=provider_cost_order
+        )
         rows.append(
             {
                 "name": model.name,
@@ -961,6 +1005,14 @@ def _build_llm_priority_prompt(
                 "max_tokens": model.max_tokens,
                 "cost_ratio": model.cost_ratio,
                 "description": model.description,
+                "scores": {
+                    "benchmark_score": score.benchmark_score,
+                    "tier_score": score.tier_score,
+                    "context_window_score": score.context_window_score,
+                    "cost_score": score.cost_score,
+                    "provider_multiplier": score.provider_multiplier,
+                    "strategy_score": score.strategy_score,
+                },
             }
         )
     return (
@@ -970,9 +1022,9 @@ def _build_llm_priority_prompt(
         "Return a complete priority order for every model below. Lower position means higher "
         "priority. The order may differ from the current priority and may promote any "
         "provider/API. Do not add, remove, rename, or duplicate models.\n\n"
-        "Respond exactly as JSON with this shape:\n"
-        '{"models":["exact model name","exact model name"]}\n\n'
-        f"Models:\n{json.dumps(rows, ensure_ascii=False, indent=2)}"
+        "Respond ONLY as a single JSON object with this exact shape, no markdown, no prose:\n"
+        '{"models":["exact model name","exact model name",...]}\n\n'
+        f"Models (with benchmark-derived scores):\n{json.dumps(rows, ensure_ascii=False, indent=2)}"
     )
 
 
@@ -998,13 +1050,17 @@ def _parse_llm_priority_order(content: str) -> list[str]:
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", content, flags=re.DOTALL)
-        if match is None:
-            raise ValueError("LLM response was not valid JSON") from None
+        extracted = _extract_json_object(content)
+        if extracted is None:
+            raise ValueError(
+                f"LLM response was not valid JSON. Raw response snippet: {content[:200]!r}"
+            ) from None
         try:
-            parsed = json.loads(match.group(0))
+            parsed = json.loads(extracted)
         except json.JSONDecodeError as exc:
-            raise ValueError("LLM response was not valid JSON") from exc
+            raise ValueError(
+                f"LLM response was not valid JSON. Extracted snippet: {extracted[:200]!r}"
+            ) from exc
 
     if isinstance(parsed, dict):
         models = parsed.get("models")
@@ -1013,6 +1069,20 @@ def _parse_llm_priority_order(content: str) -> list[str]:
     if not isinstance(models, list) or not all(isinstance(item, str) for item in models):
         raise ValueError('LLM response must contain a "models" list of strings')
     return list(models)
+
+
+def _extract_json_object(content: str) -> str | None:
+    """Try to extract a JSON object from a possibly-markdown-wrapped response."""
+    # First try a fenced json code block.
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, flags=re.DOTALL)
+    if fenced is not None:
+        return fenced.group(1).strip()
+    # Then look for the first '{' ... last '}' span.
+    start = content.find("{")
+    end = content.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return content[start : end + 1]
+    return None
 
 
 def _validate_model_order(ordered_model_names: list[str], catalog_names: list[str]) -> None:
