@@ -449,6 +449,7 @@ def run_interactive_panel(
     registry: ModelRegistry,
     *,
     env_path: str | Path = ".env",
+    health_tracker: ModelHealthTracker | None = None,
 ) -> None:
     """Run an interactive terminal panel."""
     while True:
@@ -497,7 +498,7 @@ def run_interactive_panel(
             registry = _prompt_model_priority_panel(settings, registry)
         elif choice == "10":
             print()
-            print(render_model_health(getattr(settings, "health_tracker", None)))
+            print(render_model_health(health_tracker))
             _pause_for_enter()
         elif choice in {"9", ""}:
             continue

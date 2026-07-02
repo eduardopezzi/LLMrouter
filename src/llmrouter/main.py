@@ -332,9 +332,7 @@ def main() -> None:
                 settings = reload_settings()
             print(render_panel_summary(settings, registry))
             return
-        # Expose tracker on settings so the interactive panel can read it.
-        settings.health_tracker = health_tracker  # type: ignore[attr-defined]
-        run_interactive_panel(settings, registry, env_path=args.env_file)
+        run_interactive_panel(settings, registry, health_tracker=health_tracker, env_path=args.env_file)
         return
 
     if args.command == "health":
