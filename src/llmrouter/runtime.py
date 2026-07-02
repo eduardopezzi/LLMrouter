@@ -35,6 +35,7 @@ from llmrouter.memory import MemoryConfig, PrecogMemoryConfig, PrecogMemoryStore
 from llmrouter.precog import PrecogPublisher
 from llmrouter.providers import (
     BaseProvider,
+    DeepSeekProvider,
     GeminiProvider,
     NvidiaProvider,
     OllamaProvider,
@@ -293,6 +294,15 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
                 base_url=settings.providers.gemini.base_url,
                 timeout=settings.providers.gemini.timeout,
                 max_retries=settings.providers.gemini.max_retries,
+            )
+    if Provider.DEEPSEEK in needed and settings.providers.deepseek.enabled:
+        api_key = _api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY")
+        if api_key:
+            providers[Provider.DEEPSEEK] = DeepSeekProvider(
+                api_key=api_key,
+                base_url=settings.providers.deepseek.base_url,
+                timeout=settings.providers.deepseek.timeout,
+                max_retries=settings.providers.deepseek.max_retries,
             )
 
     return providers

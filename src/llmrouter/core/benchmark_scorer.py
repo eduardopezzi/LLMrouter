@@ -178,6 +178,21 @@ BENCHMARK_SCORES: dict[str, dict[str, float]] = {
         "mt_bench": 0.80,
         "ruler": 0.76,
     },
+    # DeepSeek API models
+    "deepseek/deepseek-chat": {
+        "mmlu": 0.89,
+        "humaneval": 0.88,
+        "gpqa": 0.80,
+        "mt_bench": 0.87,
+        "ruler": 0.84,
+    },
+    "deepseek/deepseek-reasoner": {
+        "mmlu": 0.91,
+        "humaneval": 0.90,
+        "gpqa": 0.86,
+        "mt_bench": 0.89,
+        "ruler": 0.85,
+    },
 }
 
 # Which benchmarks participate in the composite quality score and with what weight.

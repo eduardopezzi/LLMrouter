@@ -10,7 +10,7 @@ from llmrouter.runtime import build_registry
 def test_load_model_registry_from_catalog() -> None:
     registry = load_model_registry("config/models.example.yaml")
 
-    assert len(registry.models) == 22
+    assert len(registry.models) == 24
     first = registry.models[0]
     assert first.name == "zhipu/glm-5.2"
     assert first.provider == Provider.ZAI
@@ -39,4 +39,4 @@ def test_build_registry_creates_local_models_file_from_example(tmp_path) -> None
     registry = build_registry(str(config_dir / "models.yaml"))
 
     assert (config_dir / "models.yaml").exists()
-    assert len(registry.models) == 22
+    assert len(registry.models) == 24

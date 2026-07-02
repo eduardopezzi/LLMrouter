@@ -19,6 +19,7 @@ class Provider(str, Enum):
     ZAI = "zai"
     GEMINI = "gemini"
     NVIDIA = "nvidia"
+    DEEPSEEK = "deepseek"
 
 
 class Tier(int, Enum):

@@ -64,6 +64,7 @@ class ProvidersConfig(BaseModel):
     zai: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     nvidia: ProviderConfig = Field(default_factory=ProviderConfig)
+    deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 class RoutingConfig(BaseModel):

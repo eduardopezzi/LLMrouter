@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,20 +15,19 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-import logging
-
 from llmrouter.config import ProviderConfig, Settings
 from llmrouter.core.benchmark_scorer import score_model
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
 from llmrouter.providers.base import BaseProvider
-
-logger = logging.getLogger(__name__)
+from llmrouter.providers.deepseek_provider import DeepSeekProvider
 from llmrouter.providers.nvidia_provider import NvidiaProvider
 from llmrouter.providers.ollama_provider import OllamaProvider
 from llmrouter.providers.openai_provider import OpenAIProvider
 from llmrouter.providers.zai_provider import ZaiProvider
+
+logger = logging.getLogger(__name__)
 
 ROUTING_STRATEGY_ENV = "LLMROUTER_ROUTING__STRATEGY"
 FALLBACK_COUNT_ENV = "LLMROUTER_ROUTING__FALLBACK_COUNT"
@@ -871,6 +871,11 @@ def _ranker_provider_available(settings: Settings, provider: Provider) -> bool:
             settings.providers.zai.enabled
             and _api_key(settings.providers.zai, "ZAI_API_KEY") is not None
         )
+    if provider == Provider.DEEPSEEK:
+        return (
+            settings.providers.deepseek.enabled
+            and _api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY") is not None
+        )
     return False
 
 
@@ -911,6 +916,16 @@ def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvid
             base_url=settings.providers.zai.base_url,
             timeout=settings.providers.zai.timeout,
             max_retries=settings.providers.zai.max_retries,
+        )
+    if provider == Provider.DEEPSEEK:
+        api_key = _api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY")
+        if not api_key:
+            raise ValueError("DeepSeek API key is not configured")
+        return DeepSeekProvider(
+            api_key=api_key,
+            base_url=settings.providers.deepseek.base_url,
+            timeout=settings.providers.deepseek.timeout,
+            max_retries=settings.providers.deepseek.max_retries,
         )
     raise ValueError(f"Provider {provider.value} cannot be used for priority ranking")
 

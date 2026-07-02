@@ -245,6 +245,29 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   # ==================================================================
+  # DeepSeek — Provedor OpenAI-compatible
+  # ==================================================================
+  - name: "deepseek/deepseek-chat"
+    provider: "deepseek"
+    roles: ["review", "fix", "refactoring", "test_generation", "documentation", "summarization"]
+    priority: 13
+    description: "DeepSeek V3 — modelo flagship com 671B parâmetros MoE, excelente custo-benefício"
+    max_tokens: 65536
+    prompt_cost_per_1m_tokens: 0.27
+    completion_cost_per_1m_tokens: 1.10
+    cached_prompt_cost_per_1m_tokens: 0.07
+
+  - name: "deepseek/deepseek-reasoner"
+    provider: "deepseek"
+    roles: ["architecture", "review", "security_audit", "fix"]
+    priority: 14
+    description: "DeepSeek R1 — reasoning model com chain-of-thought, ideal para tarefas complexas"
+    max_tokens: 65536
+    prompt_cost_per_1m_tokens: 0.55
+    completion_cost_per_1m_tokens: 2.19
+    cached_prompt_cost_per_1m_tokens: 0.14
+
+  # ==================================================================
   # Z AI (Zhipu) — Provedor de fallback
   # ==================================================================
   - name: "zhipu/glm-5.2"
