@@ -217,12 +217,15 @@ def create_app(
             )
 
         chat_request = _to_chat_request(payload)
+        prompt_directives = _prompt_directives(chat_request.prompt_text)
+        chat_request = _with_prompt_directives(chat_request, payload, prompt_directives)
         original_chat_request = chat_request
         memory_project = _memory_project(
             payload,
             request,
             default=_memory_default_project(app.state.memory_store, app.state.precog_project),
             prompt=chat_request.prompt_text,
+            directives=prompt_directives,
         )
         memory_entries = _retrieve_memory(
             app.state.memory_store,
@@ -264,7 +267,7 @@ def create_app(
 
         started = time.perf_counter()
         request_id = _request_id(request)
-        constraints = _routing_constraints(payload)
+        constraints = _routing_constraints(payload, prompt_directives)
         decision = await app.state.router.route(chat_request, constraints)
 
         # Debug: log routing decision
@@ -404,12 +407,13 @@ async def _stream_response(
     Routes the request through the multi-model router, then streams chunks
     from the selected provider proxy in OpenAI SSE format.
     """
-    constraints = _routing_constraints(payload)
+    original_chat_request = original_chat_request or chat_request
+    prompt_directives = _prompt_directives(original_chat_request.prompt_text)
+    constraints = _routing_constraints(payload, prompt_directives)
     decision = await app_router.route(chat_request, constraints)
     selected_model = decision.primary
     started = time.perf_counter()
     request_id = _request_id(request)
-    original_chat_request = original_chat_request or chat_request
     memory_entries = memory_entries or []
 
     _log_chat_access(
@@ -701,18 +705,66 @@ def _memory_project(
     *,
     default: str,
     prompt: str = "",
+    directives: dict[str, str] | None = None,
 ) -> str:
     router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
     metadata = payload.metadata if isinstance(payload.metadata, dict) else {}
+    directives = directives or {}
     project = (
         request.headers.get("x-llmrouter-project")
         or router_options.get("project")
         or metadata.get("project")
         or payload.extra.get("project")
+        or directives.get("project")
         or _infer_project_from_prompt(prompt)
         or default
     )
     return str(project or default)
+
+
+def _prompt_directives(prompt: str) -> dict[str, str]:
+    """Parse {{project:...}} style directives from the first prompt lines."""
+    result: dict[str, str] = {}
+    first_lines = "\n".join(prompt.splitlines()[:5])
+    if not first_lines:
+        return result
+    aliases = {
+        "p": "project",
+        "project": "project",
+        "t": "task_role",
+        "task": "task_role",
+        "task_role": "task_role",
+        "role": "task_role",
+        "m": "model",
+        "model": "model",
+        "preferred_model": "model",
+    }
+    directive_pattern = r"\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*([^{}]+?)\s*\}\}"
+    for key, value in re.findall(directive_pattern, first_lines):
+        normalized_key = aliases.get(key.strip().lower())
+        if normalized_key is None:
+            continue
+        cleaned_value = value.strip().strip("\"'")
+        if cleaned_value:
+            result[normalized_key] = cleaned_value
+    return result
+
+
+def _with_prompt_directives(
+    chat_request: ChatRequest,
+    payload: ChatCompletionPayload,
+    directives: dict[str, str],
+) -> ChatRequest:
+    if not directives:
+        return chat_request
+    model = directives.get("model")
+    request_model = payload.model or ""
+    next_model = chat_request.model
+    if model and (not request_model or request_model == "auto"):
+        next_model = None if model == "auto" else model
+    extra = dict(chat_request.extra)
+    extra["llmrouter_prompt_directives"] = directives
+    return replace(chat_request, model=next_model, extra=extra)
 
 
 def _infer_project_from_prompt(prompt: str) -> str | None:
@@ -802,7 +854,7 @@ def _record_memory(
         response=response_text,
         metadata={
             "request_id": request_id,
-            "task_role": _task_role(payload),
+            "task_role": _task_role(payload, _prompt_directives(chat_request.prompt_text)),
             "selected_model": selected_model.name,
             "provider": selected_model.provider.value,
             "provider_model": selected_model.provider_model_name,
@@ -929,14 +981,19 @@ def _precog_project(payload: ChatCompletionPayload, default: str) -> str:
     return str(project or default)
 
 
-def _task_role(payload: ChatCompletionPayload) -> str:
+def _task_role(
+    payload: ChatCompletionPayload,
+    directives: dict[str, str] | None = None,
+) -> str:
     router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    directives = directives or {}
     role = (
         payload.task_role
         or router_options.get("task_role")
         or router_options.get("role")
         or payload.extra.get("role")
         or payload.extra.get("task_role")
+        or directives.get("task_role")
         or ""
     )
     return str(role)
@@ -965,14 +1022,19 @@ def _memory_payload(entries: list[MemoryEntry], project: str) -> dict[str, Any]:
     }
 
 
-def _routing_constraints(payload: ChatCompletionPayload) -> RoutingConstraints:
+def _routing_constraints(
+    payload: ChatCompletionPayload,
+    directives: dict[str, str] | None = None,
+) -> RoutingConstraints:
     router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    directives = directives or {}
     role = (
         payload.task_role
         or router_options.get("task_role")
         or router_options.get("role")
         or payload.extra.get("role")
         or payload.extra.get("task_role")
+        or directives.get("task_role")
     )
     if not isinstance(role, str) or not role:
         return RoutingConstraints()

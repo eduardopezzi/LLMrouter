@@ -59,6 +59,43 @@ curl -X POST http://localhost:12345/v1/chat/completions \
 `documentation`, `refactoring`, `security_audit`, `architecture` e `migration`.
 Também é possível enviar o papel em `llmrouter.task_role` ou `extra.task_role`.
 
+### Diretivas no prompt
+
+Para clientes como o Cline, onde nem sempre é prático enviar metadados JSON, o
+LLMrouter também aceita diretivas curtas no começo do prompt. Elas devem aparecer
+nas primeiras 5 linhas:
+
+```text
+{{project:PRecog}} {{task:deep_research}} {{model:zhipu/glm-5.1}}
+
+Investigue como melhorar o pipeline de memória/RAG.
+```
+
+Aliases aceitos:
+
+| Diretiva | Aliases | Uso |
+| -------- | ------- | --- |
+| `project` | `p` | Namespace de memória/RAG do projeto |
+| `task` | `t`, `task_role`, `role` | Papel da tarefa para roteamento |
+| `model` | `m`, `preferred_model` | Modelo preferido quando `model=auto` |
+
+Exemplos:
+
+```text
+{{p:LLMrouter}} {{t:review}} {{m:ollama/kimi-k2.7-code:cloud}}
+Revise a mudança antes do deploy.
+```
+
+```text
+{{project:PRecog}} {{task:refactoring}}
+Refatore este módulo mantendo compatibilidade com a API atual.
+```
+
+Metadados explícitos no payload têm prioridade sobre as diretivas do prompt. Ou
+seja, `llmrouter.project`, `task_role` e `model` enviados em JSON vencem o texto
+quando ambos existirem. O parser só lê as primeiras linhas para evitar conflito
+com código, Markdown, templates e diffs.
+
 ### Publicação de observações no PRecog
 
 O LLMrouter também pode enviar observações e feedback para os endpoints internos

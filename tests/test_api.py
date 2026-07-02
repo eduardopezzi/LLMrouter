@@ -433,6 +433,52 @@ def test_chat_completions_respects_task_role() -> None:
     assert body["llmrouter"]["selected_model"] == "reviewer"
 
 
+def test_chat_completions_accepts_prompt_directives() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="summary", provider=Provider.OPENAI, tier=Tier.T1),
+            ModelInfo(
+                name="reviewer",
+                provider=Provider.OPENAI,
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+            ),
+            ModelInfo(name="specialist", provider=Provider.OPENAI, tier=Tier.T3),
+        )
+    )
+    proxy = FakeProxy()
+    app = create_app(registry=registry, proxy=proxy)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "{{project:PRecog}} {{task:review}} {{model:specialist}}\n"
+                        "Review this implementation."
+                    ),
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["llmrouter"]["selected_model"] == "specialist"
+    assert body["llmrouter"]["memory"]["project"] == "PRecog"
+    assert proxy.last_request is not None
+    assert proxy.last_request.model == "specialist"
+    assert proxy.last_request.extra["llmrouter_prompt_directives"] == {
+        "project": "PRecog",
+        "task_role": "review",
+        "model": "specialist",
+    }
+
+
 def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
     registry = ModelRegistry(
         models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
