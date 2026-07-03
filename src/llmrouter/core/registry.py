@@ -72,6 +72,7 @@ def _model_from_mapping(item: object) -> ModelInfo:
     provider = Provider(_required_str(item, "provider"))
     roles = _string_set(item.get("roles", []))
     max_tokens = int(item.get("max_tokens", item.get("context_window", 8192)))
+    context_window = int(item.get("context_window", max_tokens))
     priority = int(item.get("priority", 10))
     tier = _parse_tier(item.get("tier"), roles, max_tokens, priority, name)
 
@@ -84,7 +85,7 @@ def _model_from_mapping(item: object) -> ModelInfo:
         max_tokens=max_tokens,
         capabilities=roles,
         priority=priority,
-        context_window=max_tokens,
+        context_window=context_window,
         api_base=_optional_str(item.get("api_base")),
         description=_optional_str(item.get("description")) or "",
     )

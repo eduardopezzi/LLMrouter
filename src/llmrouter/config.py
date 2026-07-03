@@ -63,7 +63,6 @@ class ProvidersConfig(BaseModel):
     )
     zai: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
-    nvidia: ProviderConfig = Field(default_factory=ProviderConfig)
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
@@ -73,7 +72,7 @@ class RoutingConfig(BaseModel):
     strategy: RoutingStrategy = RoutingStrategy.COST
     fallback_count: int = 2
     provider_cost_order: list[str] = Field(
-        default_factory=lambda: ["zai", "ollama", "nvidia"],
+        default_factory=lambda: ["zai", "ollama"],
         description="Provider preference used to break cost ties.",
     )
     max_cost_per_request: float | None = None

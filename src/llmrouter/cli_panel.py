@@ -22,7 +22,6 @@ from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
 from llmrouter.providers.base import BaseProvider
 from llmrouter.providers.deepseek_provider import DeepSeekProvider
-from llmrouter.providers.nvidia_provider import NvidiaProvider
 from llmrouter.providers.ollama_provider import OllamaProvider
 from llmrouter.providers.openai_provider import OpenAIProvider
 from llmrouter.providers.zai_provider import ZaiProvider
@@ -681,7 +680,7 @@ def _prompt_provider_cost_order(
 
     print()
     value = input(
-        "Enter numbers comma-separated (e.g. 2,5,3) or names (e.g. nvidia,zai,ollama).\n"
+        "Enter numbers comma-separated (e.g. 2,5,3) or names (e.g. deepseek,zai,ollama).\n"
         "Press Enter to keep current: "
     ).strip()
 
@@ -860,12 +859,6 @@ def _ranker_provider_available(settings: Settings, provider: Provider) -> bool:
             settings.providers.openai.enabled
             and _api_key(settings.providers.openai, "OPENAI_API_KEY") is not None
         )
-    if provider == Provider.NVIDIA:
-        return settings.providers.nvidia.enabled and _api_key(
-            settings.providers.nvidia,
-            "NVIDIA_NIM_API_KEY",
-            "NVIDIA_API_KEY",
-        ) is not None
     if provider == Provider.ZAI:
         return (
             settings.providers.zai.enabled
@@ -896,16 +889,6 @@ def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvid
             base_url=settings.providers.openai.base_url,
             timeout=settings.providers.openai.timeout,
             max_retries=settings.providers.openai.max_retries,
-        )
-    if provider == Provider.NVIDIA:
-        api_key = _api_key(settings.providers.nvidia, "NVIDIA_NIM_API_KEY", "NVIDIA_API_KEY")
-        if not api_key:
-            raise ValueError("NVIDIA API key is not configured")
-        return NvidiaProvider(
-            api_key=api_key,
-            base_url=settings.providers.nvidia.base_url,
-            timeout=settings.providers.nvidia.timeout,
-            max_retries=settings.providers.nvidia.max_retries,
         )
     if provider == Provider.ZAI:
         api_key = _api_key(settings.providers.zai, "ZAI_API_KEY")

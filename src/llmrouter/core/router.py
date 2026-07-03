@@ -51,9 +51,8 @@ class SelectionStrategy(Protocol):
 # ---------------------------------------------------------------------------
 
 _PROVIDER_COST_RANK = {
-    Provider.NVIDIA: 0,
-    Provider.ZAI: 1,
-    Provider.OLLAMA: 2,
+    Provider.ZAI: 0,
+    Provider.OLLAMA: 1,
 }
 
 
@@ -93,7 +92,7 @@ class CostStrategy:
 
     Numeric model costs are primary. When the catalog has equal or zero costs,
     providers are ranked by the current commercial preference:
-    NVIDIA, then Zhipu, then Ollama.
+    Zhipu, then Ollama.
 
     When a health tracker is wired, the composite HealthScore (0-1, higher is
     better) is used to demote sick models before the final priority tie-break.

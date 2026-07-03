@@ -18,7 +18,6 @@ class Provider(str, Enum):
     OLLAMA = "ollama"
     ZAI = "zai"
     GEMINI = "gemini"
-    NVIDIA = "nvidia"
     DEEPSEEK = "deepseek"
 
 
@@ -107,8 +106,8 @@ class ModelInfo:
         """Model name expected by the upstream provider API."""
         prefixes = {
             Provider.OLLAMA: "ollama/",
-            Provider.NVIDIA: "nvidia_nim/",
             Provider.ZAI: "zhipu/",
+            Provider.DEEPSEEK: "deepseek/",
         }
         prefix = prefixes.get(self.provider)
         if prefix and self.name.startswith(prefix):

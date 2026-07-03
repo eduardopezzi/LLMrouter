@@ -224,7 +224,7 @@ def test_chat_completions_publishes_precog_observation() -> None:
         models=(
             ModelInfo(
                 name="cheap",
-                provider=Provider.NVIDIA,
+                provider=Provider.DEEPSEEK,
                 tier=Tier.T1,
                 cost_per_1k_input=0.5,
                 cost_per_1k_output=1.0,
@@ -261,7 +261,7 @@ def test_chat_completions_publishes_precog_observation() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["llmrouter"]["request_id"] == "req-123"
-    assert body["llmrouter"]["provider"] == "nvidia"
+    assert body["llmrouter"]["provider"] == "deepseek"
     assert publisher.observations == [
         {
             "request_id": "req-123",
@@ -269,7 +269,7 @@ def test_chat_completions_publishes_precog_observation() -> None:
             "task_role": "fix",
             "prompt_hash": publisher.observations[0]["prompt_hash"],
             "selected_model": "cheap",
-            "provider": "nvidia",
+            "provider": "deepseek",
             "provider_model": "cheap",
             "latency_ms": publisher.observations[0]["latency_ms"],
             "prompt_tokens": 2,

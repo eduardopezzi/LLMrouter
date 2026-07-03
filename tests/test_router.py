@@ -76,7 +76,7 @@ async def test_router_scores_code_prompt_into_higher_tier() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cost_strategy_prefers_nvidia_then_zai_then_ollama_on_equal_cost() -> None:
+async def test_cost_strategy_prefers_zai_then_ollama_on_equal_cost() -> None:
     registry = ModelRegistry(
         models=(
             ModelInfo(
@@ -93,13 +93,6 @@ async def test_cost_strategy_prefers_nvidia_then_zai_then_ollama_on_equal_cost()
                 capabilities=frozenset({"review"}),
                 priority=30,
             ),
-            ModelInfo(
-                name="nvidia/reviewer",
-                provider=Provider.NVIDIA,
-                tier=Tier.T3,
-                capabilities=frozenset({"review"}),
-                priority=20,
-            ),
         )
     )
     request = ChatRequest(
@@ -111,9 +104,8 @@ async def test_cost_strategy_prefers_nvidia_then_zai_then_ollama_on_equal_cost()
 
     decision = await router.route(request, constraints)
 
-    assert decision.primary.name == "nvidia/reviewer"
+    assert decision.primary.name == "zhipu/reviewer"
     assert [model.name for model in decision.fallbacks] == [
-        "zhipu/reviewer",
         "ollama/reviewer",
     ]
 
@@ -130,8 +122,8 @@ async def test_cost_strategy_uses_configured_provider_order_on_equal_cost() -> N
                 priority=1,
             ),
             ModelInfo(
-                name="nvidia/reviewer",
-                provider=Provider.NVIDIA,
+                name="deepseek/reviewer",
+                provider=Provider.DEEPSEEK,
                 tier=Tier.T3,
                 capabilities=frozenset({"review"}),
                 priority=20,
@@ -147,13 +139,13 @@ async def test_cost_strategy_uses_configured_provider_order_on_equal_cost() -> N
         registry,
         PromptScorer(),
         RoutingStrategy.COST,
-        provider_cost_order=["ollama", "nvidia"],
+        provider_cost_order=["ollama", "deepseek"],
     )
 
     decision = await router.route(request, constraints)
 
     assert decision.primary.name == "ollama/reviewer"
-    assert [model.name for model in decision.fallbacks] == ["nvidia/reviewer"]
+    assert [model.name for model in decision.fallbacks] == ["deepseek/reviewer"]
 
 
 @pytest.mark.asyncio

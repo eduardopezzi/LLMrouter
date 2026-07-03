@@ -66,8 +66,8 @@ def test_cost_score_prefers_cheaper_models() -> None:
 
 
 def test_provider_multiplier_uses_cost_order() -> None:
-    order = ["nvidia", "ollama", "zai"]
-    assert _provider_multiplier(Provider.NVIDIA, order) == 1.0
+    order = ["deepseek", "ollama", "zai"]
+    assert _provider_multiplier(Provider.DEEPSEEK, order) == 1.0
     assert _provider_multiplier(Provider.OLLAMA, order) == 0.97
     assert _provider_multiplier(Provider.ZAI, order) == 0.94
     assert _provider_multiplier(Provider.GEMINI, order) == 0.70

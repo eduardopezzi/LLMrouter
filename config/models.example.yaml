@@ -2,7 +2,6 @@
 #
 # Pipeline multi-modelo com fallback hierárquico:
 #   1. Ollama — modelos preferenciais por tarefa
-#   2. NVIDIA NIM — alternativa quando NVIDIA_API_KEY ou NVIDIA_NIM_API_KEY existe
 #   3. Z AI (GLM) — fallback quando ZAI_API_KEY existe
 #   4. Demais candidatos cadastrados — usados por ordem de prioridade
 #
@@ -28,6 +27,7 @@ models:
     priority: 2
     description: "Kimi-K2.7-Code — Tech Lead sênior focado em correções profundas e migrações complexas de ecossistema."
     max_tokens: 128000
+    context_window: 262144
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -38,7 +38,8 @@ models:
     roles: ["architecture", "review", "security_audit", "fix"]
     priority: 3
     description: "DeepSeek-V4-Pro — Raciocínio lógico (MoE/MLA) impecável para auditoria de segurança e System Design."
-    max_tokens: 1000000
+    max_tokens: 393216
+    context_window: 1000000
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -49,7 +50,8 @@ models:
     roles: ["test_generation", "summarization", "refactoring"]
     priority: 4
     description: "DeepSeek V4 Flash — MoE eficiente com contexto longo, rapido para testes, resumos e refatoracoes pontuais."
-    max_tokens: 128000
+    max_tokens: 393216
+    context_window: 1000000
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -60,7 +62,8 @@ models:
     roles: ["test_generation", "refactoring"]
     priority: 5
     description: "Qwen 3 Coder 480B — Engenheiro especialista em grandes refatorações e suítes completas de testes."
-    max_tokens: 128000
+    max_tokens: 65536
+    context_window: 262144
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -71,7 +74,8 @@ models:
     roles: ["test_generation", "fix", "migration"]
     priority: 6
     description: "GLM-5.2 — Alta densidade de token. Perfeito para converter bases inteiras de código e aplicar patches."
-    max_tokens: 1000000
+    max_tokens: 131072
+    context_window: 999424
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -83,6 +87,7 @@ models:
     priority: 7
     description: "Cohere North Mini Code (30B) — Especialista ultrarrápido em automações agênticas locais e patches diretos."
     max_tokens: 128000
+    context_window: 499712
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -94,6 +99,7 @@ models:
     priority: 8
     description: "Qwen 3.6 (27B) — Escrita ágil e precisa de documentações técnicas de arquivos múltiplos."
     max_tokens: 128000
+    context_window: 262144
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -104,7 +110,8 @@ models:
     roles: ["review", "fix", "refactoring"]
     priority: 9
     description: "Gemma 4 (31B) — Modelo de nuvem nativo do Ollama com excelente capacidade de agenciamento de código."
-    max_tokens: 32000
+    max_tokens: 262144
+    context_window: 262144
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -115,7 +122,8 @@ models:
     roles: ["summarization", "documentation"]
     priority: 10
     description: "Qwen 2.5 Coder 3B — Extremamente rápido e leve para resumos de commits e geração de Docstrings simples."
-    max_tokens: 32768
+    max_tokens: 8192
+    context_window: 32768
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -127,6 +135,7 @@ models:
     priority: 11
     description: "DeepSeek V3.2 — MoE cloud com thinking e tools, raciocinio avancado para review e correcoes."
     max_tokens: 128000
+    context_window: 163840
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -138,108 +147,7 @@ models:
     priority: 12
     description: "DeepSeek V3.1 — MoE cloud com thinking e tools, versatil para geracao de testes e resumos."
     max_tokens: 128000
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  # ==================================================================
-  # NVIDIA NIM — Alternativa OpenAI-compatible
-  # ==================================================================
-  - name: "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["architecture", "review", "security_audit", "fix"]
-    priority: 14
-    description: "Nemotron 3 Ultra 550B — Modelo massivo ideal para auditorias pesadas de código e infraestrutura."
-    max_tokens: 16384
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/moonshotai/kimi-k2.6"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["review", "fix", "migration"]
-    priority: 15
-    description: "Kimi K2.6 via NVIDIA NIM — Excelente para lidar com contextos de migração horizontal de longo prazo."
-    max_tokens: 16384
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/deepseek-ai/deepseek-v4-pro"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["architecture", "review", "fix", "security_audit"]
-    priority: 16
-    description: "DeepSeek V4 Pro — Fallback de alto nível para segurança e arquitetura na infraestrutura NVIDIA."
-    max_tokens: 16384
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/google/gemma-4-31b-it"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["refactoring", "test_generation"]
-    priority: 17
-    description: "Gemma 4 31B It — Endpoint nativo NVIDIA para refatorações ágeis e forte barreira de código."
-    max_tokens: 32000
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/deepseek-ai/deepseek-v4-flash"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["test_generation", "refactoring"]
-    priority: 18
-    description: "DeepSeek V4 Flash — Respostas rápidas para refatorações pontuais e geração de testes em lote."
-    max_tokens: 16384
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/stepfun-ai/step-3.7-flash"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["documentation", "summarization"]
-    priority: 19
-    description: "Step-3.7-Flash — Modelo esparso MoE voltado para processamento e documentação em larga escala."
-    max_tokens: 16384
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/mistralai/mistral-medium-3.5-128b"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["summarization", "documentation"]
-    priority: 20
-    description: "Mistral Medium 3.5 128B — Capacidade linguística apurada para documentações limpas e resumos estruturados."
-    max_tokens: 16384
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/minimaxai/minimax-m3"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["review", "fix", "test_generation", "documentation", "summarization"]
-    priority: 21
-    description: "MiniMax-M3 — Canivete suíço multimodal de redundância."
-    max_tokens: 8192
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "nvidia_nim/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
-    provider: "nvidia"
-    api_base: "https://integrate.api.nvidia.com/v1"
-    roles: ["summarization"]
-    priority: 22
-    description: "Nemotron 3 Nano Omni 30B — Fallback leve focado exclusivamente em resumos rápidos."
-    max_tokens: 8192
+    context_window: 163840
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -252,7 +160,8 @@ models:
     roles: ["review", "fix", "refactoring", "test_generation", "documentation", "summarization"]
     priority: 13
     description: "DeepSeek V3 — modelo flagship com 671B parâmetros MoE, excelente custo-benefício"
-    max_tokens: 65536
+    max_tokens: 393216
+    context_window: 1000000
     prompt_cost_per_1m_tokens: 0.27
     completion_cost_per_1m_tokens: 1.10
     cached_prompt_cost_per_1m_tokens: 0.07
@@ -263,6 +172,7 @@ models:
     priority: 14
     description: "DeepSeek R1 — reasoning model com chain-of-thought, ideal para tarefas complexas"
     max_tokens: 65536
+    context_window: 1000000
     prompt_cost_per_1m_tokens: 0.55
     completion_cost_per_1m_tokens: 2.19
     cached_prompt_cost_per_1m_tokens: 0.14
@@ -275,7 +185,8 @@ models:
     roles: ["review", "fix", "test_generation", "refactoring", "migration"]
     priority: 1
     description: "GLM-5.2 via Z AI — Nova geração com alta densidade por token para reestruturação ativa de código."
-    max_tokens: 128000
+    max_tokens: 131072
+    context_window: 1000000
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -285,7 +196,8 @@ models:
     roles: ["review", "fix", "test_generation", "summarization", "documentation"]
     priority: 13
     description: "GLM-5.1 via Z AI — Fallback estável generalista para cobertura completa das tarefas."
-    max_tokens: 128000
+    max_tokens: 131072
+    context_window: 200000
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0

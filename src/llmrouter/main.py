@@ -188,7 +188,7 @@ def _parse_args() -> argparse.Namespace:
         "--set-provider-cost-order",
         type=str,
         default=None,
-        help="Persist provider cost order, e.g. nvidia,zai,ollama.",
+        help="Persist provider cost order, e.g. deepseek,zai,ollama.",
     )
 
     health_parser = subparsers.add_parser(

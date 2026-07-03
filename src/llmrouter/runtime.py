@@ -37,7 +37,6 @@ from llmrouter.providers import (
     BaseProvider,
     DeepSeekProvider,
     GeminiProvider,
-    NvidiaProvider,
     OllamaProvider,
     OpenAIProvider,
     ZaiProvider,
@@ -267,15 +266,6 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
                 base_url=settings.providers.openai.base_url,
                 timeout=settings.providers.openai.timeout,
                 max_retries=settings.providers.openai.max_retries,
-            )
-    if Provider.NVIDIA in needed and settings.providers.nvidia.enabled:
-        api_key = _api_key(settings.providers.nvidia, "NVIDIA_NIM_API_KEY", "NVIDIA_API_KEY")
-        if api_key:
-            providers[Provider.NVIDIA] = NvidiaProvider(
-                api_key=api_key,
-                base_url=settings.providers.nvidia.base_url,
-                timeout=settings.providers.nvidia.timeout,
-                max_retries=settings.providers.nvidia.max_retries,
             )
     if Provider.ZAI in needed and settings.providers.zai.enabled:
         api_key = _api_key(settings.providers.zai, "ZAI_API_KEY")

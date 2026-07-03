@@ -38,21 +38,21 @@ def test_panel_updates_env_file_preserving_existing_values(tmp_path) -> None:
 
     set_routing_strategy(env_path, "quality")
     set_fallback_count(env_path, 4)
-    set_provider_cost_order(env_path, ["NVIDIA", "ZAI", "OLLAMA"])
+    set_provider_cost_order(env_path, ["DEEPSEEK", "ZAI", "OLLAMA"])
 
     body = env_path.read_text(encoding="utf-8")
     assert "KEEP_ME=yes" in body
     assert f"{ROUTING_STRATEGY_ENV}=quality" in body
     assert f"{FALLBACK_COUNT_ENV}=4" in body
-    assert f'{PROVIDER_COST_ORDER_ENV}=["nvidia", "zai", "ollama"]' in body
+    assert f'{PROVIDER_COST_ORDER_ENV}=["deepseek", "zai", "ollama"]' in body
 
 
 def test_panel_renders_catalog_and_empty_observation_stats(tmp_path) -> None:
     registry = ModelRegistry(
         models=(
             ModelInfo(
-                name="nvidia/reviewer",
-                provider=Provider.NVIDIA,
+                name="deepseek/reviewer",
+                provider=Provider.DEEPSEEK,
                 tier=Tier.T3,
                 capabilities=frozenset({"review"}),
             ),
@@ -64,8 +64,8 @@ def test_panel_renders_catalog_and_empty_observation_stats(tmp_path) -> None:
 
     assert "LLMrouter CLI Panel" in summary
     assert "strategy: cost" in summary
-    assert "provider_cost_order: zai, ollama, nvidia" in summary
-    assert "providers: nvidia=1" in summary
+    assert "provider_cost_order: zai, ollama" in summary
+    assert "providers: deepseek=1" in summary
     assert "observations: 0" in summary
 
 
@@ -81,7 +81,7 @@ def test_render_model_priorities_shows_ordered_catalog() -> None:
             ),
             ModelInfo(
                 name="first",
-                provider=Provider.NVIDIA,
+                provider=Provider.DEEPSEEK,
                 tier=Tier.T3,
                 priority=1,
                 capabilities=frozenset({"review"}),
@@ -100,7 +100,7 @@ def test_render_model_priorities_shows_ordered_catalog() -> None:
 
     assert "Top 2 model priorities" in output
     assert "1. priority=1" in output
-    assert "first provider=nvidia tier=T3 roles=review" in output
+    assert "first provider=deepseek tier=T3 roles=review" in output
     assert "2. priority=2" in output
     assert "second provider=zai tier=T1 roles=summarization" in output
     assert "third" not in output
@@ -264,7 +264,7 @@ def test_available_ranker_models_include_configured_provider_apis() -> None:
     registry = ModelRegistry(
         models=(
             ModelInfo(name="ollama/local", provider=Provider.OLLAMA, tier=Tier.T3, priority=1),
-            ModelInfo(name="nvidia_nim/test", provider=Provider.NVIDIA, tier=Tier.T3, priority=2),
+            ModelInfo(name="deepseek/test", provider=Provider.DEEPSEEK, tier=Tier.T3, priority=2),
             ModelInfo(name="zhipu/test", provider=Provider.ZAI, tier=Tier.T3, priority=3),
             ModelInfo(name="gpt-test", provider=Provider.OPENAI, tier=Tier.T3, priority=4),
             ModelInfo(name="gemini/test", provider=Provider.GEMINI, tier=Tier.T3, priority=5),
@@ -272,7 +272,7 @@ def test_available_ranker_models_include_configured_provider_apis() -> None:
     )
     settings = Settings(
         providers={
-            "nvidia": {"api_key": "nvidia-key"},
+            "deepseek": {"api_key": "deepseek-key"},
             "zai": {"api_key": "zai-key"},
             "openai": {"api_key": "openai-key"},
         }
@@ -282,7 +282,7 @@ def test_available_ranker_models_include_configured_provider_apis() -> None:
 
     assert [(ranker.display_name, ranker.provider.value) for ranker in rankers] == [
         ("ollama/local", "ollama"),
-        ("nvidia_nim/test", "nvidia"),
+        ("deepseek/test", "deepseek"),
         ("zhipu/test", "zai"),
         ("gpt-test", "openai"),
     ]
@@ -292,10 +292,10 @@ def test_quality_priority_prompt_allows_promoting_any_provider_api() -> None:
     prompt = _build_llm_priority_prompt(
         [
             ModelInfo(name="cheap", provider=Provider.OLLAMA, tier=Tier.T1, priority=1),
-            ModelInfo(name="quality", provider=Provider.NVIDIA, tier=Tier.T3, priority=2),
+            ModelInfo(name="quality", provider=Provider.DEEPSEEK, tier=Tier.T3, priority=2),
         ],
         strategy="quality",
-        provider_cost_order=["ollama", "nvidia"],
+        provider_cost_order=["ollama", "deepseek"],
     )
 
     assert "changes the current order substantially" in prompt
@@ -344,7 +344,7 @@ def test_observation_stats_reads_sqlite_database(tmp_path) -> None:
                 prompt_tokens, completion_tokens
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            ("hello", "nvidia/reviewer", "hi", 25.0, 0.5, 10, 5),
+            ("hello", "deepseek/reviewer", "hi", 25.0, 0.5, 10, 5),
         )
         db.execute(
             """
@@ -365,7 +365,7 @@ def test_observation_stats_reads_sqlite_database(tmp_path) -> None:
     assert stats["prompt_tokens"] == 10
     assert stats["completion_tokens"] == 5
     assert stats["top_models"] == [
-        {"model": "nvidia/reviewer", "requests": 1, "avg_latency_ms": 25.0}
+        {"model": "deepseek/reviewer", "requests": 1, "avg_latency_ms": 25.0}
     ]
 
 
@@ -373,8 +373,8 @@ def test_render_current_settings_shows_all_sections(tmp_path) -> None:
     registry = ModelRegistry(
         models=(
             ModelInfo(
-                name="nvidia/reviewer",
-                provider=Provider.NVIDIA,
+                name="deepseek/reviewer",
+                provider=Provider.DEEPSEEK,
                 tier=Tier.T3,
                 capabilities=frozenset({"review"}),
             ),
@@ -390,7 +390,7 @@ def test_render_current_settings_shows_all_sections(tmp_path) -> None:
     assert "cost" in output
     assert "fallback_count:" in output
     assert "2" in output
-    assert "provider_cost_order: zai, ollama, nvidia" in output
+    assert "provider_cost_order: zai, ollama" in output
     assert "Scorer weights" in output
     assert "Server" in output
     assert "host: 0.0.0.0" in output
@@ -398,35 +398,35 @@ def test_render_current_settings_shows_all_sections(tmp_path) -> None:
     assert "Evaluator" in output
     assert "Debug" in output
     assert "Catalog summary" in output
-    assert "providers_in_catalog: nvidia" in output
+    assert "providers_in_catalog: deepseek" in output
 
 
 def test_parse_provider_selection_by_numbers() -> None:
-    available = ["gemini", "nvidia", "ollama", "openai", "zai"]
+    available = ["gemini", "deepseek", "ollama", "openai", "zai"]
     result = _parse_provider_selection("2,5,3", available)
-    assert result == ["nvidia", "zai", "ollama"]
+    assert result == ["deepseek", "zai", "ollama"]
 
 
 def test_parse_provider_selection_by_names() -> None:
-    result = _parse_provider_selection("nvidia,zai,ollama", [])
-    assert result == ["nvidia", "zai", "ollama"]
+    result = _parse_provider_selection("deepseek,zai,ollama", [])
+    assert result == ["deepseek", "zai", "ollama"]
 
 
 def test_parse_provider_selection_empty_returns_empty() -> None:
-    assert _parse_provider_selection("", ["nvidia"]) == []
-    assert _parse_provider_selection("   ", ["nvidia"]) == []
+    assert _parse_provider_selection("", ["deepseek"]) == []
+    assert _parse_provider_selection("   ", ["deepseek"]) == []
 
 
 def test_parse_provider_selection_invalid_numbers_filtered() -> None:
-    available = ["nvidia", "ollama"]
+    available = ["deepseek", "ollama"]
     result = _parse_provider_selection("1,9,2", available)
-    assert result == ["nvidia", "ollama"]
+    assert result == ["deepseek", "ollama"]
 
 
 def test_parse_provider_selection_deduplicates() -> None:
-    available = ["nvidia", "ollama"]
+    available = ["deepseek", "ollama"]
     result = _parse_provider_selection("1,1,2,2", available)
-    assert result == ["nvidia", "ollama"]
+    assert result == ["deepseek", "ollama"]
 
 
 def test_read_log_tail_returns_none_when_missing() -> None:
