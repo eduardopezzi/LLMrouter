@@ -217,7 +217,7 @@ def create_app(
             )
 
         chat_request = _to_chat_request(payload)
-        prompt_directives = _prompt_directives(chat_request.prompt_text)
+        prompt_directives = _chat_request_directives(chat_request)
         chat_request = _with_prompt_directives(chat_request, payload, prompt_directives)
         original_chat_request = chat_request
         memory_project = _memory_project(
@@ -408,7 +408,7 @@ async def _stream_response(
     from the selected provider proxy in OpenAI SSE format.
     """
     original_chat_request = original_chat_request or chat_request
-    prompt_directives = _prompt_directives(original_chat_request.prompt_text)
+    prompt_directives = _chat_request_directives(original_chat_request)
     constraints = _routing_constraints(payload, prompt_directives)
     decision = await app_router.route(chat_request, constraints)
     selected_model = decision.primary
@@ -734,9 +734,25 @@ def _memory_project(
     return result
 
 
-def _prompt_directives(prompt: str) -> dict[str, str]:
-    """Parse {{project:...}} style directives from the first prompt lines."""
+def _chat_request_directives(chat_request: ChatRequest) -> dict[str, str]:
+    """Parse prompt directives from the leading lines of each message."""
     result: dict[str, str] = {}
+    for message in chat_request.messages:
+        result.update(_prompt_directives(message.content))
+    if not result:
+        result.update(_prompt_directives(chat_request.prompt_text))
+    return result
+
+
+def _prompt_directives(prompt: str | list[dict[str, Any]]) -> dict[str, str]:
+    """Parse {{project:...}} style directives from leading prompt lines."""
+    result: dict[str, str] = {}
+    if isinstance(prompt, list):
+        prompt = "\n".join(
+            str(block.get("text") or block.get("content") or "")
+            for block in prompt
+            if isinstance(block, dict)
+        )
     first_lines = "\n".join(prompt.splitlines()[:5])
     if not first_lines:
         return result
@@ -885,7 +901,7 @@ def _record_memory(
     response_text = "\n".join(_choice_text(choice) for choice in response_payload).strip()
     metadata = {
         "request_id": request_id,
-        "task_role": _task_role(payload, _prompt_directives(chat_request.prompt_text)),
+        "task_role": _task_role(payload, _chat_request_directives(chat_request)),
         "selected_model": selected_model.name,
         "provider": selected_model.provider.value,
         "provider_model": selected_model.provider_model_name,

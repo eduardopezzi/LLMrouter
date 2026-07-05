@@ -479,6 +479,43 @@ def test_chat_completions_accepts_prompt_directives() -> None:
     }
 
 
+def test_chat_completions_accepts_prompt_directives_after_context_messages() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="summary", provider=Provider.OPENAI, tier=Tier.T1),
+            ModelInfo(name="specialist", provider=Provider.OPENAI, tier=Tier.T3),
+        )
+    )
+    proxy = FakeProxy()
+    app = create_app(registry=registry, proxy=proxy)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "Large client context.\n" * 10},
+                {"role": "assistant", "content": "Previous assistant response.\n" * 10},
+                {
+                    "role": "user",
+                    "content": (
+                        "{{project:PRecog}} {{task:refactoring}} {{model:specialist}}\n"
+                        "Refactor this module."
+                    ),
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["llmrouter"]["selected_model"] == "specialist"
+    assert body["llmrouter"]["memory"]["project"] == "PRecog"
+    assert proxy.last_request is not None
+    assert proxy.last_request.model == "specialist"
+
+
 def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
     registry = ModelRegistry(
         models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
