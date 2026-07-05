@@ -87,18 +87,12 @@ class ScoringResult:
     signals: dict[str, float]
 
 
-_TIER_THRESHOLDS: list[tuple[float, Tier]] = [
-    (0.33, Tier.T1),
-    (0.66, Tier.T2),
-    (1.01, Tier.T3),
-]
-
-
 def _score_to_tier(score: float) -> Tier:
     """Map a complexity score to a model tier."""
-    for threshold, tier in _TIER_THRESHOLDS:
-        if score < threshold:
-            return tier
+    if score < 0.33:
+        return Tier.T1
+    if score < 0.66:
+        return Tier.T2
     return Tier.T3
 
 

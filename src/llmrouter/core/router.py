@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Protocol
 
-from llmrouter.core.health import HealthScore, ModelHealthTracker
+from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.types import (
@@ -237,17 +237,6 @@ def get_strategy(
 # ---------------------------------------------------------------------------
 
 
-async def health_tracker_scores(
-    tracker: ModelHealthTracker, models: list[ModelInfo]
-) -> dict[str, HealthScore]:
-    """Convenience async helper to load health scores for a candidate list."""
-    all_scores = await tracker.score_map()
-    return {
-        m.name: all_scores.get(m.name, HealthScore(m.name, 1.0, 1.0, 1.0, 0.5, 1.0, 0))
-        for m in models
-    }
-
-
 class MultiModelRouter:
     """Routes requests to the best available model.
 
@@ -310,7 +299,7 @@ class MultiModelRouter:
         constraints = constraints or RoutingConstraints()
 
         # If the request specifies a model, use it directly
-        if request.model and request.model in self._registry:
+        if request.model is not None and request.model in self._registry:
             primary = self._registry.get(request.model)
             assert primary is not None
             fallbacks = self._build_fallbacks(primary, constraints)

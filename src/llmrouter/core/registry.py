@@ -28,7 +28,7 @@ class ModelRegistry:
     def all(self) -> list[ModelInfo]:
         return list(self.models)
 
-    def by_tier(self, tier: int) -> list[ModelInfo]:
+    def by_tier(self, tier: Tier | int) -> list[ModelInfo]:
         return [model for model in self.models if model.tier == tier]
 
     def add(self, model: ModelInfo) -> ModelRegistry:

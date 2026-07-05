@@ -239,20 +239,6 @@ class Settings(BaseSettings):
     models_file: str = "config/models.yaml"
 
 
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge ``override`` into ``base`` (override wins)."""
-    result: dict[str, Any] = {}
-    for key, value in base.items():
-        if key in override and isinstance(value, dict) and isinstance(override[key], dict):
-            result[key] = _deep_merge(value, override[key])
-        else:
-            result[key] = value
-    for key, value in override.items():
-        if key not in result:
-            result[key] = value
-    return result
-
-
 def _load_yaml(path: Path) -> dict[str, Any]:
     """Load a YAML file, returning an empty dict if it doesn't exist."""
     if not path.exists():

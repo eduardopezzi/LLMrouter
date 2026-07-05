@@ -7,7 +7,6 @@ import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
 
 from fastapi import FastAPI
 
@@ -42,10 +41,7 @@ from llmrouter.providers import (
     ZaiProvider,
 )
 from llmrouter.providers.base import ProviderError
-
-
-class _ApiKeyConfig(Protocol):
-    api_key: str | None
+from llmrouter.utils import resolve_api_key
 
 
 def build_app(settings: Settings | None = None) -> FastAPI:
@@ -93,7 +89,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
             collector=collector,
             judge=QualityJudge(
                 base_url=resolved_settings.evaluator.ollama.base_url,
-                api_key=_api_key(resolved_settings.evaluator.ollama, "OLLAMA_API_KEY"),
+                api_key=resolve_api_key(resolved_settings.evaluator.ollama, "OLLAMA_API_KEY"),
                 model=resolved_settings.evaluator.ollama.model,
                 timeout=resolved_settings.evaluator.ollama.timeout,
                 temperature=resolved_settings.evaluator.ollama.temperature,
@@ -259,7 +255,7 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
     if Provider.OLLAMA in needed and settings.providers.ollama.enabled:
         providers[Provider.OLLAMA] = _ollama(settings.providers.ollama)
     if Provider.OPENAI in needed and settings.providers.openai.enabled:
-        api_key = _api_key(settings.providers.openai, "OPENAI_API_KEY")
+        api_key = resolve_api_key(settings.providers.openai, "OPENAI_API_KEY")
         if api_key:
             providers[Provider.OPENAI] = OpenAIProvider(
                 api_key=api_key,
@@ -268,7 +264,7 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
                 max_retries=settings.providers.openai.max_retries,
             )
     if Provider.ZAI in needed and settings.providers.zai.enabled:
-        api_key = _api_key(settings.providers.zai, "ZAI_API_KEY")
+        api_key = resolve_api_key(settings.providers.zai, "ZAI_API_KEY")
         if api_key:
             providers[Provider.ZAI] = ZaiProvider(
                 api_key=api_key,
@@ -277,7 +273,7 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
                 max_retries=settings.providers.zai.max_retries,
             )
     if Provider.GEMINI in needed and settings.providers.gemini.enabled:
-        api_key = _api_key(settings.providers.gemini, "GEMINI_API_KEY", "GOOGLE_API_KEY")
+        api_key = resolve_api_key(settings.providers.gemini, "GEMINI_API_KEY", "GOOGLE_API_KEY")
         if api_key:
             providers[Provider.GEMINI] = GeminiProvider(
                 api_key=api_key,
@@ -286,7 +282,7 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
                 max_retries=settings.providers.gemini.max_retries,
             )
     if Provider.DEEPSEEK in needed and settings.providers.deepseek.enabled:
-        api_key = _api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY")
+        api_key = resolve_api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY")
         if api_key:
             providers[Provider.DEEPSEEK] = DeepSeekProvider(
                 api_key=api_key,
@@ -300,21 +296,11 @@ def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provide
 
 def _ollama(config: ProviderConfig) -> OllamaProvider:
     return OllamaProvider(
-        api_key=_api_key(config, "OLLAMA_API_KEY"),
+        api_key=resolve_api_key(config, "OLLAMA_API_KEY"),
         base_url=config.base_url,
         timeout=config.timeout,
         max_retries=config.max_retries,
     )
-
-
-def _api_key(config: _ApiKeyConfig, *env_names: str) -> str | None:
-    if config.api_key:
-        return config.api_key
-    for env_name in env_names:
-        value = os.environ.get(env_name)
-        if value:
-            return value
-    return None
 
 
 def _build_health_tracker(settings: Settings) -> ModelHealthTracker:

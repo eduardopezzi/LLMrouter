@@ -15,7 +15,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from llmrouter.config import ProviderConfig, Settings
+from llmrouter.config import Settings
 from llmrouter.core.benchmark_scorer import score_model
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
@@ -25,6 +25,7 @@ from llmrouter.providers.deepseek_provider import DeepSeekProvider
 from llmrouter.providers.ollama_provider import OllamaProvider
 from llmrouter.providers.openai_provider import OpenAIProvider
 from llmrouter.providers.zai_provider import ZaiProvider
+from llmrouter.utils import resolve_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -857,17 +858,17 @@ def _ranker_provider_available(settings: Settings, provider: Provider) -> bool:
     if provider == Provider.OPENAI:
         return (
             settings.providers.openai.enabled
-            and _api_key(settings.providers.openai, "OPENAI_API_KEY") is not None
+            and resolve_api_key(settings.providers.openai, "OPENAI_API_KEY") is not None
         )
     if provider == Provider.ZAI:
         return (
             settings.providers.zai.enabled
-            and _api_key(settings.providers.zai, "ZAI_API_KEY") is not None
+            and resolve_api_key(settings.providers.zai, "ZAI_API_KEY") is not None
         )
     if provider == Provider.DEEPSEEK:
         return (
             settings.providers.deepseek.enabled
-            and _api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY") is not None
+            and resolve_api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY") is not None
         )
     return False
 
@@ -875,13 +876,13 @@ def _ranker_provider_available(settings: Settings, provider: Provider) -> bool:
 def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvider:
     if provider == Provider.OLLAMA:
         return OllamaProvider(
-            api_key=_api_key(settings.providers.ollama, "OLLAMA_API_KEY"),
+            api_key=resolve_api_key(settings.providers.ollama, "OLLAMA_API_KEY"),
             base_url=settings.providers.ollama.base_url,
             timeout=settings.providers.ollama.timeout,
             max_retries=settings.providers.ollama.max_retries,
         )
     if provider == Provider.OPENAI:
-        api_key = _api_key(settings.providers.openai, "OPENAI_API_KEY")
+        api_key = resolve_api_key(settings.providers.openai, "OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OpenAI API key is not configured")
         return OpenAIProvider(
@@ -891,7 +892,7 @@ def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvid
             max_retries=settings.providers.openai.max_retries,
         )
     if provider == Provider.ZAI:
-        api_key = _api_key(settings.providers.zai, "ZAI_API_KEY")
+        api_key = resolve_api_key(settings.providers.zai, "ZAI_API_KEY")
         if not api_key:
             raise ValueError("ZAI API key is not configured")
         return ZaiProvider(
@@ -901,7 +902,7 @@ def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvid
             max_retries=settings.providers.zai.max_retries,
         )
     if provider == Provider.DEEPSEEK:
-        api_key = _api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY")
+        api_key = resolve_api_key(settings.providers.deepseek, "DEEPSEEK_API_KEY")
         if not api_key:
             raise ValueError("DeepSeek API key is not configured")
         return DeepSeekProvider(
@@ -911,16 +912,6 @@ def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvid
             max_retries=settings.providers.deepseek.max_retries,
         )
     raise ValueError(f"Provider {provider.value} cannot be used for priority ranking")
-
-
-def _api_key(config: ProviderConfig, *env_names: str) -> str | None:
-    if config.api_key:
-        return config.api_key
-    for env_name in env_names:
-        value = os.environ.get(env_name)
-        if value:
-            return value
-    return None
 
 
 def _prompt_view_logs(settings: Settings) -> None:
