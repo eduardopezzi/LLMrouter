@@ -63,7 +63,7 @@ Também é possível enviar o papel em `llmrouter.task_role` ou `extra.task_role
 
 Para clientes como o Cline, onde nem sempre é prático enviar metadados JSON, o
 LLMrouter também aceita diretivas curtas no começo do prompt. Elas devem aparecer
-nas primeiras 5 linhas:
+nas primeiras 5 linhas de uma mensagem:
 
 ```text
 {{project:PRecog}} {{task:deep_research}} {{model:zhipu/glm-5.1}}
@@ -79,6 +79,11 @@ Aliases aceitos:
 | `task` | `t`, `task_role`, `role` | Papel da tarefa para roteamento |
 | `model` | `m`, `preferred_model` | Modelo preferido quando `model=auto` |
 
+As diretivas `project`/`p` e `model`/`m` são tolerantes a erro de grafia. O
+LLMrouter usa `difflib.get_close_matches(..., cutoff=0.0)` para aproximar o
+valor digitado ao modelo mais próximo do catálogo e ao projeto/repositório mais
+próximo encontrado localmente. Valores exatos continuam tendo prioridade.
+
 Exemplos:
 
 ```text
@@ -93,8 +98,8 @@ Refatore este módulo mantendo compatibilidade com a API atual.
 
 Metadados explícitos no payload têm prioridade sobre as diretivas do prompt. Ou
 seja, `llmrouter.project`, `task_role` e `model` enviados em JSON vencem o texto
-quando ambos existirem. O parser só lê as primeiras linhas para evitar conflito
-com código, Markdown, templates e diffs.
+quando ambos existirem. O parser só lê as primeiras linhas de cada mensagem para
+evitar conflito com código, Markdown, templates e diffs.
 
 ### Publicação de observações no PRecog
 

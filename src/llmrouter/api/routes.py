@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import hashlib
 import json
 import re
@@ -12,6 +13,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -218,6 +220,18 @@ def create_app(
 
         chat_request = _to_chat_request(payload)
         prompt_directives = _chat_request_directives(chat_request)
+        prompt_directives = _resolve_prompt_directives(
+            prompt_directives,
+            registry=model_registry,
+            project_candidates=_project_candidates(
+                prompt=chat_request.prompt_text,
+                default=_memory_default_project(
+                    app.state.memory_store,
+                    app.state.precog_project,
+                ),
+                precog_project=app.state.precog_project,
+            ),
+        )
         chat_request = _with_prompt_directives(chat_request, payload, prompt_directives)
         original_chat_request = chat_request
         memory_project = _memory_project(
@@ -776,6 +790,94 @@ def _prompt_directives(prompt: str | list[dict[str, Any]]) -> dict[str, str]:
         if cleaned_value:
             result[normalized_key] = cleaned_value
     return result
+
+
+def _resolve_prompt_directives(
+    directives: dict[str, str],
+    *,
+    registry: ModelRegistry,
+    project_candidates: list[str],
+) -> dict[str, str]:
+    if not directives:
+        return directives
+    resolved = dict(directives)
+    if model := resolved.get("model"):
+        model_match = _closest_model_name(model, registry)
+        if model_match and model_match != model:
+            _logger.debug("Prompt directive model fuzzy matched: %s -> %s", model, model_match)
+            resolved["model"] = model_match
+    if project := resolved.get("project"):
+        project_match = _closest_word(project, project_candidates)
+        if project_match and project_match != project:
+            _logger.debug(
+                "Prompt directive project fuzzy matched: %s -> %s",
+                project,
+                project_match,
+            )
+            resolved["project"] = project_match
+    return resolved
+
+
+def _closest_model_name(term: str, registry: ModelRegistry) -> str | None:
+    choices: dict[str, str] = {}
+    for model in registry.models:
+        choices[model.name] = model.name
+        choices[model.provider_model_name] = model.name
+        choices[model.name.removeprefix(f"{model.provider.value}/")] = model.name
+    matched = _closest_word(term, list(choices))
+    return choices.get(matched or "")
+
+
+def _closest_word(term: str, words: list[str]) -> str | None:
+    unique_words = [word for word in dict.fromkeys(words) if word]
+    if not term or not unique_words:
+        return None
+    exact = {word.casefold(): word for word in unique_words}
+    if term.casefold() in exact:
+        return exact[term.casefold()]
+    result = difflib.get_close_matches(term, unique_words, n=1, cutoff=0.0)
+    return result[0] if result else None
+
+
+def _project_candidates(
+    *,
+    prompt: str,
+    default: str,
+    precog_project: str,
+) -> list[str]:
+    candidates = [default, precog_project]
+    inferred = _infer_project_from_prompt(prompt)
+    if inferred:
+        candidates.append(inferred)
+    for root in _project_roots():
+        candidates.extend(_child_directory_names(root))
+    return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+
+
+def _project_roots() -> list[Path]:
+    home = Path.home()
+    roots = [
+        Path.cwd().parent,
+        home / "github",
+        home / "repos",
+        home / "projects",
+        home / "workspace",
+        home / "workspaces",
+    ]
+    return [root for root in dict.fromkeys(roots) if root.exists() and root.is_dir()]
+
+
+def _child_directory_names(root: Path, *, limit: int = 500) -> list[str]:
+    names: list[str] = []
+    try:
+        for index, child in enumerate(root.iterdir()):
+            if index >= limit:
+                break
+            if child.is_dir() and not child.name.startswith("."):
+                names.append(child.name)
+    except OSError:
+        return []
+    return names
 
 
 def _with_prompt_directives(

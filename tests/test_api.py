@@ -516,6 +516,44 @@ def test_chat_completions_accepts_prompt_directives_after_context_messages() -> 
     assert proxy.last_request.model == "specialist"
 
 
+def test_chat_completions_fuzzy_matches_prompt_directives(tmp_path, monkeypatch) -> None:
+    (tmp_path / "PRecog").mkdir()
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="summary", provider=Provider.OPENAI, tier=Tier.T1),
+            ModelInfo(name="specialist", provider=Provider.OPENAI, tier=Tier.T3),
+        )
+    )
+    proxy = FakeProxy()
+    app = create_app(registry=registry, proxy=proxy)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "{{p:PReCog}} {{t:refactoring}} {{m:speclist}}\nRefactor.",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["llmrouter"]["selected_model"] == "specialist"
+    assert body["llmrouter"]["memory"]["project"] == "PRecog"
+    assert proxy.last_request is not None
+    assert proxy.last_request.model == "specialist"
+    assert proxy.last_request.extra["llmrouter_prompt_directives"]["model"] == "specialist"
+    assert proxy.last_request.extra["llmrouter_prompt_directives"]["project"] == "PRecog"
+
+
 def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
     registry = ModelRegistry(
         models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
