@@ -30,7 +30,6 @@ dist/
 .env.*
 !.env.example
 config/config.yaml
-config/models.yaml
 data/
 *.db
 *.sqlite

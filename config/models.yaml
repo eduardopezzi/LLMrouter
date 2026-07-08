@@ -1,0 +1,221 @@
+# Configuração de Modelos LLM — Ollama primário + provedores de fallback
+#
+# Pipeline multi-modelo com fallback hierárquico:
+#   1. Ollama — modelos preferenciais por tarefa
+#   3. Z AI (GLM) — fallback quando ZAI_API_KEY existe
+#   4. Demais candidatos cadastrados — usados por ordem de prioridade
+#
+# Roteamento por role:
+#   architecture     → Desenho de sistemas, diagramas, esquemas de BD e infraestrutura (IaC)
+#   review           → Code Review (segurança, breaking changes, qualidade, impacto)
+#   refactoring      → Clean Code, otimização de performance e eliminação de código legado
+#   security_audit   → Análise de vulnerabilidades, sanitização e conformidade com OWASP
+#   test_generation  → Geração de testes unitários/integração/e2e e mocks
+#   fix              → Auto-fix (gera patches sugeridos com aprovação humana)
+#   migration        → Conversão de linguagens (ex: JS para TS) e atualização de bibliotecas
+#   documentation    → Geração de READMEs, docstrings e contratos de API (Swagger)
+#   summarization    → Resumos rápidos de commits, PRs, código e arquivos diff
+
+models:
+  # ==================================================================
+  # Ollama — Provedor primário (sempre disponível)
+  # ==================================================================
+  - name: "ollama/minimax-m3:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["review", "fix", "test_generation", "documentation", "summarization", "refactoring"]
+    priority: 1
+    description: "MiniMax-M3 — 1M+ contexto, excelente para tarefas de contexto longo como documentação, revisão abrangente e refatoração de bases extensas."
+    max_tokens: 393216
+    context_window: 1048576
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/kimi-k2.7-code:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["review", "fix", "migration"]
+    priority: 2
+    description: "Kimi-K2.7-Code — Tech Lead sênior focado em correções profundas e migrações complexas de ecossistema."
+    max_tokens: 128000
+    context_window: 262144
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/deepseek-v4-pro:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["architecture", "review", "security_audit", "fix"]
+    priority: 3
+    description: "DeepSeek-V4-Pro — Raciocínio lógico (MoE/MLA) impecável para auditoria de segurança e System Design."
+    max_tokens: 393216
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/deepseek-v4-flash:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["test_generation", "summarization", "refactoring"]
+    priority: 4
+    description: "DeepSeek V4 Flash — MoE eficiente com contexto longo, rapido para testes, resumos e refatoracoes pontuais."
+    max_tokens: 393216
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/qwen3-coder:480b-cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["test_generation", "refactoring"]
+    priority: 5
+    description: "Qwen 3 Coder 480B — Engenheiro especialista em grandes refatorações e suítes completas de testes."
+    max_tokens: 65536
+    context_window: 262144
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/glm-5.2:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["test_generation", "fix", "migration"]
+    priority: 6
+    description: "GLM-5.2 — Alta densidade de token. Perfeito para converter bases inteiras de código e aplicar patches."
+    max_tokens: 131072
+    context_window: 999424
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/north-mini-code-1.0:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["fix", "refactoring"]
+    priority: 7
+    description: "Cohere North Mini Code (30B) — Especialista ultrarrápido em automações agênticas locais e patches diretos."
+    max_tokens: 128000
+    context_window: 499712
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/qwen3.6-27b:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["test_generation", "documentation"]
+    priority: 8
+    description: "Qwen 3.6 (27B) — Escrita ágil e precisa de documentações técnicas de arquivos múltiplos."
+    max_tokens: 128000
+    context_window: 262144
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/gemma4:31b"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["review", "fix", "refactoring"]
+    priority: 9
+    description: "Gemma 4 (31B) — Modelo de nuvem nativo do Ollama com excelente capacidade de agenciamento de código."
+    max_tokens: 262144
+    context_window: 262144
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/qwen2.5-coder:3b"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["summarization", "documentation"]
+    priority: 10
+    description: "Qwen 2.5 Coder 3B — Extremamente rápido e leve para resumos de commits e geração de Docstrings simples."
+    max_tokens: 8192
+    context_window: 32768
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/deepseek-v3.2:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["review", "fix"]
+    priority: 11
+    description: "DeepSeek V3.2 — MoE cloud com thinking e tools, raciocinio avancado para review e correcoes."
+    max_tokens: 128000
+    context_window: 163840
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/deepseek-v3.1:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["test_generation", "summarization"]
+    priority: 12
+    description: "DeepSeek V3.1 — MoE cloud com thinking e tools, versatil para geracao de testes e resumos."
+    max_tokens: 128000
+    context_window: 163840
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  # ==================================================================
+  # DeepSeek — Provedor OpenAI-compatible
+  # ==================================================================
+  - name: "deepseek/deepseek-chat"
+    provider: "deepseek"
+    roles: ["review", "fix", "refactoring", "test_generation", "documentation", "summarization"]
+    priority: 13
+    description: "DeepSeek V3 — modelo flagship com 671B parâmetros MoE, excelente custo-benefício"
+    max_tokens: 393216
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0.27
+    completion_cost_per_1m_tokens: 1.10
+    cached_prompt_cost_per_1m_tokens: 0.07
+
+  - name: "deepseek/deepseek-reasoner"
+    provider: "deepseek"
+    roles: ["architecture", "review", "security_audit", "fix"]
+    priority: 14
+    description: "DeepSeek R1 — reasoning model com chain-of-thought, ideal para tarefas complexas"
+    max_tokens: 65536
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0.55
+    completion_cost_per_1m_tokens: 2.19
+    cached_prompt_cost_per_1m_tokens: 0.14
+
+  # ==================================================================
+  # Z AI (Zhipu) — Provedor de fallback
+  # ==================================================================
+  - name: "zhipu/glm-5.2"
+    provider: "zai"
+    roles: ["review", "fix", "test_generation", "refactoring", "migration"]
+    priority: 1
+    description: "GLM-5.2 via Z AI — Nova geração com alta densidade por token para reestruturação ativa de código."
+    max_tokens: 131072
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "zhipu/glm-5.1"
+    provider: "zai"
+    roles: ["review", "fix", "test_generation", "summarization", "documentation"]
+    priority: 13
+    description: "GLM-5.1 via Z AI — Fallback estável generalista para cobertura completa das tarefas."
+    max_tokens: 131072
+    context_window: 200000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
+defaults:
+  temperature: 0.1
+  max_retries: 2
+  timeout_seconds: 180
+  retry_delay_seconds: 5
