@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from llmrouter.config import Settings
+from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import load_model_registry
 from llmrouter.core.router import MultiModelRouter
@@ -91,6 +92,17 @@ def test_runtime_detects_zai_insufficient_balance_error() -> None:
     assert _is_insufficient_balance_error(error) is True
 
 
+def test_runtime_detects_zai_usage_limit_error() -> None:
+    error = ProviderError(
+        'zai returned HTTP 429: {"error":{"code":"1308","message":'
+        '"Usage limit reached for 5 hour. Your limit will reset at 2026-07-08 07:41:15"}}',
+        status_code=429,
+        provider="zai",
+    )
+
+    assert _is_insufficient_balance_error(error) is True
+
+
 @pytest.mark.asyncio
 async def test_runtime_balance_error_disables_provider_for_future_routes(tmp_path) -> None:
     models_file = tmp_path / "models.yaml"
@@ -129,6 +141,58 @@ models:
         )
     )
 
+    assert Provider.ZAI not in proxy.providers
+    assert decision.primary.name == "ollama/reviewer"
+
+
+@pytest.mark.asyncio
+async def test_runtime_quota_error_uses_temporary_cooldown(tmp_path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """
+models:
+  - name: "zhipu/glm-5.2"
+    provider: "zai"
+    roles: ["review"]
+    priority: 1
+    max_tokens: 128000
+  - name: "ollama/reviewer"
+    provider: "ollama"
+    roles: ["review"]
+    priority: 2
+    max_tokens: 128000
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = load_model_registry(models_file)
+    cooldowns = ProviderCooldownStore(default_seconds=3600)
+    router = MultiModelRouter(registry, PromptScorer(), provider_cooldowns=cooldowns)
+    proxy = ProviderProxy(
+        {Provider.ZAI: object(), Provider.OLLAMA: object()},
+        provider_cooldowns=cooldowns,
+    )
+    proxy_holder = {"proxy": proxy}
+    model = ModelInfo(name="zhipu/glm-5.2", provider=Provider.ZAI, tier=Tier.T3)
+    error = ProviderError(
+        "zai returned HTTP 429: Usage limit reached for 5 hour",
+        status_code=429,
+        provider="zai",
+    )
+
+    _priority_demoter(
+        str(models_file),
+        router,
+        cooldowns,
+        proxy_holder=proxy_holder,
+    )(model, error)
+    decision = await router.route(
+        ChatRequest(
+            model=None,
+            messages=[ChatMessage(role="user", content="Review this migration architecture.")],
+        )
+    )
+
+    assert cooldowns.provider_cooldown(Provider.ZAI) is not None
     assert Provider.ZAI not in proxy.providers
     assert decision.primary.name == "ollama/reviewer"
 

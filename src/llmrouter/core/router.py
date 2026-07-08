@@ -14,8 +14,11 @@ Design goals:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import Any, Protocol
 
+from llmrouter.config import RolloutConfig
+from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.scorer import PromptScorer, ScoringResult
@@ -259,6 +262,9 @@ class MultiModelRouter:
         fallback_count: int = 2,
         provider_cost_order: list[str] | None = None,
         health_tracker: ModelHealthTracker | None = None,
+        rollout_config: RolloutConfig | None = None,
+        provider_cooldowns: ProviderCooldownStore | None = None,
+        client_provider_affinity: bool = True,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
@@ -266,8 +272,19 @@ class MultiModelRouter:
         self._fallback_count = fallback_count
         self._unavailable_providers: set[Provider] = set()
         self._health_tracker = health_tracker
+        self._rollout_config = rollout_config
+        self._provider_cooldowns = provider_cooldowns
+        self._client_provider_affinity = client_provider_affinity
         if health_tracker is not None:
             self._strategy.set_health_tracker(health_tracker)
+
+    def set_rollout_config(self, config: RolloutConfig | None) -> None:
+        """Inject canary/blue-green rollout configuration."""
+        self._rollout_config = config
+
+    def set_provider_cooldowns(self, cooldowns: ProviderCooldownStore | None) -> None:
+        """Inject provider/model cooldown memory."""
+        self._provider_cooldowns = cooldowns
 
     def replace_registry(self, registry: ModelRegistry) -> None:
         """Replace the live model registry used for future routing decisions."""
@@ -338,11 +355,14 @@ class MultiModelRouter:
         # Get candidate models for the recommended tier
         candidates = self._get_candidates(scoring.tier, constraints)
 
+        # Apply canary/blue-green rollout filter (pre-strategy eligibility)
+        candidates = self._apply_rollout(candidates, request)
+
         if not candidates:
-            # Fallback: try any model available
+            # Fallback: try any model available (safety net — bypasses rollout filter).
             candidates = self._available_models(self._registry.all())
             _logger.debug(
-                "No candidates in tier %s, using all %d models",
+                "No candidates after rollout filter in tier %s, using all %d models",
                 scoring.tier.name,
                 len(candidates),
             )
@@ -360,6 +380,7 @@ class MultiModelRouter:
 
         # Apply selection strategy
         ordered = _unique_models(self._strategy.select(candidates, constraints))
+        ordered = self._apply_client_provider_affinity(ordered, request, constraints)
         primary = ordered[0]
         fallbacks = ordered[1 : 1 + self._fallback_count]
 
@@ -372,12 +393,18 @@ class MultiModelRouter:
             [m.name for m in fallbacks] or "none",
         )
 
+        # rollout_sampled is set only when the _primary_ model has rollout < 100
+        rollout_sampled: str | None = None
+        if primary.rollout_percentage < 100.0:
+            rollout_sampled = f"{primary.name}:{primary.rollout_percentage:.1f}"
+
         return RoutingDecision(
             primary=primary,
             fallbacks=fallbacks,
             score=scoring.score,
             tier=scoring.tier,
             reason=self._build_reason(scoring, primary),
+            rollout_sampled=rollout_sampled,
         )
 
     def _get_candidates(
@@ -431,10 +458,134 @@ class MultiModelRouter:
         ordered = _unique_models(self._strategy.select(all_models, constraints))
         return ordered[: self._fallback_count]
 
+    def _apply_client_provider_affinity(
+        self,
+        ordered: list[ModelInfo],
+        request: ChatRequest,
+        constraints: RoutingConstraints,
+    ) -> list[ModelInfo]:
+        """Prefer a stable provider for each caller when alternatives exist."""
+        if not ordered:
+            return ordered
+        preferred = constraints.preferred_provider
+        if preferred is None and self._client_provider_affinity:
+            preferred = self._client_affinity_provider(ordered, request)
+        if preferred is None:
+            return ordered
+        if all(model.provider != preferred for model in ordered):
+            return ordered
+        preferred_models = [model for model in ordered if model.provider == preferred]
+        other_models = [model for model in ordered if model.provider != preferred]
+        if preferred_models and other_models:
+            client = (
+                request.extra.get("_llmrouter_client_id")
+                or request.extra.get("_llmrouter_client_ip")
+                or "unknown"
+            )
+            _logger.debug(
+                "Client provider affinity preferred provider '%s' for client=%s",
+                preferred.value,
+                client,
+            )
+        return [*preferred_models, *other_models]
+
+    @staticmethod
+    def _client_affinity_provider(
+        models: list[ModelInfo],
+        request: ChatRequest,
+    ) -> Provider | None:
+        client_id = (
+            request.extra.get("_llmrouter_client_id")
+            or request.extra.get("_llmrouter_client_ip")
+            or request.extra.get("user")
+        )
+        if not client_id:
+            return None
+        providers = sorted(
+            {model.provider for model in models},
+            key=lambda provider: provider.value,
+        )
+        if len(providers) < 2:
+            return None
+        digest = hashlib.sha256(str(client_id).encode("utf-8", errors="replace")).digest()
+        return providers[int.from_bytes(digest[:8], "big") % len(providers)]
+
+    def _apply_rollout(
+        self,
+        candidates: list[ModelInfo],
+        request: ChatRequest,
+    ) -> list[ModelInfo]:
+        """Filter candidates by ``rollout_percentage`` using deterministic hash.
+
+        This is a **pre-strategy eligibility filter**: models with
+        ``rollout_percentage == 0`` are excluded entirely; models with
+        ``0 < rollout_percentage < 100`` are only eligible for a deterministic
+        percentage of prompts (based on SHA-256 hash of prompt + model name).
+        Models with ``rollout_percentage == 100`` are always eligible.
+
+        Returns the filtered candidate list. When all candidates are removed
+        (safety net) an empty list is returned so downstream fallback logic
+        can activate.
+        """
+        if self._rollout_config and not self._rollout_config.enabled:
+            return candidates
+
+        if all(m.rollout_percentage >= 100.0 for m in candidates):
+            return candidates
+
+        prompt_seed = int(
+            hashlib.sha256(request.prompt_text.encode("utf-8", errors="replace")).hexdigest(),
+            16,
+        )
+
+        filtered: list[ModelInfo] = []
+
+        for model in candidates:
+            if model.rollout_percentage >= 100.0:
+                filtered.append(model)
+                continue
+            if model.rollout_percentage <= 0.0:
+                continue
+
+            model_seed = int(
+                hashlib.sha256(
+                    f"{model.name}:{prompt_seed}".encode(),
+                ).hexdigest(),
+                16,
+            )
+            bucket = model_seed % 100
+
+            if bucket < int(model.rollout_percentage):
+                filtered.append(model)
+
+        if not filtered:
+            _logger.warning(
+                "Rollout filter removed all %d candidates; no models eligible in this tier",
+                len(candidates),
+            )
+            return []
+
+        if len(filtered) != len(candidates):
+            _logger.debug(
+                "Rollout filter: %d → %d candidates",
+                len(candidates),
+                len(filtered),
+            )
+
+        return filtered
+
     def _available_models(self, models: list[ModelInfo]) -> list[ModelInfo]:
-        if not self._unavailable_providers:
-            return models
-        return [model for model in models if model.provider not in self._unavailable_providers]
+        available: list[ModelInfo] = []
+        for model in models:
+            if model.provider in self._unavailable_providers:
+                continue
+            if (
+                self._provider_cooldowns is not None
+                and not self._provider_cooldowns.is_model_available(model)
+            ):
+                continue
+            available.append(model)
+        return available
 
     @staticmethod
     def _build_reason(scoring: ScoringResult, model: ModelInfo) -> str:

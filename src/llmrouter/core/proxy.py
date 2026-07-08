@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.types import ChatRequest, ChatResponse, Provider, RoutingDecision
 from llmrouter.logging_config import get_logger
@@ -23,11 +24,13 @@ class ProviderProxy:
         *,
         on_provider_error: Callable[[Any, ProviderError], None] | None = None,
         health_tracker: ModelHealthTracker | None = None,
+        provider_cooldowns: ProviderCooldownStore | None = None,
     ) -> None:
         self._providers = providers
         self._on_provider_error = on_provider_error
         self._health_tracker = health_tracker
         self._disabled_providers: set[Provider] = set()
+        self._provider_cooldowns = provider_cooldowns
 
     @property
     def providers(self) -> frozenset[Provider]:
@@ -36,11 +39,19 @@ class ProviderProxy:
             provider
             for provider in self._providers
             if provider not in self._disabled_providers
+            and (
+                self._provider_cooldowns is None
+                or self._provider_cooldowns.is_provider_available(provider)
+            )
         )
 
     def disable_provider(self, provider: Provider) -> None:
         """Stop sending new attempts to a provider for this process lifetime."""
         self._disabled_providers.add(provider)
+
+    def set_provider_cooldowns(self, cooldowns: ProviderCooldownStore | None) -> None:
+        """Inject provider/model cooldown memory."""
+        self._provider_cooldowns = cooldowns
 
     async def chat_completion(
         self,
@@ -53,6 +64,20 @@ class ProviderProxy:
 
         for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
+            cooldown = self._cooldown_for_model(model)
+            if cooldown is not None:
+                _logger.warning(
+                    "Provider '%s' in cooldown for model '%s' for %.0fs",
+                    model.provider.value,
+                    model.name,
+                    cooldown.seconds_remaining,
+                )
+                last_error = ProviderError(
+                    f"Provider {model.provider.value} is in quota cooldown",
+                    status_code=429,
+                    provider=model.provider.value,
+                )
+                continue
             if model.provider in self._disabled_providers:
                 _logger.warning(
                     "Provider '%s' disabled for model '%s'",
@@ -91,6 +116,7 @@ class ProviderProxy:
                 return response
             except ProviderError as exc:
                 await self._record_error(model, exc)
+                self._record_cooldown(model, exc)
                 self._handle_provider_error(model, exc)
                 fallback_message = (
                     f" → falling back to '{attempts[i + 1].name}'"
@@ -125,6 +151,14 @@ class ProviderProxy:
 
         for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
+            cooldown = self._cooldown_for_model(model)
+            if cooldown is not None:
+                last_error = ProviderError(
+                    f"Provider {model.provider.value} is in quota cooldown",
+                    status_code=429,
+                    provider=model.provider.value,
+                )
+                continue
             if model.provider in self._disabled_providers:
                 last_error = ProviderError(
                     f"Provider {model.provider.value} is disabled",
@@ -158,15 +192,14 @@ class ProviderProxy:
                     len(attempts),
                 )
                 started = time.perf_counter()
-                success = False
                 async for chunk in provider.stream_completion(request, model.provider_model_name):
                     yield chunk
-                    success = True
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 await self._record_stream_success(model, elapsed_ms)
                 return  # Success — stop trying fallbacks
             except ProviderError as exc:
                 await self._record_error(model, exc)
+                self._record_cooldown(model, exc)
                 self._handle_provider_error(model, exc)
                 fallback_message = (
                     f" → falling back to '{attempts[i + 1].name}'"
@@ -202,6 +235,39 @@ class ProviderProxy:
                 "Provider error callback failed for model '%s': %s",
                 getattr(model, "name", "(unknown)"),
                 callback_exc,
+            )
+
+    def _cooldown_for_model(self, model: Any) -> Any | None:
+        if self._provider_cooldowns is None:
+            return None
+        try:
+            if not self._provider_cooldowns.is_model_available(model):
+                return (
+                    self._provider_cooldowns.model_cooldown(model.name)
+                    or self._provider_cooldowns.provider_cooldown(model.provider)
+                )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            _logger.warning("Provider cooldown check failed for '%s': %s", model.name, exc)
+        return None
+
+    def _record_cooldown(self, model: Any, exc: ProviderError) -> None:
+        if self._provider_cooldowns is None:
+            return
+        try:
+            entry = self._provider_cooldowns.record_quota_error(model, exc)
+            if entry is not None:
+                _logger.warning(
+                    "Provider '%s' put in quota cooldown for %.0fs after model '%s': %s",
+                    model.provider.value,
+                    entry.seconds_remaining,
+                    model.name,
+                    exc,
+                )
+        except Exception as cooldown_exc:  # pragma: no cover - defensive logging
+            _logger.warning(
+                "Provider cooldown recording failed for '%s': %s",
+                model.name,
+                cooldown_exc,
             )
 
     async def _record_success(self, model: Any, response: ChatResponse) -> None:

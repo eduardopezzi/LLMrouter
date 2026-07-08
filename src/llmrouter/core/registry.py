@@ -75,6 +75,8 @@ def _model_from_mapping(item: object) -> ModelInfo:
     context_window = int(item.get("context_window", max_tokens))
     priority = int(item.get("priority", 10))
     tier = _parse_tier(item.get("tier"), roles, max_tokens, priority, name)
+    # Let ModelInfo.__post_init__ validate the range; do NOT clamp silently.
+    rollout_percentage = float(item.get("rollout_percentage", 100.0))
 
     return ModelInfo(
         name=name,
@@ -88,6 +90,7 @@ def _model_from_mapping(item: object) -> ModelInfo:
         context_window=context_window,
         api_base=_optional_str(item.get("api_base")),
         description=_optional_str(item.get("description")) or "",
+        rollout_percentage=rollout_percentage,
     )
 
 

@@ -75,6 +75,17 @@ class RoutingConfig(BaseModel):
         default_factory=lambda: ["zai", "ollama"],
         description="Provider preference used to break cost ties.",
     )
+    client_provider_affinity: bool = Field(
+        default=True,
+        description=(
+            "Use caller identity (for example client IP) to prefer different "
+            "providers for different users when several providers are available."
+        ),
+    )
+    quota_cooldown_seconds: float = Field(
+        default=5 * 60 * 60,
+        description="Fallback provider cooldown duration when a quota reset time is not reported.",
+    )
     max_cost_per_request: float | None = None
     scorer_weights: dict[str, float] = Field(
         default_factory=lambda: {
@@ -195,6 +206,31 @@ class HybridScorerConfig(BaseModel):
     semantic_confidence_threshold: float = 0.35
 
 
+class RolloutConfig(BaseModel):
+    """Canary/blue-green model rollout configuration.
+
+    Controls how ``rollout_percentage`` is applied during routing.
+    """
+
+    enabled: bool = True
+    deterministic: bool = True
+    critical_threshold_pct: float = Field(
+        default=5.0,
+        description="Rollout percentage at/below which a model is considered a canary.",
+    )
+    auto_promote: bool = Field(
+        default=False,
+        description="Future: automatically increase rollout when HealthScore is good.",
+    )
+    auto_rollback_error_rate: float = Field(
+        default=20.0,
+        description=(
+            "Error rate percentage during a canary that triggers automatic rollback "
+            "(sets rollout_percentage=0). Requires health tracking."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main settings
 # ---------------------------------------------------------------------------
@@ -234,6 +270,7 @@ class Settings(BaseSettings):
     health: HealthConfig = Field(default_factory=HealthConfig)
     semantic: SemanticConfig = Field(default_factory=SemanticConfig)
     hybrid: HybridScorerConfig = Field(default_factory=HybridScorerConfig)
+    rollout: RolloutConfig = Field(default_factory=RolloutConfig)
 
     # Model registry file
     models_file: str = "config/models.yaml"

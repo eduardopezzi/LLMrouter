@@ -15,6 +15,11 @@
 #   migration        → Conversão de linguagens (ex: JS para TS) e atualização de bibliotecas
 #   documentation    → Geração de READMEs, docstrings e contratos de API (Swagger)
 #   summarization    → Resumos rápidos de commits, PRs, código e arquivos diff
+#
+# Canary/Blue-Green Rollout:
+#   rollout_percentage: 0-100 controla a porcentagem de tráfego que o modelo recebe.
+#   Default é 100 (tráfego total). Use valores menores para canary (ex: 10 = 10% do tráfego).
+#   Definir como 0 remove o modelo do roteamento instantaneamente (rollback).
 
 models:
   # ==================================================================
@@ -121,6 +126,7 @@ models:
     api_base: "http://localhost:11434"
     roles: ["summarization", "documentation"]
     priority: 10
+    rollout_percentage: 100
     description: "Qwen 2.5 Coder 3B — Extremamente rápido e leve para resumos de commits e geração de Docstrings simples."
     max_tokens: 8192
     context_window: 32768
@@ -201,6 +207,23 @@ models:
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
+    rollout_percentage: 100
+
+  # ==================================================================
+  # Exemplo de modelo em Canary (rollout gradual)
+  # ==================================================================
+  # - name: "ollama/new-experimental:canary"
+  #   provider: "ollama"
+  #   api_base: "http://localhost:11434"
+  #   roles: ["review", "fix"]
+  #   priority: 10
+  #   rollout_percentage: 10  # Recebe apenas 10% do tráfego para validação
+  #   description: "Modelo experimental em canary — recebe 10% do tráfego."
+  #   max_tokens: 128000
+  #   context_window: 262144
+  #   prompt_cost_per_1m_tokens: 0
+  #   completion_cost_per_1m_tokens: 0
+  #   cached_prompt_cost_per_1m_tokens: 0
 
 defaults:
   temperature: 0.1

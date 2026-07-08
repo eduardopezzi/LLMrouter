@@ -17,6 +17,7 @@ from llmrouter.cli_panel import (
     render_panel_summary,
     run_interactive_panel,
     set_fallback_count,
+    set_model_rollout_percentage,
     set_provider_cost_order,
     set_routing_strategy,
 )
@@ -190,6 +191,13 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Persist provider cost order, e.g. deepseek,zai,ollama.",
     )
+    panel_parser.add_argument(
+        "--set-rollout",
+        nargs=2,
+        metavar=("MODEL", "PCT"),
+        default=None,
+        help="Set rollout percentage for a model (0-100), e.g. glm-5.2 25.",
+    )
 
     health_parser = subparsers.add_parser(
         "health",
@@ -327,6 +335,18 @@ def main() -> None:
             set_provider_cost_order(args.env_file, providers)
             print(f"Updated provider cost order: {', '.join(providers)}")
             changed = True
+        if args.set_rollout:
+            rollout_model, rollout_pct_str = args.set_rollout
+            try:
+                rollout_pct = float(rollout_pct_str)
+            except ValueError:
+                print(f"Error: invalid percentage '{rollout_pct_str}'")
+                return
+            set_model_rollout_percentage(models_file, rollout_model, rollout_pct)
+            print(f"Set rollout_percentage={rollout_pct:g} for {rollout_model}")
+            registry = build_registry(models_file)
+            print(render_model_priorities(registry, limit=args.priority_limit))
+            return
         if args.stats or changed:
             if changed:
                 settings = reload_settings()

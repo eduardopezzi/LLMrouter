@@ -82,6 +82,9 @@ class ModelInfo:
         context_window: Maximum input context length in tokens.
         api_base: Optional provider endpoint declared by the model catalog.
         description: Human-facing description from the catalog.
+        rollout_percentage: Traffic percentage this model receives during
+            a canary/blue-green rollout (0–100). Defaults to ``100`` (full traffic).
+            Set to ``0`` to instantly remove from routing without deleting the entry.
     """
 
     name: str
@@ -95,6 +98,15 @@ class ModelInfo:
     context_window: int = 8192
     api_base: str | None = None
     description: str = ""
+    rollout_percentage: float = 100.0
+
+    def __post_init__(self) -> None:
+        """Validate rollout_percentage range."""
+        if not 0.0 <= self.rollout_percentage <= 100.0:
+            raise ValueError(
+                f"rollout_percentage must be between 0 and 100, "
+                f"got {self.rollout_percentage} for model '{self.name}'"
+            )
 
     @property
     def cost_ratio(self) -> float:
@@ -200,12 +212,14 @@ class RoutingConstraints:
         required_capabilities: Capabilities the model must have.
         preferred_tier: If set, only consider models in this tier or higher.
         max_latency_ms: Soft latency target (for future use).
+        preferred_provider: Optional provider to prefer for client affinity.
     """
 
     max_cost_per_request: float | None = None
     required_capabilities: frozenset[str] = field(default_factory=frozenset)
     preferred_tier: Tier | None = None
     max_latency_ms: float | None = None
+    preferred_provider: Provider | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +232,9 @@ class RoutingDecision:
         score: Complexity score (0.0–1.0) from the scorer.
         tier: The tier selected by the scorer.
         reason: Human-readable explanation of the decision.
+        rollout_sampled: ``"model_name:percentage"`` when the primary was selected
+            via rollout filtering (i.e. had ``rollout_percentage < 100``).
+            ``None`` when no rollout filtering was applied.
     """
 
     primary: ModelInfo
@@ -225,3 +242,4 @@ class RoutingDecision:
     score: float
     tier: Tier
     reason: str
+    rollout_sampled: str | None = None

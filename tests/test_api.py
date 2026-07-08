@@ -116,6 +116,26 @@ def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
     assert "provider_model=cheap" in caplog.text
 
 
+def test_chat_completions_attaches_client_identity() -> None:
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    proxy = FakeProxy()
+    app = create_app(registry=registry, proxy=proxy)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-forwarded-for": "10.10.0.7, 10.0.0.1"},
+        json={"messages": [{"role": "user", "content": "say hello"}]},
+    )
+
+    assert response.status_code == 200
+    assert proxy.last_request is not None
+    assert proxy.last_request.extra["_llmrouter_client_ip"] == "10.10.0.7"
+    assert proxy.last_request.extra["_llmrouter_client_id"] == "10.10.0.7"
+
+
 @pytest.mark.parametrize(
     ("payload_patch", "expected"),
     [

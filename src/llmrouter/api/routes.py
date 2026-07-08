@@ -30,6 +30,7 @@ from llmrouter.core.types import (
     ChatMessage,
     ChatRequest,
     ModelInfo,
+    Provider,
     RoutingConstraints,
     RoutingStrategy,
     Usage,
@@ -206,6 +207,73 @@ def create_app(
             "data": [_model_payload(model) for model in app.state.registry.all()],
         }
 
+    @app.get("/v1/llmrouter/rollout")
+    async def get_rollout_status(request: Request) -> dict[str, object]:
+        """Return rollout percentages for all models in the catalog."""
+        _require_api_key(request, app.state.api_key)
+        return {
+            "models": [
+                {
+                    "name": m.name,
+                    "provider": m.provider.value,
+                    "rollout_percentage": m.rollout_percentage,
+                }
+                for m in app.state.registry.all()
+            ]
+        }
+
+    @app.post("/v1/llmrouter/rollout/{model_name:path}")
+    async def set_rollout_percentage(
+        model_name: str,
+        percentage: float,
+        request: Request,
+    ) -> dict[str, object]:
+        """Update rollout percentage for a model at runtime (hot-reload registry).
+
+        Persists the new value to the YAML catalog file and replaces the live
+        registry used by the router, without requiring a server restart.
+        """
+        _require_api_key(request, app.state.api_key)
+        if not 0.0 <= percentage <= 100.0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="percentage must be between 0 and 100",
+            )
+
+        from llmrouter.cli_panel import set_model_rollout_percentage
+        from llmrouter.config import get_settings
+        from llmrouter.core.registry import load_model_registry
+
+        settings = get_settings()
+        models_file = settings.models_file
+
+        try:
+            set_model_rollout_percentage(models_file, model_name, percentage)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc),
+            ) from exc
+
+        new_registry = load_model_registry(models_file)
+        app.state.router.replace_registry(new_registry)
+        app.state.registry = new_registry
+
+        updated = new_registry.get(model_name)
+        new_pct = updated.rollout_percentage if updated else percentage
+
+        _logger.info(
+            "routing_decision.rollout_updated model=%s percentage=%.1f",
+            model_name,
+            new_pct,
+        )
+
+        return {
+            "model": model_name,
+            "rollout_percentage": new_pct,
+            "applied": True,
+        }
+
     @app.post("/v1/chat/completions")
     async def chat_completions(
         payload: ChatCompletionPayload,
@@ -218,7 +286,7 @@ def create_app(
                 detail="Provider proxy is not configured",
             )
 
-        chat_request = _to_chat_request(payload)
+        chat_request = _with_client_identity(_to_chat_request(payload), request)
         prompt_directives = _chat_request_directives(chat_request)
         prompt_directives = _resolve_prompt_directives(
             prompt_directives,
@@ -702,6 +770,32 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
         stop=_normalize_stop(payload.stop),
         extra=extra,
     )
+
+
+def _with_client_identity(chat_request: ChatRequest, request: Request) -> ChatRequest:
+    """Attach caller identity hints used for provider affinity and diagnostics."""
+    client_ip = _client_ip(request)
+    if not client_ip:
+        return chat_request
+    extra = dict(chat_request.extra)
+    extra.setdefault("_llmrouter_client_ip", client_ip)
+    extra.setdefault(
+        "_llmrouter_client_id",
+        extra.get("user") or request.headers.get("x-llmrouter-user") or client_ip,
+    )
+    return replace(chat_request, extra=extra)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    if request.client is not None:
+        return request.client.host
+    return ""
 
 
 def _memory_default_project(
@@ -1199,6 +1293,7 @@ def _routing_constraints(
 ) -> RoutingConstraints:
     router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
     directives = directives or {}
+    preferred_provider = _preferred_provider(payload, router_options)
     role = (
         payload.task_role
         or router_options.get("task_role")
@@ -1208,8 +1303,29 @@ def _routing_constraints(
         or directives.get("task_role")
     )
     if not isinstance(role, str) or not role:
-        return RoutingConstraints()
-    return RoutingConstraints(required_capabilities=frozenset({role}))
+        return RoutingConstraints(preferred_provider=preferred_provider)
+    return RoutingConstraints(
+        required_capabilities=frozenset({role}),
+        preferred_provider=preferred_provider,
+    )
+
+
+def _preferred_provider(
+    payload: ChatCompletionPayload,
+    router_options: dict[str, Any],
+) -> Provider | None:
+    raw = (
+        router_options.get("provider")
+        or payload.extra.get("provider")
+        or payload.extra.get("preferred_provider")
+    )
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return Provider(raw.strip().lower())
+    except ValueError:
+        _logger.debug("Ignoring unknown preferred provider: %s", raw)
+        return None
 
 
 def _routing_roles(registry: ModelRegistry) -> list[str]:

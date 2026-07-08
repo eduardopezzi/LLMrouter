@@ -64,6 +64,8 @@ class _ModelBlock:
     priority: int
     name_line_index: int
     priority_line_index: int | None
+    rollout_line_index: int | None
+    rollout_percentage: float = 100.0
 
 
 @dataclass(frozen=True)
@@ -503,6 +505,7 @@ def run_interactive_panel(
         print("8. Promote model priority")
         print("9. Refresh stats")
         print("10. Show model health")
+        print("11. Set model rollout percentage")
         print("0. Exit")
         try:
             choice = input("Select an option: ").strip()
@@ -537,6 +540,9 @@ def run_interactive_panel(
             print()
             print(render_model_health(health_tracker))
             _pause_for_enter()
+        elif choice == "11":
+            _prompt_rollout_percentage(settings.models_file, registry)
+            registry = _reload_registry(settings.models_file)
         elif choice in {"9", ""}:
             continue
         elif choice == "0":
@@ -1244,18 +1250,31 @@ def _model_blocks(path: Path) -> list[_ModelBlock]:
         name = _strip_yaml_scalar(name_match.group(2))
         priority = 10
         priority_line_index: int | None = None
+        rollout_pct: float = 100.0
+        rollout_line_index: int | None = None
+        rollout_pattern = re.compile(r"^\s+rollout_percentage:\s+([\d.]+)\s*$")
+
         for index in range(start + 1, end):
-            priority_match = priority_pattern.match(lines[index])
-            if priority_match is not None:
-                priority = int(priority_match.group(1))
-                priority_line_index = index
-                break
+            if priority_line_index is None:
+                priority_match = priority_pattern.match(lines[index])
+                if priority_match is not None:
+                    priority = int(priority_match.group(1))
+                    priority_line_index = index
+                    continue
+            if rollout_line_index is None:
+                rollout_match = rollout_pattern.match(lines[index])
+                if rollout_match is not None:
+                    rollout_pct = float(rollout_match.group(1))
+                    rollout_line_index = index
+                    continue
         blocks.append(
             _ModelBlock(
                 name=name,
                 priority=priority,
                 name_line_index=start,
                 priority_line_index=priority_line_index,
+                rollout_line_index=rollout_line_index,
+                rollout_percentage=rollout_pct,
             )
         )
     return blocks
@@ -1279,6 +1298,95 @@ def _table_exists(db: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def set_model_rollout_percentage(
+    models_file: str | Path, model_name: str, percentage: float
+) -> None:
+    """Persist ``rollout_percentage`` for a model in the YAML catalog.
+
+    If the field already exists, its value is replaced in place; otherwise it is
+    inserted right after the model ``name:`` line.
+
+    Uses advisory file locking (``fcntl.flock``) and an atomic temp-file + rename
+    strategy to prevent concurrent writes from corrupting the catalog.
+    """
+    if not 0.0 <= percentage <= 100.0:
+        raise ValueError("rollout percentage must be between 0 and 100")
+
+    import fcntl
+    import os
+    import tempfile
+
+    path = Path(models_file)
+    blocks = _model_blocks(path)
+    if not blocks:
+        raise ValueError("models file does not contain model entries")
+    if model_name not in {block.name for block in blocks}:
+        raise ValueError(f"model not found in catalog: {model_name}")
+
+    target = next(block for block in blocks if block.name == model_name)
+
+    # Read, modify, write atomically under file lock
+    with open(path, "r") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            lines = f.read().splitlines()
+
+            new_value = f"{percentage:g}"
+
+            if target.rollout_line_index is not None:
+                current = lines[target.rollout_line_index]
+                indent = _line_indent(current)
+                lines[target.rollout_line_index] = f"{indent}rollout_percentage: {new_value}"
+            else:
+                name_line = lines[target.name_line_index]
+                indent = _line_indent(name_line)
+                insert_at = target.name_line_index + 1
+                lines.insert(insert_at, f"{indent}  rollout_percentage: {new_value}")
+
+            # Atomic write via temp file + rename
+            tmp_path = path.with_suffix(".yaml.tmp")
+            tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.replace(str(tmp_path), str(path))
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _prompt_rollout_percentage(models_file: str | Path, registry: ModelRegistry) -> None:
+    """Interactive prompt for setting model rollout percentage."""
+    print()
+    print(render_model_priorities(registry, limit=20))
+    value = input("Model number or exact name, Enter to cancel: ").strip()
+    if not value:
+        print("No changes.")
+        return
+
+    rows = model_priorities(registry, limit=20)
+    model_name = value
+    if value.isdigit():
+        index = int(value)
+        if 1 <= index <= len(rows):
+            model_name = rows[index - 1].name
+        else:
+            print("Invalid model number.")
+            return
+
+    pct_input = input("Rollout percentage (0-100, Enter for 100): ").strip()
+    if not pct_input:
+        pct = 100.0
+    else:
+        try:
+            pct = float(pct_input)
+        except ValueError:
+            print(f"Error: invalid percentage: {pct_input}")
+            return
+
+    try:
+        set_model_rollout_percentage(models_file, model_name, pct)
+        print(f"Set rollout_percentage={pct:g} for {model_name} in {models_file}")
+    except Exception as exc:
+        print(f"Error: {exc}")
 
 
 def _format_mapping(value: object) -> str:

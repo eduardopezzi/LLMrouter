@@ -6,7 +6,7 @@
 | **6. Model Health & Performance Tracking** | 100% | `ModelHealthTracker` com métricas em tempo real (latência P50/P95/P99, taxa de erro, qualidade média, custo real) e `HealthScore` para roteamento adaptativo |
 | **7. Semantic Prompt Routing via Embeddings** | 80% | `SemanticPromptScorer` + `HybridScorer` usando sentence-transformers para classificar prompts semanticamente por role/tarefa e rotear ao tier/modelo ideal |
 | **8. Response Caching com Chave Semântica** | 0% | Cache LRU/TTL com embedding do prompt como chave; reutiliza respostas para prompts semanticamente equivalentes (>0.95 cosine) |
-| **9. Canary/Blue-Green Model Rollout** | 0% | Campo `rollout_percentage` no `ModelInfo`; router faz seleção ponderada; CLI para configurar rollout gradual (ex.: 5% → 25% → 100%) |
+| **9. Canary/Blue-Green Model Rollout** | 100% | `ModelInfo.rollout_percentage` (0-100) + `MultiModelRouter._apply_rollout()` com hash determinístico; CLI `--set-rollout`; endpoints API `/v1/llmrouter/rollout`; rollback instantâneo via `rollout_percentage=0` |
 | **10. Cost Budgets & Alertas por Projeto/Usuário** | 0% | `BudgetManager` com backend Redis/SQLite; headers `X-Project-ID`/`X-User-ID`; auto-fallback para modelos gratuitos ao exceder budget |
 
 ---

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -13,6 +12,7 @@ from fastapi import FastAPI
 from llmrouter.api.routes import create_app
 from llmrouter.cli_panel import demote_model_priority
 from llmrouter.config import ProviderConfig, Settings, get_settings
+from llmrouter.core.cooldown import ProviderCooldownStore, is_quota_exhaustion_error
 from llmrouter.core.health import (
     HealthBackend,
     HealthWeights,
@@ -54,6 +54,9 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         if resolved_settings.health.enabled
         else None
     )
+    provider_cooldowns = ProviderCooldownStore(
+        default_seconds=resolved_settings.routing.quota_cooldown_seconds
+    )
     router = MultiModelRouter(
         registry=registry,
         scorer=PromptScorer(_scorer_weights(resolved_settings.routing.scorer_weights)),
@@ -61,6 +64,9 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         fallback_count=resolved_settings.routing.fallback_count,
         provider_cost_order=resolved_settings.routing.provider_cost_order,
         health_tracker=health_tracker,
+        rollout_config=resolved_settings.rollout,
+        provider_cooldowns=provider_cooldowns,
+        client_provider_affinity=resolved_settings.routing.client_provider_affinity,
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
@@ -69,10 +75,12 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         on_provider_error=_priority_demoter(
             resolved_settings.models_file,
             router,
+            provider_cooldowns,
             app_holder,
             proxy_holder,
         ),
         health_tracker=health_tracker,
+        provider_cooldowns=provider_cooldowns,
     )
     proxy_holder["proxy"] = proxy
     collector = (
@@ -198,27 +206,38 @@ def _ensure_models_file(path: Path) -> Path:
 def _priority_demoter(
     models_file: str,
     router: MultiModelRouter,
+    provider_cooldowns: ProviderCooldownStore | None = None,
     app_holder: dict[str, FastAPI] | None = None,
     proxy_holder: dict[str, ProviderProxy] | None = None,
 ) -> Callable[[ModelInfo, ProviderError], None]:
     def demoter(model: ModelInfo, exc: ProviderError) -> None:
         if not _is_insufficient_balance_error(exc):
             return
-        router.mark_provider_unavailable(model.provider)
-        proxy = proxy_holder.get("proxy") if proxy_holder is not None else None
-        if proxy is not None:
-            proxy.disable_provider(model.provider)
-        demoted = demote_model_priority(models_file, model.name)
-        if demoted:
-            registry = build_registry(models_file)
-            router.replace_registry(registry)
-            app = app_holder.get("app") if app_holder is not None else None
-            if app is not None:
-                app.state.registry = registry
+        cooldown_entry = (
+            provider_cooldowns.record_quota_error(model, exc)
+            if provider_cooldowns is not None
+            else None
+        )
+        if cooldown_entry is None:
+            router.mark_provider_unavailable(model.provider)
+            proxy = proxy_holder.get("proxy") if proxy_holder is not None else None
+            if proxy is not None:
+                proxy.disable_provider(model.provider)
+            demoted = demote_model_priority(models_file, model.name)
+            if demoted:
+                registry = build_registry(models_file)
+                router.replace_registry(registry)
+                app = app_holder.get("app") if app_holder is not None else None
+                if app is not None:
+                    app.state.registry = registry
         logging.getLogger("llmrouter.runtime").warning(
-            "Disabled provider '%s' and %s model '%s' after balance/quota error: %s",
+            "%s provider '%s' for model '%s' after balance/quota error: %s",
+            (
+                "Put in quota cooldown"
+                if cooldown_entry is not None
+                else "Disabled"
+            ),
             model.provider.value,
-            "demoted" if demoted else "kept lowest-priority",
             model.name,
             exc,
         )
@@ -227,24 +246,7 @@ def _priority_demoter(
 
 
 def _is_insufficient_balance_error(exc: ProviderError) -> bool:
-    if exc.status_code not in {402, 429}:
-        return False
-    message = str(exc).lower()
-    indicators = (
-        "余额不足",
-        "无可用资源包",
-        "请充值",
-        "insufficient balance",
-        "insufficient quota",
-        "insufficient credits",
-        "no available resource",
-        "quota exceeded",
-        "billing",
-        "credit",
-        "credits",
-        "recharge",
-    )
-    return any(indicator in message for indicator in indicators)
+    return is_quota_exhaustion_error(exc)
 
 
 def build_providers(settings: Settings, registry: ModelRegistry) -> dict[Provider, BaseProvider]:
