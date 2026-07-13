@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from llmrouter.api.routes import create_app
 from llmrouter.core.registry import ModelRegistry
+from llmrouter.core.scorer import ScoringResult
+from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatRequest,
     ChatResponse,
@@ -67,6 +69,21 @@ class FakeFeedbackLoop:
         return FeedbackReport(evaluated=2, optimal=1, correct=1, overkill=0, underkill=0)
 
 
+class FakeInspectRouter:
+    def score_prompt(self, prompt: str) -> ScoringResult:
+        if not prompt.strip():
+            return ScoringResult(score=0.0, tier=Tier.T1, signals={"semantic_role": "none"})
+        return ScoringResult(
+            score=0.82,
+            tier=Tier.T3,
+            signals={
+                "semantic_role": "review",
+                "semantic_confidence": 0.91,
+                "semantic_used": True,
+            },
+        )
+
+
 class FakePrecogPublisher:
     def __init__(self) -> None:
         self.observations: list[dict[str, Any]] = []
@@ -77,6 +94,26 @@ class FakePrecogPublisher:
 
     def update_observation(self, request_id: str, outcome: dict[str, Any]) -> None:
         self.updates.append((request_id, outcome))
+
+
+def test_stats_endpoint_requires_auth_and_returns_snapshot() -> None:
+    metrics = MetricsCollector()
+    app = create_app(api_key="secret", metrics_collector=metrics)
+    client = TestClient(app)
+
+    assert client.get("/v1/llmrouter/stats").status_code == 401
+
+    response = client.get(
+        "/v1/llmrouter/stats",
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_requests"] == 0
+    assert body["fallback"] == {"available": 0, "used": 0, "rate_pct": 0.0}
+    assert body["latency"]["sample_count"] == 0
+    assert body["uptime_seconds"] >= 0
 
 
 def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
@@ -376,6 +413,53 @@ def test_health_reports_model_count() -> None:
             "routing_roles": [],
         },
     }
+
+
+def test_semantic_inspect_requires_api_key() -> None:
+    app = create_app(router=FakeInspectRouter(), api_key="secret")
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/llmrouter/semantic/inspect",
+        json={"prompt": "review this change"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_semantic_inspect_returns_role_confidence_and_tier() -> None:
+    app = create_app(router=FakeInspectRouter(), api_key="secret")
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/llmrouter/semantic/inspect",
+        headers={"Authorization": "Bearer secret"},
+        json={"prompt": "review this change"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["score"] == 0.82
+    assert body["tier"] == 3
+    assert body["semantic_role"] == "review"
+    assert body["semantic_confidence"] == 0.91
+    assert body["semantic_used"] is True
+    assert body["signals"]["semantic_role"] == "review"
+
+
+def test_semantic_inspect_empty_prompt() -> None:
+    app = create_app(router=FakeInspectRouter())
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/llmrouter/semantic/inspect",
+        json={"prompt": "   "},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tier"] == 1
+    assert body["semantic_role"] == "none"
 
 
 def test_admin_evaluator_run_cycle() -> None:

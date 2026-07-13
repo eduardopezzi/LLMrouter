@@ -121,6 +121,15 @@ class TestArgParsing:
         assert args.window_minutes == 30
         assert args.json is True
 
+    def test_parse_args_semantic_inspect(self) -> None:
+        with patch.object(sys, "argv", [
+            "llmrouter", "semantic-inspect", "review this change", "--json",
+        ]):
+            args = _parse_args()
+        assert args.command == "semantic-inspect"
+        assert args.prompt == "review this change"
+        assert args.json is True
+
     def test_parse_args_server_options(self) -> None:
         with patch.object(sys, "argv", [
             "llmrouter", "--host", "0.0.0.0", "--port", "8080", "--workers", "4", "--debug",
@@ -348,6 +357,20 @@ class TestMainCommands:
         data = json.loads(captured.out)
         assert "window_minutes" in data
         assert "models" in data
+
+    def test_main_semantic_inspect_json(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch.object(sys, "argv", [
+            "llmrouter", "semantic-inspect", "review this change", "--json",
+        ]):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "score" in data
+        assert "tier" in data
+        assert data["semantic_role"] == "none"
 
     def test_main_health_text(
         self, capsys: pytest.CaptureFixture[str]

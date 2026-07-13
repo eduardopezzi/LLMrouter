@@ -151,6 +151,25 @@ Para descobrir os papéis disponíveis no catálogo carregado:
 curl http://localhost:12345/health
 ```
 
+### Inspecionar roteamento semântico
+
+Quando `LLMROUTER_SEMANTIC__ENABLED=true`, o runtime usa o `HybridScorer`
+para combinar heurísticas e embeddings. Para calibrar a classificação sem chamar
+provedores externos:
+
+```bash
+curl -X POST http://localhost:12345/v1/llmrouter/semantic/inspect \
+  -H "Authorization: Bearer your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Review this architecture and identify security risks."}'
+```
+
+Via CLI:
+
+```bash
+llmrouter semantic-inspect "Review this architecture and identify security risks." --json
+```
+
 ## Integração com o Cline
 
 O [Cline](https://github.com/cline/cline) é um agent de coding autônomo para VS Code.

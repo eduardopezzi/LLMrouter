@@ -9,6 +9,7 @@ import pytest
 
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy, _unique_attempts
+from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatMessage,
     ChatRequest,
@@ -110,6 +111,52 @@ async def test_chat_completion_fallback_on_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_metrics_collects_completed_request_and_provider_fallback() -> None:
+    primary = _model("primary", Provider.OPENAI)
+    fallback = _model("fallback", Provider.OLLAMA)
+    metrics = MetricsCollector()
+    proxy = ProviderProxy(
+        {
+            Provider.OPENAI: StubProvider("openai", error=ProviderError("fail", 500, "openai")),
+            Provider.OLLAMA: StubProvider("ollama"),
+        },
+        metrics_collector=metrics,
+    )
+
+    response = await proxy.chat_completion(_request(), _decision(primary, [fallback]))
+    snapshot = await metrics.snapshot()
+
+    assert response.model == "fallback"
+    assert snapshot.total_requests == 1
+    assert snapshot.fallback_available == 1
+    assert snapshot.fallback_used == 1
+    assert snapshot.failed_requests == 0
+    assert snapshot.tier_distribution == {"tier_2": 1}
+    assert snapshot.latency["sample_count"] == 1
+    assert snapshot.errors["by_provider"] == {"openai": 1}
+    assert snapshot.errors["by_model"] == {"primary": 1}
+
+
+@pytest.mark.asyncio
+async def test_metrics_collects_final_provider_failure() -> None:
+    model = _model("primary", Provider.OPENAI)
+    metrics = MetricsCollector()
+    proxy = ProviderProxy(
+        {Provider.OPENAI: StubProvider("openai", error=ProviderError("fail", 503, "openai"))},
+        metrics_collector=metrics,
+    )
+
+    with pytest.raises(ProviderError):
+        await proxy.chat_completion(_request(), _decision(model))
+
+    snapshot = await metrics.snapshot()
+    assert snapshot.total_requests == 1
+    assert snapshot.failed_requests == 1
+    assert snapshot.fallback_used == 0
+    assert snapshot.errors["by_provider"] == {"openai": 1}
+
+
+@pytest.mark.asyncio
 async def test_chat_completion_all_providers_fail() -> None:
     primary = _model("primary", Provider.OPENAI)
     fallback = _model("fallback", Provider.OPENAI)
@@ -184,6 +231,24 @@ async def test_stream_completion_fallback_on_error() -> None:
         chunks.append(chunk)
     assert len(chunks) == 1
     assert chunks[0]["choices"][0]["delta"]["content"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_metrics_collects_streaming_request() -> None:
+    model = _model("stream", Provider.OPENAI)
+    metrics = MetricsCollector()
+    proxy = ProviderProxy(
+        {Provider.OPENAI: StubProvider("openai")},
+        metrics_collector=metrics,
+    )
+
+    async for _ in proxy.stream_chat_completion(_request(), _decision(model)):
+        pass
+
+    snapshot = await metrics.snapshot()
+    assert snapshot.total_requests == 1
+    assert snapshot.stream_requests == 1
+    assert snapshot.stream_fallback_used == 0
 
 
 @pytest.mark.asyncio

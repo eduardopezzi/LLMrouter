@@ -34,6 +34,7 @@
           "frequency_penalty",
           "llmrouter",
           "logit_bias",
+          "max_completion_tokens",
           "max_tokens",
           "messages",
           "metadata",
@@ -64,6 +65,56 @@
     },
     {
       "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/semantic/inspect",
+      "request_schema": {
+        "properties": [
+          "model",
+          "prompt"
+        ],
+        "required": []
+      },
+      "response_schema": {
+        "score": "float",
+        "semantic_confidence": "float",
+        "semantic_role": "str",
+        "semantic_used": "bool",
+        "signals": "object",
+        "tier": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/cache/stats",
+      "response_schema": {
+        "cost_saved_usd": "float",
+        "entries": "int",
+        "hit_rate": "float",
+        "hits": "int",
+        "misses": "int",
+        "tokens_saved": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/stats",
+      "response_schema": {
+        "budget": "object",
+        "cache": "object",
+        "errors": "object",
+        "failed_requests": "int",
+        "fallback": "object",
+        "latency": "object",
+        "stream": "object",
+        "tier_distribution": "object",
+        "total_requests": "int",
+        "uptime_seconds": "float"
+      }
+    },
+    {
+      "auth_required": true,
       "method": "GET",
       "path": "/v1/models",
       "response_schema": {
@@ -74,137 +125,38 @@
   ],
   "models": [
     {
-      "api_base": "https://integrate.api.nvidia.com/v1",
-      "capabilities": [
-        "refactoring",
-        "test_generation"
-      ],
-      "context_window": 16384,
-      "id": "nvidia_nim/deepseek-ai/deepseek-v4-flash",
-      "max_tokens": 16384,
-      "priority": 24,
-      "provider": "nvidia",
-      "provider_model": "deepseek-ai/deepseek-v4-flash",
-      "tier": 2
-    },
-    {
-      "api_base": "https://integrate.api.nvidia.com/v1",
-      "capabilities": [
-        "architecture",
-        "fix",
-        "review",
-        "security_audit"
-      ],
-      "context_window": 16384,
-      "id": "nvidia_nim/deepseek-ai/deepseek-v4-pro",
-      "max_tokens": 16384,
-      "priority": 22,
-      "provider": "nvidia",
-      "provider_model": "deepseek-ai/deepseek-v4-pro",
-      "tier": 3
-    },
-    {
-      "api_base": "https://integrate.api.nvidia.com/v1",
-      "capabilities": [
-        "refactoring",
-        "test_generation"
-      ],
-      "context_window": 32000,
-      "id": "nvidia_nim/google/gemma-4-31b-it",
-      "max_tokens": 32000,
-      "priority": 23,
-      "provider": "nvidia",
-      "provider_model": "google/gemma-4-31b-it",
-      "tier": 2
-    },
-    {
-      "api_base": "https://integrate.api.nvidia.com/v1",
+      "api_base": null,
       "capabilities": [
         "documentation",
         "fix",
+        "refactoring",
         "review",
         "summarization",
         "test_generation"
       ],
-      "context_window": 8192,
-      "id": "nvidia_nim/minimaxai/minimax-m3",
-      "max_tokens": 8192,
-      "priority": 27,
-      "provider": "nvidia",
-      "provider_model": "minimaxai/minimax-m3",
+      "context_window": 1000000,
+      "id": "deepseek/deepseek-chat",
+      "max_tokens": 393216,
+      "priority": 13,
+      "provider": "deepseek",
+      "provider_model": "deepseek-chat",
       "tier": 3
     },
     {
-      "api_base": "https://integrate.api.nvidia.com/v1",
-      "capabilities": [
-        "documentation",
-        "summarization"
-      ],
-      "context_window": 16384,
-      "id": "nvidia_nim/mistralai/mistral-medium-3.5-128b",
-      "max_tokens": 16384,
-      "priority": 26,
-      "provider": "nvidia",
-      "provider_model": "mistralai/mistral-medium-3.5-128b",
-      "tier": 1
-    },
-    {
-      "api_base": "https://integrate.api.nvidia.com/v1",
-      "capabilities": [
-        "fix",
-        "migration",
-        "review"
-      ],
-      "context_window": 16384,
-      "id": "nvidia_nim/moonshotai/kimi-k2.6",
-      "max_tokens": 16384,
-      "priority": 21,
-      "provider": "nvidia",
-      "provider_model": "moonshotai/kimi-k2.6",
-      "tier": 3
-    },
-    {
-      "api_base": "https://integrate.api.nvidia.com/v1",
-      "capabilities": [
-        "summarization"
-      ],
-      "context_window": 8192,
-      "id": "nvidia_nim/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-      "max_tokens": 8192,
-      "priority": 28,
-      "provider": "nvidia",
-      "provider_model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-      "tier": 1
-    },
-    {
-      "api_base": "https://integrate.api.nvidia.com/v1",
+      "api_base": null,
       "capabilities": [
         "architecture",
         "fix",
         "review",
         "security_audit"
       ],
-      "context_window": 16384,
-      "id": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
-      "max_tokens": 16384,
-      "priority": 20,
-      "provider": "nvidia",
-      "provider_model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "context_window": 1000000,
+      "id": "deepseek/deepseek-reasoner",
+      "max_tokens": 65536,
+      "priority": 14,
+      "provider": "deepseek",
+      "provider_model": "deepseek-reasoner",
       "tier": 3
-    },
-    {
-      "api_base": "https://integrate.api.nvidia.com/v1",
-      "capabilities": [
-        "documentation",
-        "summarization"
-      ],
-      "context_window": 16384,
-      "id": "nvidia_nim/stepfun-ai/step-3.7-flash",
-      "max_tokens": 16384,
-      "priority": 25,
-      "provider": "nvidia",
-      "provider_model": "stepfun-ai/step-3.7-flash",
-      "tier": 1
     },
     {
       "api_base": "http://localhost:11434",
@@ -212,10 +164,10 @@
         "summarization",
         "test_generation"
       ],
-      "context_window": 128000,
+      "context_window": 163840,
       "id": "ollama/deepseek-v3.1:cloud",
       "max_tokens": 128000,
-      "priority": 11,
+      "priority": 12,
       "provider": "ollama",
       "provider_model": "deepseek-v3.1:cloud",
       "tier": 3
@@ -226,10 +178,10 @@
         "fix",
         "review"
       ],
-      "context_window": 128000,
+      "context_window": 163840,
       "id": "ollama/deepseek-v3.2:cloud",
       "max_tokens": 128000,
-      "priority": 10,
+      "priority": 11,
       "provider": "ollama",
       "provider_model": "deepseek-v3.2:cloud",
       "tier": 3
@@ -241,10 +193,10 @@
         "summarization",
         "test_generation"
       ],
-      "context_window": 128000,
+      "context_window": 1000000,
       "id": "ollama/deepseek-v4-flash:cloud",
-      "max_tokens": 128000,
-      "priority": 3,
+      "max_tokens": 393216,
+      "priority": 4,
       "provider": "ollama",
       "provider_model": "deepseek-v4-flash:cloud",
       "tier": 3
@@ -259,8 +211,8 @@
       ],
       "context_window": 1000000,
       "id": "ollama/deepseek-v4-pro:cloud",
-      "max_tokens": 1000000,
-      "priority": 2,
+      "max_tokens": 393216,
+      "priority": 3,
       "provider": "ollama",
       "provider_model": "deepseek-v4-pro:cloud",
       "tier": 3
@@ -272,10 +224,10 @@
         "refactoring",
         "review"
       ],
-      "context_window": 32000,
+      "context_window": 262144,
       "id": "ollama/gemma4:31b",
-      "max_tokens": 32000,
-      "priority": 8,
+      "max_tokens": 262144,
+      "priority": 9,
       "provider": "ollama",
       "provider_model": "gemma4:31b",
       "tier": 3
@@ -287,10 +239,10 @@
         "migration",
         "test_generation"
       ],
-      "context_window": 1000000,
+      "context_window": 999424,
       "id": "ollama/glm-5.2:cloud",
-      "max_tokens": 1000000,
-      "priority": 5,
+      "max_tokens": 131072,
+      "priority": 6,
       "provider": "ollama",
       "provider_model": "glm-5.2:cloud",
       "tier": 3
@@ -302,12 +254,30 @@
         "migration",
         "review"
       ],
-      "context_window": 128000,
+      "context_window": 262144,
       "id": "ollama/kimi-k2.7-code:cloud",
       "max_tokens": 128000,
-      "priority": 1,
+      "priority": 2,
       "provider": "ollama",
       "provider_model": "kimi-k2.7-code:cloud",
+      "tier": 3
+    },
+    {
+      "api_base": "http://localhost:11434",
+      "capabilities": [
+        "documentation",
+        "fix",
+        "refactoring",
+        "review",
+        "summarization",
+        "test_generation"
+      ],
+      "context_window": 1048576,
+      "id": "ollama/minimax-m3:cloud",
+      "max_tokens": 393216,
+      "priority": 1,
+      "provider": "ollama",
+      "provider_model": "minimax-m3:cloud",
       "tier": 3
     },
     {
@@ -316,10 +286,10 @@
         "fix",
         "refactoring"
       ],
-      "context_window": 128000,
+      "context_window": 499712,
       "id": "ollama/north-mini-code-1.0:cloud",
       "max_tokens": 128000,
-      "priority": 6,
+      "priority": 7,
       "provider": "ollama",
       "provider_model": "north-mini-code-1.0:cloud",
       "tier": 3
@@ -332,8 +302,8 @@
       ],
       "context_window": 32768,
       "id": "ollama/qwen2.5-coder:3b",
-      "max_tokens": 32768,
-      "priority": 9,
+      "max_tokens": 8192,
+      "priority": 10,
       "provider": "ollama",
       "provider_model": "qwen2.5-coder:3b",
       "tier": 1
@@ -344,13 +314,13 @@
         "refactoring",
         "test_generation"
       ],
-      "context_window": 128000,
+      "context_window": 262144,
       "id": "ollama/qwen3-coder:480b-cloud",
-      "max_tokens": 128000,
-      "priority": 4,
+      "max_tokens": 65536,
+      "priority": 5,
       "provider": "ollama",
       "provider_model": "qwen3-coder:480b-cloud",
-      "tier": 3
+      "tier": 2
     },
     {
       "api_base": "http://localhost:11434",
@@ -358,10 +328,10 @@
         "documentation",
         "test_generation"
       ],
-      "context_window": 128000,
+      "context_window": 262144,
       "id": "ollama/qwen3.6-27b:cloud",
       "max_tokens": 128000,
-      "priority": 7,
+      "priority": 8,
       "provider": "ollama",
       "provider_model": "qwen3.6-27b:cloud",
       "tier": 3
@@ -375,10 +345,10 @@
         "summarization",
         "test_generation"
       ],
-      "context_window": 128000,
+      "context_window": 200000,
       "id": "zhipu/glm-5.1",
-      "max_tokens": 128000,
-      "priority": 31,
+      "max_tokens": 131072,
+      "priority": 13,
       "provider": "zai",
       "provider_model": "glm-5.1",
       "tier": 3
@@ -392,10 +362,10 @@
         "review",
         "test_generation"
       ],
-      "context_window": 128000,
+      "context_window": 1000000,
       "id": "zhipu/glm-5.2",
-      "max_tokens": 128000,
-      "priority": 30,
+      "max_tokens": 131072,
+      "priority": 1,
       "provider": "zai",
       "provider_model": "glm-5.2",
       "tier": 3

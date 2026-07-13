@@ -21,11 +21,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from llmrouter.core.cache import CacheManager
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter
 from llmrouter.core.scorer import PromptScorer
+from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatMessage,
     ChatRequest,
@@ -92,6 +94,13 @@ class LLMrouterFeedbackPayload(BaseModel):
     outcome: dict[str, Any] = Field(default_factory=dict)
 
 
+class SemanticInspectPayload(BaseModel):
+    """Prompt payload for scorer inspection without provider calls."""
+
+    prompt: str = ""
+    model: str | None = None
+
+
 def create_app(
     *,
     registry: ModelRegistry | None = None,
@@ -106,6 +115,8 @@ def create_app(
     precog_project: str = "llmrouter",
     memory_store: MemoryStore | None = None,
     health_tracker: ModelHealthTracker | None = None,
+    metrics_collector: MetricsCollector | None = None,
+    cache_manager: CacheManager | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -150,6 +161,8 @@ def create_app(
     app.state.precog_project = precog_project
     app.state.memory_store = memory_store
     app.state.health_tracker = health_tracker
+    app.state.metrics_collector = metrics_collector
+    app.state.cache_manager = cache_manager
 
     @app.get("/health/models")
     async def health_models(request: Request) -> dict[str, object]:
@@ -345,6 +358,7 @@ def create_app(
                 memory_project=memory_project,
                 original_chat_request=original_chat_request,
                 memory_entries=memory_entries,
+                health_tracker=app.state.health_tracker,
             )
 
         started = time.perf_counter()
@@ -377,13 +391,18 @@ def create_app(
             stream=False,
         )
 
+        # Log health score for the selected model
+        await _log_selected_model_health(app.state.health_tracker, decision.primary.name, latency_ms)
+
         # Debug: log response summary
         _logger.debug(
-            "Response: %d tokens (prompt=%d, completion=%d) in %.0fms",
+            "Response: %d tokens (prompt=%d, completion=%d) in %.0fms | model=%s tier=%s",
             response.usage.total_tokens,
             response.usage.prompt_tokens,
             response.usage.completion_tokens,
             latency_ms,
+            decision.primary.name,
+            decision.tier.name if hasattr(decision, 'tier') else '?',
         )
         _record_observation(
             collector=app.state.collector,
@@ -449,6 +468,50 @@ def create_app(
         app.state.precog_publisher.update_observation(payload.request_id, payload.outcome)
         return {"status": "accepted", "request_id": payload.request_id}
 
+    @app.post("/v1/llmrouter/semantic/inspect")
+    async def semantic_inspect(
+        payload: SemanticInspectPayload,
+        request: Request,
+    ) -> dict[str, object]:
+        """Inspect the configured scorer output for a prompt without provider calls."""
+        _require_api_key(request, app.state.api_key)
+        if app.state.router is None or not hasattr(app.state.router, "score_prompt"):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Router scorer is not configured",
+            )
+        scoring = app.state.router.score_prompt(payload.prompt)
+        return _semantic_inspect_payload(scoring)
+
+    @app.get("/v1/llmrouter/stats")
+    async def get_stats(request: Request) -> dict[str, object]:
+        """Return consolidated operational metrics."""
+        _require_api_key(request, app.state.api_key)
+        collector: MetricsCollector | None = getattr(app.state, "metrics_collector", None)
+        if collector is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Metrics collector is not configured",
+            )
+        snapshot = await collector.snapshot()
+        return {
+            "uptime_seconds": round(collector.uptime_seconds, 2),
+            **snapshot.to_dict(),
+        }
+
+    @app.get("/v1/llmrouter/cache/stats")
+    async def get_cache_stats(request: Request) -> dict[str, object]:
+        """Return cache hit/miss statistics."""
+        _require_api_key(request, app.state.api_key)
+        cache: CacheManager | None = getattr(app.state, "cache_manager", None)
+        if cache is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Cache manager is not configured",
+            )
+        stats = await cache.stats()
+        return stats.to_dict()
+
     @app.post("/admin/evaluator/run-cycle")
     async def run_evaluator_cycle(request: Request, limit: int = 50) -> dict[str, object]:
         _require_api_key(request, app.state.api_key)
@@ -483,6 +546,7 @@ async def _stream_response(
     memory_project: str = "default",
     original_chat_request: ChatRequest | None = None,
     memory_entries: list[MemoryEntry] | None = None,
+    health_tracker: ModelHealthTracker | None = None,
 ) -> StreamingResponse:
     """Build a Server-Sent Events streaming response for chat completions.
 
@@ -580,6 +644,7 @@ async def _stream_response(
                 payload=payload,
                 memory_entries=memory_entries,
             )
+            await _log_selected_model_health(health_tracker, selected_model.name, latency_ms)
 
     return StreamingResponse(
         event_generator(),
@@ -1364,3 +1429,52 @@ def _require_api_key(request: Request, configured_api_key: str | None) -> None:
         detail="Invalid or missing API key",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def _semantic_inspect_payload(scoring: Any) -> dict[str, object]:
+    signals = dict(getattr(scoring, "signals", {}) or {})
+    confidence = signals.get("semantic_confidence", 0.0)
+    try:
+        semantic_confidence = float(confidence or 0.0)
+    except (TypeError, ValueError):
+        semantic_confidence = 0.0
+    return {
+        "score": getattr(scoring, "score", 0.0),
+        "tier": getattr(getattr(scoring, "tier", None), "value", None),
+        "semantic_role": signals.get("semantic_role", "none"),
+        "semantic_confidence": semantic_confidence,
+        "semantic_used": bool(signals.get("semantic_used", False)),
+        "signals": signals,
+    }
+
+
+async def _log_selected_model_health(
+    tracker: ModelHealthTracker | None,
+    model_name: str,
+    latency_ms: float,
+) -> None:
+    """Log the composite health score for a selected model to the debug log.
+
+    This gives visibility into real-time health metrics per-request,
+    complementing the periodic HealthSummary from ModelHealthTracker.
+    """
+    if tracker is None:
+        return
+    try:
+        score, health = await asyncio.gather(
+            tracker.health_score(model_name),
+            tracker.get_health(model_name),
+        )
+        _logger.debug(
+            "HealthPerRequest model=%s score=%.4f latency=[p95=%.0fms p50=%.0fms req=%.0fms] "
+            "error_rate=%.2f%% req_count=%d",
+            model_name,
+            score.score,
+            health.p95_ms,
+            health.p50_ms,
+            latency_ms,
+            health.error_rate * 100.0,
+            health.request_count,
+        )
+    except Exception:
+        _logger.debug("HealthPerRequest failed for %s (non-fatal)", model_name, exc_info=True)

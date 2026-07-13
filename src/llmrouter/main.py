@@ -31,7 +31,7 @@ from llmrouter.cross_repository import (
     resolve_project_contract_path,
 )
 from llmrouter.logging_config import setup_logging
-from llmrouter.runtime import build_app, build_registry
+from llmrouter.runtime import _build_scorer, build_app, build_registry
 
 app = build_app()
 
@@ -227,6 +227,17 @@ def _parse_args() -> argparse.Namespace:
         help="Output metrics as JSON for scripting.",
     )
 
+    semantic_parser = subparsers.add_parser(
+        "semantic-inspect",
+        help="Inspect the configured prompt scorer for a prompt.",
+    )
+    semantic_parser.add_argument("prompt", type=str, help="Prompt text to inspect.")
+    semantic_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output scorer details as JSON.",
+    )
+
     parser.add_argument(
         "--debug", "-d",
         action="store_true",
@@ -379,6 +390,19 @@ def main() -> None:
                     print(f"  {h.model_name}: {score_str}")
         return
 
+    if args.command == "semantic-inspect":
+        scoring = _build_scorer(settings).score(args.prompt)
+        payload = _semantic_inspect_payload(scoring)
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"score: {payload['score']}")
+            print(f"tier: {payload['tier']}")
+            print(f"semantic_role: {payload['semantic_role']}")
+            print(f"semantic_confidence: {payload['semantic_confidence']}")
+            print(f"semantic_used: {payload['semantic_used']}")
+        return
+
     # Configure logging based on --debug flag
     setup_logging(debug=args.debug)
     if args.debug:
@@ -433,6 +457,23 @@ def _build_health_tracker(args: argparse.Namespace) -> ModelHealthTracker:
         window_minutes=args.window_minutes,
         weights=HealthWeights(),
     )
+
+
+def _semantic_inspect_payload(scoring: object) -> dict[str, object]:
+    signals = dict(getattr(scoring, "signals", {}) or {})
+    confidence = signals.get("semantic_confidence", 0.0)
+    try:
+        semantic_confidence = float(confidence or 0.0)
+    except (TypeError, ValueError):
+        semantic_confidence = 0.0
+    return {
+        "score": getattr(scoring, "score", 0.0),
+        "tier": getattr(getattr(scoring, "tier", None), "value", None),
+        "semantic_role": signals.get("semantic_role", "none"),
+        "semantic_confidence": semantic_confidence,
+        "semantic_used": bool(signals.get("semantic_used", False)),
+        "signals": signals,
+    }
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from typing import Any, Protocol
 
 from llmrouter.config import RolloutConfig
@@ -34,6 +35,58 @@ from llmrouter.core.types import (
 from llmrouter.logging_config import get_logger
 
 _logger = get_logger("llmrouter.router")
+
+# Per-process counters for routing metrics
+_RoutingMetrics: dict[str, int] = {
+    "total_requests": 0,
+    "tier_T0": 0,
+    "tier_T1": 0,
+    "tier_T2": 0,
+    "tier_T3": 0,
+    "explicit_model": 0,
+    "fallback_available": 0,
+}
+_RoutingMetrics_lock: asyncio.Lock | None = None
+_last_metrics_log: float = 0.0
+_METRICS_LOG_INTERVAL: float = 120.0  # seconds
+
+
+async def _log_routing_metrics() -> None:
+    """Log aggregated routing metrics periodically."""
+    global _last_metrics_log
+    now = time.monotonic()
+    if now - _last_metrics_log < _METRICS_LOG_INTERVAL:
+        return
+    _last_metrics_log = now
+    async with _get_routing_metrics_lock():
+        total = _RoutingMetrics["total_requests"]
+        if total == 0:
+            return
+        t0_pct = _RoutingMetrics["tier_T0"] / total * 100
+        t1_pct = _RoutingMetrics["tier_T1"] / total * 100
+        t2_pct = _RoutingMetrics["tier_T2"] / total * 100
+        t3_pct = _RoutingMetrics["tier_T3"] / total * 100
+        explicit_pct = _RoutingMetrics["explicit_model"] / total * 100
+        fallback_available_pct = _RoutingMetrics["fallback_available"] / total * 100
+        _logger.info(
+            "RoutingMetrics total=%d tiers=[T0=%.1f%% T1=%.1f%% T2=%.1f%% T3=%.1f%%] "
+            "explicit=%.1f%% fallback_available=%.1f%%",
+            total, t0_pct, t1_pct, t2_pct, t3_pct,
+            explicit_pct, fallback_available_pct,
+        )
+
+
+def _get_routing_metrics_lock() -> asyncio.Lock:
+    global _RoutingMetrics_lock
+    if _RoutingMetrics_lock is None:
+        _RoutingMetrics_lock = asyncio.Lock()
+    return _RoutingMetrics_lock
+
+
+async def _increment_routing_metric(key: str, delta: int = 1) -> None:
+    async with _get_routing_metrics_lock():
+        _RoutingMetrics[key] = _RoutingMetrics.get(key, 0) + delta
+    await _log_routing_metrics()
 
 
 
@@ -299,6 +352,10 @@ class MultiModelRouter:
         self._health_tracker = tracker
         self._strategy.set_health_tracker(tracker)
 
+    def score_prompt(self, prompt: str) -> ScoringResult:
+        """Return the configured scorer result for a prompt without routing it."""
+        return self._scorer.score(prompt)
+
     async def route(
         self,
         request: ChatRequest,
@@ -314,17 +371,22 @@ class MultiModelRouter:
             A :class:`RoutingDecision` with primary model + fallbacks.
         """
         constraints = constraints or RoutingConstraints()
+        _route_start = time.monotonic()
 
         # If the request specifies a model, use it directly
         if request.model is not None and request.model in self._registry:
             primary = self._registry.get(request.model)
             assert primary is not None
             fallbacks = self._build_fallbacks(primary, constraints)
+            _route_elapsed = (time.monotonic() - _route_start) * 1000
             _logger.debug(
-                "Explicit model selection: %s | fallbacks=%s",
+                "Explicit model selection: %s | fallbacks=%s (decision=%.1fms)",
                 primary.name,
                 [m.name for m in fallbacks] or "none",
+                _route_elapsed,
             )
+            await _increment_routing_metric("explicit_model")
+            await _increment_routing_metric("total_requests")
             return RoutingDecision(
                 primary=primary,
                 fallbacks=fallbacks,
@@ -397,6 +459,26 @@ class MultiModelRouter:
         rollout_sampled: str | None = None
         if primary.rollout_percentage < 100.0:
             rollout_sampled = f"{primary.name}:{primary.rollout_percentage:.1f}"
+
+        _route_elapsed = (time.monotonic() - _route_start) * 1000
+        _logger.debug(
+            "Route decision: decision_ms=%.1f primary=%s tier=%s score=%.2f "
+            "candidates=%d fallbacks=%d health_tracker=%s",
+            _route_elapsed,
+            primary.name,
+            scoring.tier.name,
+            scoring.score,
+            len(candidates),
+            len(fallbacks),
+            "yes" if self._health_tracker else "no",
+        )
+
+        # Record routing metrics
+        await _increment_routing_metric("total_requests")
+        tier_key = f"tier_{scoring.tier.name}"
+        await _increment_routing_metric(tier_key)
+        if any(m.name != primary.name for m in fallbacks):
+            await _increment_routing_metric("fallback_available")
 
         return RoutingDecision(
             primary=primary,

@@ -4,7 +4,7 @@
 | --- | ---: | --- |
 | **5. Cross-Repository** | 100% | `ContractRegistry`, `BreakingChangeDetector`, snapshot versionavel, scripts `make` e CLI implementados e cobertos por testes |
 | **6. Model Health & Performance Tracking** | 100% | `ModelHealthTracker` com métricas em tempo real (latência P50/P95/P99, taxa de erro, qualidade média, custo real) e `HealthScore` para roteamento adaptativo |
-| **7. Semantic Prompt Routing via Embeddings** | 80% | `SemanticPromptScorer` + `HybridScorer` usando sentence-transformers para classificar prompts semanticamente por role/tarefa e rotear ao tier/modelo ideal |
+| **7. Semantic Prompt Routing via Embeddings** | 90% | `SemanticPromptScorer` + `HybridScorer` ligados ao runtime quando `semantic.enabled=true`; API/CLI de inspect para calibracao operacional |
 | **8. Response Caching com Chave Semântica** | 0% | Cache LRU/TTL com embedding do prompt como chave; reutiliza respostas para prompts semanticamente equivalentes (>0.95 cosine) |
 | **9. Canary/Blue-Green Model Rollout** | 100% | `ModelInfo.rollout_percentage` (0-100) + `MultiModelRouter._apply_rollout()` com hash determinístico; CLI `--set-rollout`; endpoints API `/v1/llmrouter/rollout`; rollback instantâneo via `rollout_percentage=0` |
 | **10. Cost Budgets & Alertas por Projeto/Usuário** | 0% | `BudgetManager` com backend Redis/SQLite; headers `X-Project-ID`/`X-User-ID`; auto-fallback para modelos gratuitos ao exceder budget |
@@ -74,7 +74,7 @@ e integração das estratégias com health tracker.
 
 ## 7. Semantic Prompt Routing via Embeddings
 
-**Status**: 80% concluído — componentes implementados e testes unitários passando.
+**Status**: 90% concluído — componentes implementados, ligados ao runtime e cobertos por API/CLI de inspeção.
 
 **Objetivo**: Substituir/complementar heurísticas de keywords por compreensão semântica real da tarefa.
 
@@ -99,9 +99,8 @@ e integração das estratégias com health tracker.
 - `Settings` ganhou `SemanticConfig` e `HybridScorerConfig`
 
 **Pendências / próximos passos**:
-- Atualizar `runtime.py` para construir `HybridScorer` automaticamente quando `semantic.enabled=true`
-- Adicionar CLI/endpoint para inspecionar a role semântica inferida por prompt
 - Coletar feedback do roteamento real para ajustar os embeddings por role
+- Calibrar thresholds por projeto/tipo de tarefa com dados de produção
 
 **Testes**: `tests/test_semantic_scorer.py` cobre classificação, fallback, cache, integração com router e carregamento de config.
 

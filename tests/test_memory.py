@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from llmrouter.memory import PrecogMemoryConfig, PrecogMemoryStore
+from llmrouter.memory import HybridMemoryStore, MemoryConfig, PrecogMemoryConfig, PrecogMemoryStore
 
 
 def test_precog_memory_store_retrieves_entries(monkeypatch) -> None:
@@ -88,3 +88,39 @@ def test_precog_memory_store_records_interaction(monkeypatch) -> None:
     assert seen["json"]["source"] == "llmrouter"
     assert seen["json"]["prompt"] == "Remember the API contract."
     assert seen["json"]["response"] == "The API contract uses /internal/rag/query."
+
+
+def test_hybrid_memory_store_falls_back_to_sqlite_on_precog_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(401, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    store = HybridMemoryStore(
+        PrecogMemoryConfig(
+            enabled=True,
+            base_url="http://precog.test",
+            api_key="bad-secret",
+        ),
+        MemoryConfig(
+            enabled=True,
+            db_path=str(tmp_path / "memory.db"),
+            min_prompt_chars=1,
+            min_response_chars=1,
+            top_k=3,
+        ),
+    )
+
+    recorded = store.record_interaction(
+        project="precog",
+        prompt="Remember the fallback behavior.",
+        response="SQLite stores interactions when PRecog rejects the request.",
+        metadata={"request_id": "req-fallback"},
+    )
+    entries = store.retrieve(project="precog", query="fallback SQLite request")
+
+    assert recorded is True
+    assert len(entries) == 1
+    assert entries[0].response == "SQLite stores interactions when PRecog rejects the request."

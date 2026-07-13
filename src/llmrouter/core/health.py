@@ -425,6 +425,10 @@ class ModelHealthTracker:
     The tracker is safe to share across async tasks. It accepts raw success and
     error events and exposes both aggregated :class:`ModelHealth` snapshots and
     :class:`HealthScore` values suitable for adaptive routing.
+
+    When ``log_health_summary`` is True, a summary of all models' HealthScore
+    is logged at INFO level every ``log_interval_seconds`` (or every request
+    if none set).
     """
 
     def __init__(
@@ -434,11 +438,18 @@ class ModelHealthTracker:
         window_minutes: int = 15,
         weights: HealthWeights | None = None,
         quality_source: Any | None = None,
+        log_health_summary: bool = True,
+        log_interval_seconds: int = 60,
     ) -> None:
         self._store = store or InMemoryHealthStore()
         self._window_minutes = window_minutes
         self._weights = weights or HealthWeights()
         self._quality_source = quality_source
+        self._log_health_summary = log_health_summary
+        self._log_interval = log_interval_seconds
+        self._last_summary_log: float = 0.0
+        self._request_count_total: int = 0
+        self._request_count_since_log: int = 0
 
     @property
     def store(self) -> HealthStore:
@@ -458,6 +469,9 @@ class ModelHealthTracker:
         """Record a successful model invocation."""
         quality_value = quality if quality is not None else await self._lookup_quality(model_name)
         await self._store.record_success(model_name, latency_ms, cost_usd, quality_value)
+        self._request_count_total += 1
+        self._request_count_since_log += 1
+        await self._maybe_log_summary()
 
     async def record_error(
         self,
@@ -466,6 +480,51 @@ class ModelHealthTracker:
     ) -> None:
         """Record a failed model invocation."""
         await self._store.record_error(model_name, error_type)
+        self._request_count_total += 1
+        self._request_count_since_log += 1
+        await self._maybe_log_summary()
+
+    async def _maybe_log_summary(self) -> None:
+        """Log aggregated health summary at configured interval."""
+        if not self._log_health_summary:
+            return
+        now = time.time()
+        if now - self._last_summary_log < self._log_interval:
+            return
+        self._last_summary_log = now
+        self._request_count_since_log = 0
+        try:
+            all_health = await self.list_health()
+            all_scores = await self.score_map()
+            if not all_health:
+                return
+
+            # Build summary per-model
+            model_summaries: list[str] = []
+            total_reqs = 0
+            total_errors = 0
+            for h in all_health:
+                total_reqs += h.request_count
+                total_errors += int(h.error_rate * h.request_count) if h.request_count > 0 else 0
+                score = all_scores.get(h.model_name)
+                score_str = f"{score.score:.4f}" if score else "n/a"
+                p95_str = f"{h.p95_ms:.0f}" if h.p95_ms > 0 else "?"
+                model_summaries.append(
+                    f"{h.model_name}=score={score_str} p95={p95_str}ms "
+                    f"err={h.error_rate:.2%} req={h.request_count}"
+                )
+
+            overall_error_rate = total_errors / total_reqs if total_reqs > 0 else 0.0
+            _logger.info(
+                "HealthSummary total_reqs=%d total_errors=%d error_rate=%.2f%% "
+                "models=%s",
+                total_reqs,
+                total_errors,
+                overall_error_rate * 100.0,
+                " | ".join(model_summaries),
+            )
+        except Exception:
+            _logger.debug("Health summary log failed (non-fatal)", exc_info=True)
 
     async def get_health(self, model_name: str) -> ModelHealth:
         """Return aggregated metrics for ``model_name`` in the current window."""

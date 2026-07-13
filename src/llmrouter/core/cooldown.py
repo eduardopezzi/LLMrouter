@@ -180,7 +180,7 @@ def quota_reset_timestamp(message: str, *, default_seconds: float) -> float:
     """Infer quota reset unix timestamp from provider message."""
     parsed = _parse_reset_datetime(message)
     if parsed is not None:
-        return max(time.time(), parsed.timestamp())
+        return parsed.timestamp()
 
     duration = _parse_duration_seconds(message)
     if duration is not None:

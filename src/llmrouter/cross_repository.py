@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from llmrouter.api.routes import ChatCompletionPayload
+from llmrouter.api.routes import ChatCompletionPayload, SemanticInspectPayload
 from llmrouter.core.registry import ModelRegistry
 
 CONTRACT_SCHEMA_VERSION = "1.0"
@@ -402,6 +402,20 @@ def _default_endpoints() -> tuple[dict[str, object], ...]:
             "request_schema": _model_schema(ChatCompletionPayload),
             "response_schema": {"object": "str", "choices": "list[choice]", "usage": "object"},
             "streaming": True,
+        },
+        {
+            "path": "/v1/llmrouter/semantic/inspect",
+            "method": "POST",
+            "auth_required": True,
+            "request_schema": _model_schema(SemanticInspectPayload),
+            "response_schema": {
+                "score": "float",
+                "tier": "int",
+                "semantic_role": "str",
+                "semantic_confidence": "float",
+                "semantic_used": "bool",
+                "signals": "object",
+            },
         },
         {
             "path": "/admin/evaluator/run-cycle",

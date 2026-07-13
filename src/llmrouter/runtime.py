@@ -21,16 +21,25 @@ from llmrouter.core.health import (
     ReviewQualitySource,
     SQLiteHealthStore,
 )
+from llmrouter.core.cache import CacheManager, SQLiteCacheBackend
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry, load_model_registry
 from llmrouter.core.router import MultiModelRouter
 from llmrouter.core.scorer import PromptScorer, ScorerWeights
+from llmrouter.core.semantic_scorer import HybridScorer, SemanticPromptScorer
+from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import ModelInfo, Provider
 from llmrouter.evaluator.collector import ObservationCollector
 from llmrouter.evaluator.feedback import FeedbackLoop
 from llmrouter.evaluator.grader import RoutingDecisionGrader
 from llmrouter.evaluator.judge import QualityJudge
-from llmrouter.memory import MemoryConfig, PrecogMemoryConfig, PrecogMemoryStore, SQLiteMemoryStore
+from llmrouter.memory import (
+    HybridMemoryStore,
+    MemoryConfig,
+    PrecogMemoryConfig,
+    PrecogMemoryStore,
+    SQLiteMemoryStore,
+)
 from llmrouter.precog import PrecogPublisher
 from llmrouter.providers import (
     BaseProvider,
@@ -59,7 +68,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     )
     router = MultiModelRouter(
         registry=registry,
-        scorer=PromptScorer(_scorer_weights(resolved_settings.routing.scorer_weights)),
+        scorer=_build_scorer(resolved_settings),
         strategy=resolved_settings.routing.strategy,
         fallback_count=resolved_settings.routing.fallback_count,
         provider_cost_order=resolved_settings.routing.provider_cost_order,
@@ -70,6 +79,10 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
+    metrics_collector = MetricsCollector()
+    cache_manager = CacheManager(
+        SQLiteCacheBackend("data/cache.db"),
+    )
     proxy = ProviderProxy(
         build_providers(resolved_settings, registry),
         on_provider_error=_priority_demoter(
@@ -81,6 +94,8 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         ),
         health_tracker=health_tracker,
         provider_cooldowns=provider_cooldowns,
+        metrics_collector=metrics_collector,
+        cache_manager=cache_manager,
     )
     proxy_holder["proxy"] = proxy
     collector = (
@@ -133,43 +148,89 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         precog_project=resolved_settings.precog.project,
         memory_store=memory_store,
         health_tracker=health_tracker,
+        metrics_collector=metrics_collector,
+        cache_manager=cache_manager,
     )
     app_holder["app"] = app
     return app
 
 
-def _build_memory_store(settings: Settings) -> SQLiteMemoryStore | PrecogMemoryStore | None:
+def _precog_memory_config(settings: Settings) -> PrecogMemoryConfig:
+    return PrecogMemoryConfig(
+        enabled=True,
+        base_url=settings.precog.base_url,
+        api_key=settings.precog.api_key,
+        timeout=settings.precog.timeout,
+        default_project=settings.memory.default_project,
+        top_k=settings.memory.top_k,
+        min_score=settings.memory.min_score,
+        max_context_chars=settings.memory.max_context_chars,
+        query_path=settings.memory.query_path,
+        record_path=settings.memory.record_path,
+    )
+
+
+def _local_memory_config(settings: Settings) -> MemoryConfig:
+    return MemoryConfig(
+        enabled=True,
+        backend="local",
+        db_path=settings.memory.db_path,
+        default_project=settings.memory.default_project,
+        top_k=settings.memory.top_k,
+        min_score=settings.memory.min_score,
+        max_context_chars=settings.memory.max_context_chars,
+        min_prompt_chars=settings.memory.min_prompt_chars,
+        min_response_chars=settings.memory.min_response_chars,
+    )
+
+
+def _build_memory_store(
+    settings: Settings,
+) -> SQLiteMemoryStore | PrecogMemoryStore | HybridMemoryStore | None:
     if not settings.memory.enabled:
         return None
     backend = settings.memory.backend.lower()
     if backend == "precog":
-        return PrecogMemoryStore(
-            PrecogMemoryConfig(
-                enabled=True,
-                base_url=settings.precog.base_url,
-                api_key=settings.precog.api_key,
-                timeout=settings.precog.timeout,
-                default_project=settings.memory.default_project,
-                top_k=settings.memory.top_k,
-                min_score=settings.memory.min_score,
-                max_context_chars=settings.memory.max_context_chars,
-                query_path=settings.memory.query_path,
-                record_path=settings.memory.record_path,
-            )
+        return PrecogMemoryStore(_precog_memory_config(settings))
+    if backend == "hybrid":
+        return HybridMemoryStore(
+            _precog_memory_config(settings),
+            _local_memory_config(settings),
         )
-    return SQLiteMemoryStore(
-        MemoryConfig(
-            enabled=True,
-            backend="local",
-            db_path=settings.memory.db_path,
-            default_project=settings.memory.default_project,
-            top_k=settings.memory.top_k,
-            min_score=settings.memory.min_score,
-            max_context_chars=settings.memory.max_context_chars,
-            min_prompt_chars=settings.memory.min_prompt_chars,
-            min_response_chars=settings.memory.min_response_chars,
+    return SQLiteMemoryStore(_local_memory_config(settings))
+
+
+def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
+    """Build the configured prompt scorer.
+
+    Semantic scoring is lazy: enabling it wires the hybrid scorer, but the
+    embedding model is only loaded when a prompt is scored.
+    """
+    rule_scorer = PromptScorer(_scorer_weights(settings.routing.scorer_weights))
+    if not settings.semantic.enabled:
+        return rule_scorer
+    try:
+        semantic_scorer = SemanticPromptScorer(
+            model_name=settings.semantic.model_name,
+            device=settings.semantic.device,
+            cache_dir=settings.semantic.cache_dir,
+            embedding_cache_path=settings.semantic.embedding_cache_path,
         )
-    )
+        return HybridScorer(
+            rule_scorer=rule_scorer,
+            semantic_scorer=semantic_scorer,
+            rule_weight=settings.hybrid.rule_weight,
+            semantic_weight=settings.hybrid.semantic_weight,
+            semantic_confidence_threshold=settings.hybrid.semantic_confidence_threshold,
+        )
+    except Exception:
+        if not settings.semantic.fallback_to_rule_based:
+            raise
+        logging.getLogger("llmrouter.runtime").warning(
+            "Semantic scorer unavailable; falling back to rule-based scorer",
+            exc_info=True,
+        )
+        return rule_scorer
 
 
 def _ensure_runtime_logging(*, debug: bool) -> None:

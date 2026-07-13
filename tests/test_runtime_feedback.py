@@ -13,6 +13,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import llmrouter.runtime as runtime_module
 from llmrouter.config import (
     Settings,
     ServerConfig,
@@ -30,6 +31,8 @@ from llmrouter.config import (
 )
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ModelInfo, Provider, Tier, RoutingGrade
+from llmrouter.core.scorer import PromptScorer
+from llmrouter.core.semantic_scorer import HybridScorer
 from llmrouter.evaluator.collector import ObservationCollector, _row_to_observation
 from llmrouter.evaluator.feedback import FeedbackLoop, FeedbackReport
 from llmrouter.evaluator.grader import RoutingDecisionGrader
@@ -38,6 +41,7 @@ from llmrouter.evaluator.types import QualityScore, RoutingObservation, RoutingR
 from llmrouter.memory import (
     MemoryConfig as MemConfig,
     MemoryEntry,
+    HybridMemoryStore,
     SQLiteMemoryStore,
     PrecogMemoryStore,
     PrecogMemoryConfig,
@@ -54,6 +58,7 @@ from llmrouter.runtime import (
     build_registry,
     _build_health_tracker,
     _build_memory_store,
+    _build_scorer,
     _ensure_runtime_logging,
     _is_insufficient_balance_error,
     _scorer_weights,
@@ -128,6 +133,79 @@ def test_scorer_weights_defaults() -> None:
     assert weights.length == 0.15
 
 
+def test_build_scorer_prompt_when_semantic_disabled() -> None:
+    settings = Settings()
+    settings.semantic.enabled = False
+
+    scorer = _build_scorer(settings)
+
+    assert isinstance(scorer, PromptScorer)
+
+
+def test_build_scorer_hybrid_when_semantic_enabled() -> None:
+    settings = Settings()
+    settings.semantic.enabled = True
+
+    scorer = _build_scorer(settings)
+
+    assert isinstance(scorer, HybridScorer)
+
+
+def test_build_scorer_applies_custom_hybrid_weights() -> None:
+    settings = Settings()
+    settings.semantic.enabled = True
+    settings.hybrid.rule_weight = 0.2
+    settings.hybrid.semantic_weight = 0.8
+    settings.hybrid.semantic_confidence_threshold = 0.42
+
+    scorer = _build_scorer(settings)
+
+    assert isinstance(scorer, HybridScorer)
+    assert scorer._rule_weight == pytest.approx(0.2)
+    assert scorer._semantic_weight == pytest.approx(0.8)
+    assert scorer._semantic_threshold == pytest.approx(0.42)
+
+
+def test_build_scorer_falls_back_to_prompt_when_semantic_unavailable(monkeypatch) -> None:
+    settings = Settings()
+    settings.semantic.enabled = True
+
+    class BrokenSemanticPromptScorer:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("semantic unavailable")
+
+    monkeypatch.setattr(runtime_module, "SemanticPromptScorer", BrokenSemanticPromptScorer)
+
+    scorer = _build_scorer(settings)
+
+    assert isinstance(scorer, PromptScorer)
+
+
+def test_build_scorer_raises_when_semantic_unavailable_without_fallback(monkeypatch) -> None:
+    settings = Settings()
+    settings.semantic.enabled = True
+    settings.semantic.fallback_to_rule_based = False
+
+    class BrokenSemanticPromptScorer:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("semantic unavailable")
+
+    monkeypatch.setattr(runtime_module, "SemanticPromptScorer", BrokenSemanticPromptScorer)
+
+    with pytest.raises(RuntimeError, match="semantic unavailable"):
+        _build_scorer(settings)
+
+
+def test_build_app_wires_hybrid_scorer_when_semantic_enabled(tmp_path: Path) -> None:
+    settings = Settings()
+    settings.semantic.enabled = True
+    settings.models_file = str(tmp_path / "missing-models.yaml")
+
+    app = build_app(settings)
+
+    assert isinstance(app.state.router._scorer, HybridScorer)
+
+
 def test_ensure_runtime_logging() -> None:
     _ensure_runtime_logging(debug=True)
     import logging
@@ -185,6 +263,15 @@ def test_build_memory_store_precog() -> None:
     store = _build_memory_store(settings)
     assert store is not None
     assert isinstance(store, PrecogMemoryStore)
+
+
+def test_build_memory_store_hybrid() -> None:
+    settings = Settings()
+    settings.memory.enabled = True
+    settings.memory.backend = "hybrid"
+    store = _build_memory_store(settings)
+    assert store is not None
+    assert isinstance(store, HybridMemoryStore)
 
 
 def test_build_providers_empty() -> None:

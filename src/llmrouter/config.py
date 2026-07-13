@@ -161,7 +161,7 @@ class MemoryConfig(BaseModel):
     """Local project memory/RAG settings."""
 
     enabled: bool = False
-    backend: str = "local"  # local | precog
+    backend: str = "local"  # local | sqlite | precog | hybrid
     db_path: str = "data/llmrouter_memory.db"
     default_project: str = "default"
     top_k: int = 4

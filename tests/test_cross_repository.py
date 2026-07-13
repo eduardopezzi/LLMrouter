@@ -56,7 +56,9 @@ def test_contract_registry_exports_deterministic_snapshot() -> None:
 
     endpoints = snapshot["endpoints"]
     assert isinstance(endpoints, list)
-    assert "/v1/chat/completions" in {endpoint["path"] for endpoint in endpoints}
+    endpoint_paths = {endpoint["path"] for endpoint in endpoints}
+    assert "/v1/chat/completions" in endpoint_paths
+    assert "/v1/llmrouter/semantic/inspect" in endpoint_paths
 
 
 def test_breaking_change_detector_flags_removed_capability_and_smaller_context() -> None:

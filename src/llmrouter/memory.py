@@ -217,8 +217,9 @@ class SQLiteMemoryStore:
 class PrecogMemoryStore:
     """PRecog-backed project memory/RAG store."""
 
-    def __init__(self, config: PrecogMemoryConfig) -> None:
+    def __init__(self, config: PrecogMemoryConfig, *, raise_on_error: bool = False) -> None:
         self._config = config
+        self._raise_on_error = raise_on_error
 
     @property
     def config(self) -> PrecogMemoryConfig:
@@ -246,6 +247,8 @@ class PrecogMemoryStore:
             body = response.json()
         except Exception as exc:
             _logger.warning("PRecog memory retrieval failed project=%s: %s", project, exc)
+            if self._raise_on_error:
+                raise
             return []
         raw_entries = body.get("memories") or body.get("results") or []
         if not isinstance(raw_entries, list):
@@ -293,6 +296,8 @@ class PrecogMemoryStore:
             response_obj.raise_for_status()
         except Exception as exc:
             _logger.warning("PRecog memory record failed project=%s: %s", project, exc)
+            if self._raise_on_error:
+                raise
             return False
         return True
 
@@ -301,6 +306,92 @@ class PrecogMemoryStore:
         if self._config.api_key:
             headers["Authorization"] = f"Bearer {self._config.api_key}"
         return headers
+
+
+class HybridMemoryStore:
+    """PRecog-backed memory with automatic local SQLite fallback.
+
+    Tries PRecog first (remote memory/RAG). On any failure (connection,
+    timeout, auth), silently falls back to the local SQLite store.
+    Logs the fallback at INFO level for observability.
+    """
+
+    def __init__(
+        self,
+        precog_config: PrecogMemoryConfig,
+        local_config: MemoryConfig,
+    ) -> None:
+        self._precog = PrecogMemoryStore(precog_config, raise_on_error=True)
+        self._local = SQLiteMemoryStore(local_config)
+
+    @property
+    def config(self) -> PrecogMemoryConfig | MemoryConfig:
+        """Return the primary (PRecog) config for context rendering."""
+        return self._precog.config
+
+    def retrieve(self, *, project: str, query: str) -> list[MemoryEntry]:
+        """Try PRecog first, fall back to local SQLite on failure."""
+        if not query.strip():
+            return []
+        # Try PRecog
+        try:
+            precog_entries = self._precog.retrieve(project=project, query=query)
+            if precog_entries:
+                return precog_entries
+        except Exception as exc:
+            _logger.info(
+                "PRecog retrieval failed, falling back to local memory: "
+                "project=%s error=%s",
+                project,
+                exc,
+            )
+        # Fallback to local
+        try:
+            local_entries = self._local.retrieve(project=project, query=query)
+            if local_entries:
+                _logger.debug(
+                    "Local memory fallback success: project=%s hits=%d",
+                    project,
+                    len(local_entries),
+                )
+            return local_entries
+        except Exception as exc:
+            _logger.debug("Local memory retrieval also failed: %s", exc)
+            return []
+
+    def record_interaction(
+        self,
+        *,
+        project: str,
+        prompt: str,
+        response: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Try PRecog first, fall back to local SQLite on failure."""
+        # Try PRecog
+        try:
+            if self._precog.record_interaction(
+                project=project, prompt=prompt, response=response, metadata=metadata
+            ):
+                return True
+        except Exception as exc:
+            _logger.info(
+                "PRecog record failed, falling back to local memory: "
+                "project=%s error=%s",
+                project,
+                exc,
+            )
+        # Fallback to local
+        try:
+            result = self._local.record_interaction(
+                project=project, prompt=prompt, response=response, metadata=metadata
+            )
+            if result:
+                _logger.debug("Local memory record success: project=%s", project)
+            return result
+        except Exception as exc:
+            _logger.debug("Local memory record also failed: %s", exc)
+            return False
 
 
 def render_memory_context(entries: list[MemoryEntry], *, max_chars: int) -> str:
