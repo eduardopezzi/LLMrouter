@@ -178,11 +178,13 @@ class ChatRequest:
 
 @dataclass(frozen=True)
 class Usage:
-    """Token usage statistics."""
+    """Token usage statistics with explicit cache-reporting provenance."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int | None = None
+    cache_status: str = "not_reported"
 
 
 @dataclass(frozen=True)

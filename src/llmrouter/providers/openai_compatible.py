@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -194,10 +195,14 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> ChatResponse:
         choices = body.get("choices", [])
         metadata = body.get("usage", {})
+        usage_metadata = metadata if isinstance(metadata, dict) else {}
+        cached_tokens = _cached_tokens(usage_metadata)
         usage = Usage(
-            prompt_tokens=int(metadata.get("prompt_tokens", 0)),
-            completion_tokens=int(metadata.get("completion_tokens", 0)),
-            total_tokens=int(metadata.get("total_tokens", 0)),
+            prompt_tokens=int(usage_metadata.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage_metadata.get("completion_tokens", 0) or 0),
+            total_tokens=int(usage_metadata.get("total_tokens", 0) or 0),
+            cached_tokens=cached_tokens,
+            cache_status="reported" if cached_tokens is not None else "not_reported",
         )
         finish_reason = FinishReason.STOP
         if choices and isinstance(choices[0], dict):
@@ -211,3 +216,23 @@ class OpenAICompatibleProvider(BaseProvider):
             created=int(body.get("created", 0) or 0),
             latency_ms=latency_ms,
         )
+
+
+def _cached_tokens(usage: dict[str, Any]) -> int | None:
+    """Read cache usage from compatible provider response variants."""
+    candidates: list[object] = [
+        usage.get("cached_tokens"),
+        usage.get("prompt_cache_hit_tokens"),
+        usage.get("cache_read_input_tokens"),
+    ]
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        candidates.append(details.get("cached_tokens"))
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value >= 0:
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None

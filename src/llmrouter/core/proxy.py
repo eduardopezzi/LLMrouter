@@ -133,6 +133,17 @@ class ProviderProxy:
         attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
 
+        cached = await self._cached_response(request, decision)
+        if cached is not None:
+            await self._record_success(decision.primary, cached)
+            await _record_fallback_metric(fallback_used=False)
+            await self._record_request_metrics(
+                decision,
+                started=started,
+                fallback_used=False,
+            )
+            return cached
+
         for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
             cooldown = self._cooldown_for_model(model)
@@ -183,6 +194,8 @@ class ProviderProxy:
                     len(attempts),
                 )
                 response = await provider.chat_completion(request, model.provider_model_name)
+                if i == 0:
+                    await self._store_cached_response(request, model, response)
                 await self._record_success(model, response)
                 await _record_fallback_metric(fallback_used=i > 0)
                 await self._record_request_metrics(
@@ -216,6 +229,37 @@ class ProviderProxy:
         await _record_fallback_metric(fallback_used=False, failed=True)
         await self._record_request_metrics(decision, started=started, failed=True)
         raise ProviderError("No provider attempts were available", status_code=503)
+
+    async def _cached_response(
+        self,
+        request: ChatRequest,
+        decision: RoutingDecision,
+    ) -> ChatResponse | None:
+        """Return a short-lived exact cache hit for non-streaming requests."""
+        if self._cache_manager is None or request.stream:
+            return None
+        return await self._cache_manager.get(
+            request,
+            decision.primary.name,
+            decision.primary.tier,
+        )
+
+    async def _store_cached_response(
+        self,
+        request: ChatRequest,
+        model: Any,
+        response: ChatResponse,
+    ) -> None:
+        """Store only first-choice non-streaming responses for retry reuse."""
+        if self._cache_manager is None or request.stream:
+            return
+        await self._cache_manager.set(
+            request,
+            model.name,
+            model.tier,
+            response,
+            cost_usd=self._estimate_cost(model, response.usage),
+        )
 
     async def stream_chat_completion(
         self,

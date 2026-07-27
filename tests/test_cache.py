@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import tempfile
 from pathlib import Path
 
@@ -217,6 +218,34 @@ class TestCacheManager:
         await manager.set(req1, "gpt-4", Tier.T3, resp)
         cached = await manager.get(req2, "gpt-4", Tier.T3)
         assert cached is None  # different temperature
+
+    @pytest.mark.asyncio
+    async def test_tool_definitions_are_part_of_exact_cache_key(self, db_path: str) -> None:
+        backend = SQLiteCacheBackend(db_path)
+        manager = CacheManager(backend)
+        first = self._make_request("same prompt")
+        second = replace(
+            first,
+            extra={"tools": [{"type": "function", "function": {"name": "other"}}]},
+        )
+
+        await manager.set(first, "gpt-4", Tier.T3, self._make_response())
+
+        assert await manager.get(second, "gpt-4", Tier.T3) is None
+
+    @pytest.mark.asyncio
+    async def test_local_hit_reports_cached_prompt_tokens(self, db_path: str) -> None:
+        backend = SQLiteCacheBackend(db_path)
+        manager = CacheManager(backend)
+        request = self._make_request("cache usage")
+        response = self._make_response()
+
+        await manager.set(request, "gpt-4", Tier.T3, response)
+        cached = await manager.get(request, "gpt-4", Tier.T3)
+
+        assert cached is not None
+        assert cached.usage.cached_tokens == response.usage.prompt_tokens
+        assert cached.usage.cache_status == "local_hit"
 
     @pytest.mark.asyncio
     async def test_stats_tracking(self, db_path: str) -> None:

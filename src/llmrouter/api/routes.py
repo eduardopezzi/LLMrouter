@@ -45,6 +45,9 @@ from llmrouter.memory import MemoryEntry, MemoryStore, render_memory_context
 from llmrouter.providers.base import ProviderError
 
 _logger = get_logger("llmrouter.api")
+_OBSERVATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,255}$")
+_PROJECT_ID_HEADER = "x-project-id"
+_TASK_ROLE_HEADER = "x-task-role"
 
 
 class ChatMessagePayload(BaseModel):
@@ -299,6 +302,7 @@ def create_app(
                 detail="Provider proxy is not configured",
             )
 
+        payload = _with_observation_identity(payload, request)
         chat_request = _with_client_identity(_to_chat_request(payload), request)
         prompt_directives = _chat_request_directives(chat_request)
         prompt_directives = _resolve_prompt_directives(
@@ -392,14 +396,19 @@ def create_app(
         )
 
         # Log health score for the selected model
-        await _log_selected_model_health(app.state.health_tracker, decision.primary.name, latency_ms)
+        await _log_selected_model_health(
+            app.state.health_tracker,
+            decision.primary.name,
+            latency_ms,
+        )
 
         # Debug: log response summary
         _logger.debug(
-            "Response: %d tokens (prompt=%d, completion=%d) in %.0fms | model=%s tier=%s",
+            "Response: %d tokens (prompt=%d, completion=%d, cache=%s) in %.0fms | model=%s tier=%s",
             response.usage.total_tokens,
             response.usage.prompt_tokens,
             response.usage.completion_tokens,
+            _cache_usage_label(response.usage),
             latency_ms,
             decision.primary.name,
             decision.tier.name if hasattr(decision, 'tier') else '?',
@@ -436,11 +445,7 @@ def create_app(
             "created": response.created or int(time.time()),
             "model": response.model,
             "choices": response.choices,
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            },
+            "usage": _usage_payload(response.usage),
             "llmrouter": {
                 "request_id": request_id,
                 "selected_model": decision.primary.name,
@@ -849,6 +854,34 @@ def _with_client_identity(chat_request: ChatRequest, request: Request) -> ChatRe
         extra.get("user") or request.headers.get("x-llmrouter-user") or client_ip,
     )
     return replace(chat_request, extra=extra)
+
+
+def _with_observation_identity(
+    payload: ChatCompletionPayload,
+    request: Request,
+) -> ChatCompletionPayload:
+    """Use bounded proxy headers only when the request body omits telemetry identity."""
+    extra = dict(payload.extra)
+    router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
+    project = request.headers.get(_PROJECT_ID_HEADER, "").strip()
+    if (
+        project
+        and _OBSERVATION_ID_RE.fullmatch(project)
+        and "project" not in extra
+        and not router_options.get("project")
+    ):
+        extra["project"] = project
+    task_role = request.headers.get(_TASK_ROLE_HEADER, "").strip()
+    updates: dict[str, Any] = {"extra": extra}
+    if (
+        task_role
+        and _OBSERVATION_ID_RE.fullmatch(task_role)
+        and payload.task_role is None
+        and not router_options.get("task_role")
+        and not router_options.get("role")
+    ):
+        updates["task_role"] = task_role
+    return payload.model_copy(update=updates)
 
 
 def _client_ip(request: Request) -> str:
@@ -1277,6 +1310,8 @@ def _record_observation(
                 "latency_ms": latency_ms,
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "cache_status": usage.cache_status,
                 "cost_usd": cost_usd,
                 "rag": _rag_metadata(payload),
                 "memory": _memory_payload(
@@ -1285,6 +1320,29 @@ def _record_observation(
                 ),
             }
         )
+
+
+def _cache_usage_label(usage: Usage) -> str:
+    """Render cache telemetry without representing an unknown value as zero."""
+    if usage.cached_tokens is None:
+        return "not_reported"
+    return f"{usage.cache_status}:{usage.cached_tokens}"
+
+
+def _usage_payload(usage: Usage) -> dict[str, Any]:
+    """Build OpenAI-compatible usage data with optional cache provenance."""
+    payload: dict[str, Any] = {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "cache_status": usage.cache_status,
+    }
+    if usage.cached_tokens is not None:
+        payload["cached_tokens"] = usage.cached_tokens
+        payload["prompt_tokens_details"] = {
+            "cached_tokens": usage.cached_tokens,
+        }
+    return payload
 
 
 def _choice_text(choice: dict[str, Any]) -> str:

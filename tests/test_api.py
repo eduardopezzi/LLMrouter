@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -331,6 +332,8 @@ def test_chat_completions_publishes_precog_observation() -> None:
             "latency_ms": publisher.observations[0]["latency_ms"],
             "prompt_tokens": 2,
             "completion_tokens": 1,
+            "cached_tokens": None,
+            "cache_status": "not_reported",
             "cost_usd": 0.002,
             "rag": {
                 "used": True,
@@ -347,6 +350,65 @@ def test_chat_completions_publishes_precog_observation() -> None:
         }
     ]
     assert len(publisher.observations[0]["prompt_hash"]) == 64
+
+
+def test_proxy_headers_identify_openhands_observations() -> None:
+    """Trusted proxy identity fills telemetry fields without changing the prompt."""
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    publisher = FakePrecogPublisher()
+    app = create_app(
+        registry=registry,
+        proxy=FakeProxy(),
+        precog_publisher=publisher,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={
+            "X-Request-ID": "openhands-request",
+            "X-Project-ID": "precog-openhands",
+            "X-Task-Role": "implementation",
+        },
+        json={"messages": [{"role": "user", "content": "implement"}]},
+    )
+
+    assert response.status_code == 200
+    assert publisher.observations[0]["project"] == "precog-openhands"
+    assert publisher.observations[0]["task_role"] == "implementation"
+
+
+def test_chat_usage_uses_standard_cached_tokens_details() -> None:
+    """OpenAI-compatible clients must receive provider cache tokens in the standard field."""
+
+    class CachedProxy(FakeProxy):
+        async def chat_completion(self, request: ChatRequest, decision: Any) -> ChatResponse:
+            response = await super().chat_completion(request, decision)
+            return replace(
+                response,
+                usage=Usage(
+                    prompt_tokens=10,
+                    completion_tokens=2,
+                    total_tokens=12,
+                    cached_tokens=7,
+                    cache_status="reported",
+                ),
+            )
+
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    client = TestClient(create_app(registry=registry, proxy=CachedProxy()))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "cache"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["usage"]["prompt_tokens_details"]["cached_tokens"] == 7
 
 
 def test_llmrouter_feedback_forwards_to_precog() -> None:

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from llmrouter.core.cache import CacheManager, SQLiteCacheBackend
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy, _unique_attempts
 from llmrouter.core.stats import MetricsCollector
@@ -95,6 +96,20 @@ async def test_chat_completion_success() -> None:
     response = await proxy.chat_completion(_request(), _decision(model))
     assert response.model == "gpt-4o"
     assert response.usage.total_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_uses_exact_response_cache(tmp_path) -> None:
+    provider = StubProvider("openai")
+    cache = CacheManager(SQLiteCacheBackend(str(tmp_path / "cache.db")))
+    proxy = ProviderProxy({Provider.OPENAI: provider}, cache_manager=cache)
+    model = _model("gpt-4o")
+
+    await proxy.chat_completion(_request(), _decision(model))
+    cached = await proxy.chat_completion(_request(), _decision(model))
+
+    assert cached.usage.cache_status == "local_hit"
+    assert cached.usage.cached_tokens == 10
 
 
 @pytest.mark.asyncio

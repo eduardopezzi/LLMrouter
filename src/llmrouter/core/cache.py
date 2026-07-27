@@ -13,7 +13,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +24,9 @@ _logger = get_logger("llmrouter.cache")
 
 # Default TTL per tier (seconds)
 _DEFAULT_TTL_BY_TIER: dict[int, float] = {
-    Tier.T1: 300.0,   # 5 min
-    Tier.T2: 600.0,   # 10 min
-    Tier.T3: 1800.0,  # 30 min
+    Tier.T1: 30.0,
+    Tier.T2: 60.0,
+    Tier.T3: 90.0,
 }
 
 
@@ -78,6 +78,37 @@ def _cache_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _request_cache_key(request: ChatRequest, model: str) -> str:
+    """Return a collision-resistant key for a complete non-streaming request."""
+    messages = [
+        {
+            "role": message.role,
+            "content": message.content,
+            "name": message.name,
+            "tool_calls": message.tool_calls,
+            "tool_call_id": message.tool_call_id,
+        }
+        for message in request.messages
+    ]
+    payload = {
+        "messages": messages,
+        "model": model,
+        "temperature": request.temperature,
+        "top_p": request.top_p,
+        "max_tokens": request.max_tokens,
+        "stop": request.stop,
+        "extra": request.extra,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 class SQLiteCacheBackend:
     """SQLite-backed cache storage.
 
@@ -118,7 +149,9 @@ class SQLiteCacheBackend:
         async with self._lock:
             with sqlite3.connect(str(self._db_path)) as conn:
                 row = conn.execute(
-                    "SELECT response_json, created_at, ttl_seconds FROM cache_entries WHERE key = ?",
+                    """SELECT response_json, created_at, ttl_seconds
+                       FROM cache_entries
+                       WHERE key = ?""",
                     (key,),
                 ).fetchone()
             if row is None:
@@ -149,7 +182,8 @@ class SQLiteCacheBackend:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO cache_entries
-                        (key, response_json, model, tier, tokens_total, cost_usd, created_at, ttl_seconds)
+                        (key, response_json, model, tier, tokens_total, cost_usd,
+                         created_at, ttl_seconds)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -215,13 +249,7 @@ class CacheManager:
         tier: int,
     ) -> ChatResponse | None:
         """Return a cached response or None on miss/expiry."""
-        key = _cache_key(
-            prompt=request.prompt_text,
-            model=model_name,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            max_tokens=request.max_tokens,
-        )
+        key = _request_cache_key(request, model_name)
         cached = await self._backend.get(key)
         if cached is None:
             async with self._stats_lock:
@@ -241,6 +269,8 @@ class CacheManager:
                 prompt_tokens=cached.get("usage", {}).get("prompt_tokens", 0),
                 completion_tokens=cached.get("usage", {}).get("completion_tokens", 0),
                 total_tokens=cached.get("usage", {}).get("total_tokens", 0),
+                cached_tokens=cached.get("usage", {}).get("prompt_tokens", 0),
+                cache_status="local_hit",
             ),
             created=cached.get("created"),
             latency_ms=0.0,  # cache hit = zero latency
@@ -255,13 +285,7 @@ class CacheManager:
         cost_usd: float = 0.0,
     ) -> None:
         """Store a response in the cache."""
-        key = _cache_key(
-            prompt=request.prompt_text,
-            model=model_name,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            max_tokens=request.max_tokens,
-        )
+        key = _request_cache_key(request, model_name)
         ttl = self._ttl_by_tier.get(tier, _DEFAULT_TTL_BY_TIER[Tier.T3])
         response_dict = {
             "id": response.id,
@@ -271,6 +295,8 @@ class CacheManager:
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
+                "cached_tokens": response.usage.cached_tokens,
+                "cache_status": response.usage.cache_status,
             },
             "created": response.created,
             "cost_usd": cost_usd,

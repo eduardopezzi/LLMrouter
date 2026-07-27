@@ -114,6 +114,31 @@ def test_normalize_response() -> None:
     assert response.finish_reason == FinishReason.STOP
 
 
+def test_normalize_response_preserves_reported_cache_tokens() -> None:
+    provider = TestProvider()
+    body = {
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+            "prompt_tokens_details": {"cached_tokens": 7},
+        },
+    }
+
+    response = provider._normalize_response(body, "gpt-4o")
+
+    assert response.usage.cached_tokens == 7
+    assert response.usage.cache_status == "reported"
+
+
+def test_normalize_response_marks_missing_cache_telemetry_unknown() -> None:
+    provider = TestProvider()
+    response = provider._normalize_response({"usage": {"prompt_tokens": 10}}, "gpt-4o")
+
+    assert response.usage.cached_tokens is None
+    assert response.usage.cache_status == "not_reported"
+
+
 def test_normalize_response_empty_choices() -> None:
     provider = TestProvider()
     response = provider._normalize_response({}, "model")
