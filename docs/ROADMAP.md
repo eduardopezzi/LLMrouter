@@ -1,148 +1,181 @@
-# Roadmap
+# Roadmap — LLMrouter
 
-| Item | Status | Implantacao |
+Este roadmap consolida as capacidades implementadas e as próximas entregas
+identificadas nos documentos de arquitetura, operação e TDD. O status mede a
+implementação no repositório, e não apenas a existência de um plano.
+
+## Visão geral
+
+| Item | Status | Próximo resultado verificável |
 | --- | ---: | --- |
-| **5. Cross-Repository** | 100% | `ContractRegistry`, `BreakingChangeDetector`, snapshot versionavel, scripts `make` e CLI implementados e cobertos por testes |
-| **6. Model Health & Performance Tracking** | 100% | `ModelHealthTracker` com métricas em tempo real (latência P50/P95/P99, taxa de erro, qualidade média, custo real) e `HealthScore` para roteamento adaptativo |
-| **7. Semantic Prompt Routing via Embeddings** | 90% | `SemanticPromptScorer` + `HybridScorer` ligados ao runtime quando `semantic.enabled=true`; API/CLI de inspect para calibracao operacional |
-| **8. Response Caching com Chave Semântica** | 0% | Cache LRU/TTL com embedding do prompt como chave; reutiliza respostas para prompts semanticamente equivalentes (>0.95 cosine) |
-| **9. Canary/Blue-Green Model Rollout** | 100% | `ModelInfo.rollout_percentage` (0-100) + `MultiModelRouter._apply_rollout()` com hash determinístico; CLI `--set-rollout`; endpoints API `/v1/llmrouter/rollout`; rollback instantâneo via `rollout_percentage=0` |
-| **10. Cost Budgets & Alertas por Projeto/Usuário** | 0% | `BudgetManager` com backend Redis/SQLite; headers `X-Project-ID`/`X-User-ID`; auto-fallback para modelos gratuitos ao exceder budget |
+| **5. Contratos cross-repository** | 100% | Manter compatibilidade e publicar contratos em releases |
+| **6. Health e performance por modelo** | 100% | Usar os indicadores como base para automações de rollout |
+| **6.1. Estatísticas operacionais unificadas** | 100% | Evoluir o payload conforme novos subsistemas forem adicionados |
+| **7. Roteamento semântico** | 90% | Calibrar roles e thresholds com feedback de produção |
+| **8. Cache de respostas** | 50% | Adicionar busca semântica conservadora sobre o cache exato existente |
+| **9. Rollout canary / blue-green** | 100% | Evoluir para rollout automatizado e sticky bucketing |
+| **10. Budgets e alertas por tenant** | 0% | Entregar controle de custo por projeto e usuário |
+| **11. Contratos para APIs customizadas** | 0% | Permitir declarar endpoints fora do perfil OpenAI-compatible |
+| **12. Governança do catálogo de modelos** | 0% | Validar metadados, limites e fontes de forma repetível |
 
 ---
 
-## 5. Cross-Repository
+## Capacidades concluídas
 
-O fluxo cross-repository esta operacional de ponta a ponta:
+### 5. Contratos cross-repository — 100%
 
-- `ContractRegistry` exporta snapshots JSON deterministicos em `contracts/llmrouter.contract.json`.
-- `BreakingChangeDetector` classifica mudancas compativeis e breaking changes.
-- CLI: `llmrouter export-contracts`, `llmrouter check-contracts`, `llmrouter diff-contracts`.
-- Makefile: `make contracts-export`, `make contracts-check`, `make contracts-diff`.
-- Testes: `tests/test_cross_repository.py`.
+- `ContractRegistry` exporta snapshots JSON determinísticos em
+  `contracts/llmrouter.contract.json`.
+- `BreakingChangeDetector` identifica remoções e mudanças incompatíveis de
+  endpoints, modelos, capabilities, roles, schemas e janelas de contexto.
+- CLI: `export-contracts`, `check-contracts`, `diff-contracts` e
+  `publish-contracts`; Makefile com os comandos equivalentes.
+- O guia de CI documenta publicação no `phoenix_versions` e validação de uma
+  baseline pelo repositório consumidor.
 
----
+### 6. Health e performance por modelo — 100%
 
-## 6. Model Health & Performance Tracking
+- `ModelHealthTracker` coleta latência P50/P95/P99, taxa de erro, qualidade,
+  custo e volume por modelo, com backends em memória e SQLite.
+- `HealthScore` influencia as estratégias de roteamento e as métricas são
+  coletadas pelo proxy em sucessos e falhas.
+- API de health e CLI estão disponíveis para inspeção operacional.
 
-**Status**: 100% concluído — suite de testes passando (87 passed).
+### 6.1. Estatísticas operacionais unificadas — 100%
 
-**Objetivo**: Tornar o roteamento adaptativo baseado em performance real (latência, erro, qualidade) e não apenas configuração estática.
+- `MetricsCollector` agrega requests, distribuição por tier, fallback,
+  falhas, streaming, percentis de latência e erros por provider/modelo.
+- `GET /v1/llmrouter/stats` oferece a visão consolidada e autenticada.
+- Os campos de cache e budget já existem como pontos de extensão do payload;
+  devem ser preenchidos quando esses subsistemas evoluírem.
 
-**Componentes entregues**:
-- `src/llmrouter/core/health.py` — `ModelHealthTracker`, `ModelHealth` dataclass, `HealthScore` composite
-- Backends `InMemoryHealthStore` (default/testes) e `SQLiteHealthStore` (persistente, com TTL)
-- Integração nas estratégias (`BalancedStrategy`, `CostStrategy`, `QualityStrategy`, `LatencyStrategy`) & no `MultiModelRouter`
-- Coleta automática de métricas no `ProviderProxy` para requisições de sucesso e erro
-- `latency_ms` real preenchido nos `ChatResponse` normalizados
-- Configuração via `HealthConfig` (`config.py`) e runtime (`runtime.py`)
-- Endpoint `GET /health/models` e `GET /health/models/{model_name}`
-- CLI `llmrouter health` + opção "10. Show model health" no painel interativo
+### 7. Roteamento semântico — 90%
 
-**Métricas coletadas por modelo**:
-- Latência P50, P95, P99 (ms)
-- Taxa de erro (provider errors, timeouts, validation errors)
-- Score médio de qualidade (via evaluator/PRecog feedback)
-- Custo real por request (USD)
-- Contagem de requests na janela deslizante (últimos N minutos)
+- `SemanticPromptScorer` e `HybridScorer` são usados no runtime quando o
+  recurso é habilitado, com fallback para regras se embeddings falharem.
+- A inspeção sem chamada ao provider está disponível em
+  `POST /v1/llmrouter/semantic/inspect` e `llmrouter semantic-inspect`.
+- Roles iniciais cobrem arquitetura, segurança, revisão, correção,
+  refatoração, testes, migração, documentação e sumarização.
 
-**Peso padrão do HealthScore**: latência 30%, erro 35%, qualidade 25%, custo 10%. Configurável via
-`LLMROUTER_HEALTH__LATENCY_WEIGHT`, `ERROR_WEIGHT`, `QUALITY_WEIGHT`, `COST_WEIGHT`.
+**Pendente para concluir:** coletar feedback real de roteamento, calibrar
+embeddings e thresholds por projeto/tipo de tarefa e definir métricas de
+qualidade para detectar regressões da classificação.
 
-**Uso da API**:
-```bash
-curl http://localhost:12345/health/models
-# ou detalhe de um modelo específico
-curl http://localhost:12345/health/models/gpt-4o
-```
+### 8. Cache de respostas — 50%
 
-**Uso do CLI**:
-```bash
-llmrouter health                         # texto
-llmrouter health --json                # JSON para scripts
-llmrouter health --backend sqlite --db-path data/health.db --window-minutes 15
-```
+**Entregue: cache exato (MVP).**
 
-**Persistência**: o backend `sqlite` mantém eventos dentro da janela de TTL configurada (padrão 60 min)
-e expira dados antigos automaticamente. O backend `redis` está reservado para implementação futura e
-faz fallback para memória com aviso no log.
+- `SQLiteCacheBackend` e `CacheManager` persistem respostas não-streaming.
+- A chave normalizada considera prompt, modelo, `temperature`, `top_p` e
+  `max_tokens`; streaming sempre ignora o cache.
+- TTL por tier, expiração, persistência e métricas de hit rate, tokens e custo
+  economizados estão implementados.
+- `GET /v1/llmrouter/cache/stats` expõe as estatísticas.
 
-**Testes**: `tests/test_health.py` cobre percentis, score, expiração de janela, backends in-memory/SQLite
-e integração das estratégias com health tracker.
+**Próxima fase: cache semântico.**
 
----
+- Reutilizar embeddings do scorer e procurar respostas por similaridade cosine
+  com threshold configurável e conservador (inicialmente `0.95`).
+- Restringir candidatos por modelo, tier e parâmetros de sampling, mantendo o
+  cache exato como fallback quando embeddings não estiverem disponíveis.
+- Validar explicitamente falsos positivos/negativos antes de habilitar por
+  padrão; respostas erradas são um risco maior que um cache miss.
 
-## 7. Semantic Prompt Routing via Embeddings
+### 9. Rollout canary / blue-green — 100%
 
-**Status**: 90% concluído — componentes implementados, ligados ao runtime e cobertos por API/CLI de inspeção.
-
-**Objetivo**: Substituir/complementar heurísticas de keywords por compreensão semântica real da tarefa.
-
-**Componentes entregues**:
-- `src/llmrouter/core/semantic_scorer.py`
-  - `SemanticPromptScorer` com interface compatível com `PromptScorer`
-  - Embedder lazy `sentence-transformers/all-MiniLM-L6-v2` (~80MB, CPU/GPU)
-  - Role embeddings pré-computados: `architecture`, `security_audit`, `review`, `fix`, `refactoring`, `test_generation`, `migration`, `documentation`, `summarization`
-  - Mapeamento similarity → tier com calibração de confiança
-  - Cache de embeddings em `data/semantic_role_embeddings.json`
-  - Fallback automático para score neutro se o modelo falhar
-- `HybridScorer` combina `PromptScorer` (rule-based) + `SemanticPromptScorer` com pesos configuráveis
-- Configuração via `.env`:
-  ```env
-  LLMROUTER_SEMANTIC__ENABLED=true
-  LLMROUTER_SEMANTIC__DEVICE=cuda  # ou cpu/mps
-  LLMROUTER_HYBRID__RULE_WEIGHT=0.3
-  LLMROUTER_HYBRID__SEMANTIC_WEIGHT=0.7
-  LLMROUTER_HYBRID__SEMANTIC_CONFIDENCE_THRESHOLD=0.35
-  ```
-- `MultiModelRouter._build_reason` inclui `role=<semantic_role>` nas decisões de roteamento
-- `Settings` ganhou `SemanticConfig` e `HybridScorerConfig`
-
-**Pendências / próximos passos**:
-- Coletar feedback do roteamento real para ajustar os embeddings por role
-- Calibrar thresholds por projeto/tipo de tarefa com dados de produção
-
-**Testes**: `tests/test_semantic_scorer.py` cobre classificação, fallback, cache, integração com router e carregamento de config.
+- `ModelInfo.rollout_percentage` e o filtro determinístico do router permitem
+  expor modelos gradualmente sem alterar sua prioridade.
+- CLI e API permitem consultar e alterar o rollout; a alteração recarrega o
+  catálogo em runtime.
+- `rollout_percentage=0` fornece rollback imediato, e o safety net evita que
+  um filtro vazio interrompa o tráfego.
 
 ---
 
-## 8. Response Caching com Chave Semântica
+## Próximas entregas priorizadas
 
-**Objetivo**: Eliminar chamadas redundantes para prompts iguais/semanticamente equivalentes.
+### 9.1. Automação e afinidade de rollout — 0%
 
-**Componentes novos**:
-- `src/llmrouter/core/cache.py` — `SemanticCache` com backend Redis (produção) ou SQLite/LRU (dev)
-- Chave: `hash(embedding(prompt) + model + temperature + top_p + max_tokens)`
-- Busca exata → busca semântica (cosine > 0.95) → compute + store
-- TTL configurável por tier (T1: 1h, T2: 4h, T3: 24h)
-- Métricas: hit rate, tokens saved, cost saved
-- Endpoint `/cache/stats` e CLI `llmrouter cache stats`
+**Objetivo:** reduzir a operação manual de canaries sem perder a possibilidade
+de intervenção imediata.
+
+- Auto-rollback para `rollout_percentage=0` quando um canary ultrapassar
+  limites configuráveis de taxa de erro, HealthScore ou latência P95.
+- Evento estruturado e auditável para cada rollback; confirmar que o router
+  deixa de selecionar o canary após a atualização do catálogo.
+- Sticky bucketing por `X-User-ID` e, posteriormente, `session_id`, em vez de
+  somente pelo prompt, para experiências A/B consistentes.
+- Auto-promoção deve permanecer desabilitada por padrão e só avançar por
+  estágios explícitos (por exemplo, 5% → 25% → 50% → 100%) após janela mínima
+  de amostras e métricas saudáveis.
+
+**Dependências:** itens 6 e 6.1. **Critério de aceite:** canary degradado é
+removido automaticamente, com motivo observável e sem reinício do serviço.
+
+### 10. Budgets e alertas por tenant — 0%
+
+**Objetivo:** governar custo por projeto e usuário de forma persistente.
+
+- Implementar `BudgetManager` com SQLite como primeiro backend e uma interface
+  que permita Redis em produção.
+- Identificar consumo por `X-Project-ID` e `X-User-ID`, com fallback seguro
+  para `default`; manter limites diário e mensal independentes.
+- Oferecer modo `soft` (warning/header) e `hard` (bloqueio ou downgrade para
+  modelo local previamente elegível), sem assumir que todo modelo Ollama tem
+  custo zero.
+- Expor configuração e consulta por API/CLI, persistir consumo e incorporar
+  uso/custo aos dados operacionais.
+
+**Dependências:** custos confiáveis do item 6. **Critério de aceite:** tenants
+independentes têm consumo correto, resets de período e enforcement testados na
+rota de chat.
+
+### 11. Contratos para APIs customizadas — 0%
+
+**Objetivo:** eliminar a geração manual de snapshots para serviços que não
+usam os endpoints OpenAI-compatible embutidos na CLI.
+
+- Permitir fornecer um manifesto de endpoints ou um arquivo de contrato-base
+  para `export-contracts` e `publish-contracts`.
+- Validar schema, nome do serviço e determinismo do snapshot antes de publicar.
+- Manter as mesmas regras de breaking change para contratos gerados e
+  declarados manualmente.
+
+**Critério de aceite:** um serviço com endpoints próprios publica e valida seu
+contrato no mesmo fluxo de CI, sem script JSON ad hoc.
+
+### 12. Governança do catálogo de modelos — 0%
+
+**Objetivo:** tornar repetível e auditável a manutenção de `max_tokens`,
+`context_window`, capabilities e aliases de providers.
+
+- Transformar a verificação hoje documentada em `MODEL_TOKEN_LIMITS.md` em um
+  processo versionado: fonte, data de validação e decisão operacional por
+  modelo.
+- Criar validações de catálogo para limites coerentes (`max_tokens <=
+  context_window` quando aplicável), aliases depreciados e campos obrigatórios.
+- Adicionar uma checagem de CI que detecte metadados sem fonte/data ou mudanças
+  incompatíveis no contrato; atualização externa deve continuar revisável, não
+  automática e silenciosa.
+
+**Critério de aceite:** toda alteração de capacidade de modelo é rastreável,
+validada no CI e refletida no contrato exportado.
 
 ---
 
-## 9. Canary/Blue-Green Model Rollout
+## Ordem de execução
 
-**Objetivo**: Permitir promoção gradual e segura de novos modelos no catálogo.
+1. Calibrar o roteamento semântico com observabilidade e feedback (item 7).
+2. Concluir o cache semântico com rollout opt-in e validação de qualidade
+   (item 8).
+3. Implementar budgets persistentes e integrar suas métricas (item 10).
+4. Automatizar rollback de canary; só então considerar auto-promoção (item 9.1).
+5. Entregar contratos de endpoints customizados (item 11).
+6. Instituir governança e checagens do catálogo (item 12).
 
-**Mudanças**:
-- `ModelInfo.rollout_percentage: float = 100.0` (0-100)
-- `MultiModelRouter._apply_rollout()` filtra candidatos por weighted random
-- CLI panel: opção "Set model rollout percentage" + `llmrouter panel --set-rollout <model> <pct>`
-- Log estruturado: `routing_decision.rollout_sampled=model_name:pct`
-- Rollback instantâneo: `rollout_percentage = 0`
+## Qualidade transversal
 
----
-
-## 10. Cost Budgets & Alertas por Projeto/Usuário
-
-**Objetivo**: Governança de custo multi-tenant com enforcement automático.
-
-**Componentes novos**:
-- `src/llmrouter/core/budget.py` — `BudgetManager` (Redis backend recomendado)
-- Headers: `X-Project-ID`, `X-User-ID` (opcional, fallback para `default`)
-- Configuração via `.env` ou API: `daily_limit_usd`, `monthly_limit_usd`, `alert_threshold_pct`
-- Comportamento ao exceder:
-  - `soft`: log warning + header `X-Budget-Warning`
-  - `hard`: auto-fallback para modelos Ollama (custo 0) + header `X-Budget-Exceeded`
-- Endpoints: `GET /v1/llmrouter/budgets/{project_id}`, `POST /v1/llmrouter/budgets`
-- CLI: `llmrouter budget set <project> --daily 10 --monthly 200`, `llmrouter budget status <project>`
+Cada entrega deve seguir TDD: teste que falha, implementação mínima,
+refatoração e suite completa. Mudanças de API pública ou CLI também exigem
+atualização de contrato, README, exemplos de configuração e deste roadmap.

@@ -74,6 +74,7 @@ nunca faça scraping genérico de páginas de terceiros.
 ```bash
 make benchmarks-refresh # baixa, valida e atualiza o catálogo local
 make benchmarks-check   # verifica se há mudança sem gravar arquivos
+llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
 ```
 
 Com `LLMROUTER_BENCHMARKS__REFRESH_ENABLED=true` (padrão), o próprio processo
@@ -205,6 +206,12 @@ LLMROUTER_PRECOG__BASE_URL=http://localhost:8888
 LLMROUTER_PRECOG__API_KEY=mesmo-token-configurado-no-precog
 LLMROUTER_PRECOG__PROJECT=llmrouter
 ```
+
+`LLMROUTER_PRECOG__API_KEY` deve ter o mesmo valor de
+`PRECOG_INTERNAL_API_KEY` no PRecog. Por compatibilidade, o LLMrouter também
+aceita diretamente `PRECOG_INTERNAL_API_KEY` e
+`LLMROUTER_OBSERVATION_API_KEY`; a configuração
+`LLMROUTER_PRECOG__API_KEY` tem prioridade quando mais de uma estiver definida.
 
 Após cada chamada, o LLMrouter envia em modo best-effort:
 

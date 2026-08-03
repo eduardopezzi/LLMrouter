@@ -10,15 +10,15 @@ from llmrouter.runtime import build_registry
 def test_load_model_registry_from_catalog() -> None:
     registry = load_model_registry("config/models.example.yaml")
 
-    assert len(registry.models) == 15
+    assert len(registry.models) == 16
     first = registry.models[0]
-    assert first.name == "zhipu/glm-5.2"
-    assert first.provider == Provider.ZAI
+    assert first.name == "ollama/kimi-k3:cloud"
+    assert first.provider == Provider.OLLAMA
     assert first.tier == Tier.T3
-    assert "review" in first.capabilities
+    assert "architecture" in first.capabilities
     assert first.cost_per_1k_input == 0
-    assert first.api_base is None
-    assert first.max_tokens == 131072
+    assert first.api_base == "http://localhost:11434"
+    assert first.max_tokens == 128000
     assert first.context_window == 1000000
 
 
@@ -41,4 +41,4 @@ def test_build_registry_creates_local_models_file_from_example(tmp_path) -> None
     registry = build_registry(str(config_dir / "models.yaml"))
 
     assert (config_dir / "models.yaml").exists()
-    assert len(registry.models) == 15
+    assert len(registry.models) == 16

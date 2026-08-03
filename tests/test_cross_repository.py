@@ -137,7 +137,7 @@ def test_contract_cli_exports_and_checks_snapshots(tmp_path) -> None:
 
     data = json.loads(snapshot.read_text(encoding="utf-8"))
     assert data["service"] == "llmrouter"
-    assert len(data["models"]) == 15
+    assert len(data["models"]) == 16
 
     check = subprocess.run(
         [

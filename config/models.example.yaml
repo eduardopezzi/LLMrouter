@@ -25,6 +25,18 @@ models:
   # ==================================================================
   # Ollama — Provedor primário (sempre disponível)
   # ==================================================================
+  - name: "ollama/kimi-k3:cloud"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["architecture", "review", "refactoring", "fix", "migration", "test_generation"]
+    priority: 1
+    description: "Kimi K3 (2.8T) — Modelo multimodal agêntico nativo com 1M de contexto. Flagship para arquitetura, revisão profunda, refatoração de bases extensas, correções complexas, migrações e geração de testes em longas sessões de engenharia."
+    max_tokens: 128000
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
   - name: "ollama/kimi-k2.7-code:cloud"
     provider: "ollama"
     api_base: "http://localhost:11434"

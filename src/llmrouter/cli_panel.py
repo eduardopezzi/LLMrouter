@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llmrouter.config import Settings
-from llmrouter.core.benchmark_scorer import score_model
+from llmrouter.core.benchmark_scorer import _normalize_benchmark_value, score_model
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
@@ -134,6 +134,34 @@ def render_model_priorities(registry: ModelRegistry, *, limit: int = 10) -> str:
             f"  {row.rank:>2}. priority={row.priority:<3} {row.name} "
             f"provider={row.provider} tier={row.tier} roles={roles}"
         )
+    return "\n".join(lines)
+
+
+def render_benchmark_leaderboards(registry: ModelRegistry, *, limit: int = 3) -> str:
+    """Render the highest-scoring configured models for every benchmark.
+
+    Scores are normalized only for ordering; the output retains the published
+    raw value so users can compare it with the source catalog.
+    """
+    top_n = max(limit, 1)
+    entries: dict[str, list[tuple[ModelInfo, float, float]]] = {}
+    for model in registry.all():
+        for benchmark, raw_score in model.benchmark_scores:
+            normalized = _normalize_benchmark_value(benchmark, raw_score)
+            entries.setdefault(benchmark, []).append((model, raw_score, normalized))
+
+    if not entries:
+        return "Benchmark leaders: no published scores loaded."
+
+    lines = [f"Benchmark leaders (top {top_n} by normalized score)"]
+    for benchmark in sorted(entries, key=str.casefold):
+        ranked = sorted(
+            entries[benchmark],
+            key=lambda entry: (-entry[2], entry[0].priority, entry[0].name),
+        )[:top_n]
+        lines.append(f"\n{benchmark}")
+        for rank, (model, raw_score, normalized) in enumerate(ranked, 1):
+            lines.append(f"  {rank}. {model.name} — raw={raw_score:g}, normalized={normalized:.3f}")
     return "\n".join(lines)
 
 
@@ -506,6 +534,7 @@ def run_interactive_panel(
         print("9. Refresh stats")
         print("10. Show model health")
         print("11. Set model rollout percentage")
+        print("12. Show top 3 models per benchmark")
         print("0. Exit")
         try:
             choice = input("Select an option: ").strip()
@@ -543,6 +572,10 @@ def run_interactive_panel(
         elif choice == "11":
             _prompt_rollout_percentage(settings.models_file, registry)
             registry = _reload_registry(settings.models_file)
+        elif choice == "12":
+            print()
+            print(render_benchmark_leaderboards(registry))
+            _pause_for_enter()
         elif choice in {"9", ""}:
             continue
         elif choice == "0":

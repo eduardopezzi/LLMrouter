@@ -13,6 +13,7 @@ import uvicorn
 from llmrouter.benchmark_catalog import BenchmarkRefreshError, refresh_benchmark_catalog
 from llmrouter.cli_panel import (
     promote_model_priority,
+    render_benchmark_leaderboards,
     render_model_health,
     render_model_priorities,
     render_panel_summary,
@@ -161,6 +162,11 @@ def _parse_args() -> argparse.Namespace:
         "--list-model-priorities",
         action="store_true",
         help="Print the highest-priority models, then exit.",
+    )
+    panel_parser.add_argument(
+        "--benchmark-leaderboard",
+        action="store_true",
+        help="Print the top three configured models for each benchmark, then exit.",
     )
     panel_parser.add_argument(
         "--priority-limit",
@@ -362,6 +368,9 @@ def main() -> None:
         changed = False
         if args.list_model_priorities:
             print(render_model_priorities(registry, limit=args.priority_limit))
+            return
+        if args.benchmark_leaderboard:
+            print(render_benchmark_leaderboards(registry, limit=3))
             return
         if args.promote_model:
             promote_model_priority(models_file, args.promote_model)
