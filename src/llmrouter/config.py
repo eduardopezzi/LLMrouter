@@ -198,12 +198,17 @@ class SemanticConfig(BaseModel):
     """Semantic prompt scoring configuration."""
 
     enabled: bool = False
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    backend: str = "ollama"  # ollama | sentence_transformers
+    model_name: str = "embeddinggemma:latest"
+    ollama_base_url: str | None = None
+    ollama_timeout_seconds: float = Field(default=30.0, gt=0)
+    fallback_to_sentence_transformers: bool = False
+    sentence_transformers_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     device: str = "cpu"  # cpu | cuda | mps
     cache_dir: str | None = None
-    embedding_cache_path: str = "data/semantic_role_embeddings.json"
+    embedding_cache_path: str = "data/semantic_role_embeddings_embeddinggemma.json"
     benchmark_knowledge_base_path: str = "benchmark_knowledge_base.py"
-    benchmark_embedding_cache_path: str = "data/semantic_benchmark_embeddings.json"
+    benchmark_embedding_cache_path: str = "data/semantic_benchmark_embeddings_embeddinggemma.json"
     benchmark_similarity_threshold: float = 0.30
     benchmark_top_k: int = 5
     fallback_to_rule_based: bool = True
@@ -213,10 +218,13 @@ class BenchmarksConfig(BaseModel):
     """Locally versioned, externally refreshed benchmark score catalog."""
 
     refresh_enabled: bool = True
-    refresh_interval_hours: float = Field(default=168.0, gt=0)
+    refresh_interval_hours: float = Field(default=360.0, gt=0)
     refresh_timeout_seconds: float = Field(default=30.0, gt=0)
     catalog_path: str = "data/model_benchmarks.yaml"
     sources_path: str = "data/benchmark_sources.yaml"
+    research_enabled: bool = True
+    research_timeout_seconds: float = Field(default=120.0, gt=0)
+    research_proposals_path: str = "data/benchmark_research_proposals.json"
 
 
 class HybridScorerConfig(BaseModel):

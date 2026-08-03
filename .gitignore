@@ -35,6 +35,7 @@ data/
 data/*
 !data/benchmark_sources.yaml
 !data/model_benchmarks.yaml
+!data/benchmark_research_proposals.json
 *.db
 *.sqlite
 *.sqlite3
@@ -50,6 +51,7 @@ data/*
 logs/
 *.pid
 *.pid.lock
+*.lock
 
 # Accidental shell-command leftovers in the repository root
 /pip

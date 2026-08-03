@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from llmrouter.config import Settings
@@ -12,6 +13,7 @@ from llmrouter.core.scorer import PromptScorer
 from llmrouter.core.semantic_scorer import (
     DEFAULT_MODEL_NAME,
     HybridScorer,
+    OllamaEmbedder,
     SemanticPromptScorer,
     _cosine_similarity,
     role_from_signals,
@@ -45,6 +47,37 @@ class _FakeEmbedder:
                     break
             result.append(vector if vector is not None else self._neutral[:])
         return result
+
+
+def test_ollama_embedder_uses_native_batch_endpoint() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"embeddings": [[0.1, 0.2], [0.3, 0.4]]})
+
+    client = httpx.Client(
+        base_url="http://ollama.test",
+        transport=httpx.MockTransport(handler),
+    )
+    embedder = OllamaEmbedder(model_name="embeddinggemma:latest", client=client)
+
+    assert embedder.encode(["first", "second"]) == [[0.1, 0.2], [0.3, 0.4]]
+    assert captured == {
+        "path": "/api/embed",
+        "payload": {"model": "embeddinggemma:latest", "input": ["first", "second"]},
+    }
+
+
+def test_ollama_embedder_rejects_malformed_batch() -> None:
+    client = httpx.Client(
+        base_url="http://ollama.test",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"embeddings": [[0.1]]})),
+    )
+    embedder = OllamaEmbedder(client=client)
+
+    assert embedder.encode(["first", "second"]) is None
 
 
 def _make_scorer(tmp_path: Path, roles: list[dict[str, object]]) -> SemanticPromptScorer:
@@ -249,12 +282,16 @@ def test_settings_loads_semantic_and_hybrid_config() -> None:
     settings = Settings(
         semantic={
             "enabled": True,
-            "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+            "backend": "ollama",
+            "model_name": "embeddinggemma:latest",
+            "ollama_base_url": "http://localhost:11434",
             "device": "cuda",
         },
         hybrid={"rule_weight": 0.2, "semantic_weight": 0.8, "semantic_confidence_threshold": 0.4},
     )
     assert settings.semantic.enabled is True
+    assert settings.semantic.backend == "ollama"
+    assert settings.semantic.model_name == "embeddinggemma:latest"
     assert settings.semantic.device == "cuda"
     assert settings.hybrid.semantic_weight == 0.8
     assert settings.hybrid.semantic_confidence_threshold == 0.4

@@ -13,6 +13,7 @@ from llmrouter.benchmark_catalog import (
     RefreshReport,
     refresh_benchmark_catalog,
 )
+from llmrouter.benchmark_research import BenchmarkResearcher, BenchmarkResearchReport
 
 _LOGGER = logging.getLogger("llmrouter.benchmarks")
 
@@ -25,9 +26,10 @@ class BenchmarkRefreshScheduler:
         *,
         sources_path: str,
         catalog_path: str,
-        interval_seconds: float = 7 * 24 * 60 * 60,
+        interval_seconds: float = 15 * 24 * 60 * 60,
         timeout: float = 30.0,
         on_catalog_changed: Callable[[RefreshReport], None] | None = None,
+        researcher: BenchmarkResearcher | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -36,7 +38,9 @@ class BenchmarkRefreshScheduler:
         self.interval_seconds = interval_seconds
         self.timeout = timeout
         self.on_catalog_changed = on_catalog_changed
+        self.researcher = researcher
         self.last_report: RefreshReport | None = None
+        self.last_research_report: BenchmarkResearchReport | None = None
         self.last_error: str | None = None
 
     async def run(self) -> None:
@@ -73,7 +77,23 @@ class BenchmarkRefreshScheduler:
                 self.on_catalog_changed(report)
         else:
             _LOGGER.info("Benchmark catalog is already up to date")
+        if self.researcher is not None:
+            await self._run_research()
         return report
+
+    async def _run_research(self) -> None:
+        try:
+            self.last_research_report = await self.researcher.research(
+                self.sources_path,
+                self.catalog_path,
+            )
+            _LOGGER.info(
+                "Benchmark research proposals written: %d source(s), %d model(s)",
+                self.last_research_report.source_proposals,
+                self.last_research_report.model_proposals,
+            )
+        except Exception:
+            _LOGGER.exception("LLM-assisted benchmark research failed; catalog was not changed")
 
     def _refresh_with_lock(self) -> RefreshReport | None:
         lock_path = Path(f"{self.catalog_path}.lock")

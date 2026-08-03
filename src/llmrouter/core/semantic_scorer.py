@@ -1,12 +1,13 @@
-"""Semantic prompt scoring with sentence-transformers.
+"""Semantic prompt scoring with Ollama embeddings.
 
 This module provides a drop-in replacement/augmentation for the rule-based
 :class:`llmrouter.core.scorer.PromptScorer`. It encodes the incoming prompt
 and compares it against pre-computed embeddings of known roles/tasks. The closest
 role determines the suggested tier and the semantic confidence score.
 
-If `sentence-transformers` is not installed or the model cannot be loaded, the
-scorer returns a transparent fallback result so routing still works.
+The default backend calls Ollama's native ``/api/embed`` endpoint with
+``embeddinggemma:latest``. A local sentence-transformers backend remains
+available as an explicit fallback for deployments without Ollama.
 """
 
 from __future__ import annotations
@@ -15,7 +16,9 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+import httpx
 
 from llmrouter.core.benchmark_affinity import BenchmarkAffinityScorer
 from llmrouter.core.scorer import PromptScorer, ScoringResult
@@ -25,9 +28,10 @@ from llmrouter.logging_config import get_logger
 _logger = get_logger("llmrouter.semantic_scorer")
 
 
-# Default sentence-transformers model. all-MiniLM-L6-v2 is ~80MB and runs
-# comfortably on a 4GB VRAM GPU in CPU mode (default) or CUDA if available.
-DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# Ollama's embeddinggemma is used by default so semantic routing can share the
+# local Ollama installation already used by the router.
+DEFAULT_MODEL_NAME = "embeddinggemma:latest"
+DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Pre-computed role descriptions and target tiers. These are the canonical
 # task roles understood by the LLMrouter catalog.
@@ -117,8 +121,66 @@ class RoleEmbedding:
     embedding: list[float] | None = None
 
 
-class _LazyEmbedder:
-    """Lazy wrapper around sentence-transformers to keep startup fast."""
+class Embedder(Protocol):
+    """Small common interface for semantic embedding providers."""
+
+    def encode(self, texts: list[str]) -> list[list[float]] | None:
+        """Return one vector per input text, or ``None`` when unavailable."""
+        ...
+
+
+class OllamaEmbedder:
+    """Batch embedding client for Ollama's stable native API."""
+
+    def __init__(
+        self,
+        model_name: str = DEFAULT_MODEL_NAME,
+        base_url: str = "http://localhost:11434",
+        timeout: float = 30.0,
+        api_key: str | None = None,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._model_name = model_name
+        self._base_url = base_url.rstrip("/")
+        if self._base_url.endswith("/api"):
+            self._base_url = self._base_url[: -len("/api")]
+        self._timeout = timeout
+        self._api_key = api_key
+        self._client = client
+
+    def encode(self, texts: list[str]) -> list[list[float]] | None:
+        if not texts:
+            return []
+        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else None
+        endpoint = "/api/embed"
+        try:
+            if self._client is not None:
+                response = self._client.post(
+                    endpoint,
+                    json={"model": self._model_name, "input": texts},
+                    headers=headers,
+                )
+            else:
+                with httpx.Client(base_url=self._base_url, timeout=self._timeout) as client:
+                    response = client.post(
+                        endpoint,
+                        json={"model": self._model_name, "input": texts},
+                        headers=headers,
+                    )
+            response.raise_for_status()
+            embeddings = response.json().get("embeddings")
+            if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+                raise ValueError("Ollama returned an invalid embedding batch")
+            if not all(isinstance(vector, list) and vector for vector in embeddings):
+                raise ValueError("Ollama returned an empty embedding vector")
+            return [[float(value) for value in vector] for vector in embeddings]
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            _logger.warning("Ollama embedding request failed: %s", exc)
+            return None
+
+
+class _LazySentenceTransformersEmbedder:
+    """Lazy optional sentence-transformers fallback to keep startup fast."""
 
     def __init__(self, model_name: str, device: str, cache_dir: str | None) -> None:
         self._model_name = model_name
@@ -155,6 +217,21 @@ class _LazyEmbedder:
             return None
 
 
+class _FallbackEmbedder:
+    """Use a secondary backend only when the primary backend is unavailable."""
+
+    def __init__(self, primary: Embedder, fallback: Embedder | None = None) -> None:
+        self._primary = primary
+        self._fallback = fallback
+
+    def encode(self, texts: list[str]) -> list[list[float]] | None:
+        vectors = self._primary.encode(texts)
+        if vectors is not None or self._fallback is None:
+            return vectors
+        _logger.info("Using sentence-transformers semantic embedding fallback")
+        return self._fallback.encode(texts)
+
+
 class SemanticPromptScorer:
     """Semantic scorer that classifies prompts by role using embeddings.
 
@@ -169,16 +246,41 @@ class SemanticPromptScorer:
         cache_dir: str | None = None,
         role_definitions: list[dict[str, Any]] | None = None,
         embedding_cache_path: str | Path | None = None,
+        *,
+        backend: str = "ollama",
+        ollama_base_url: str = "http://localhost:11434",
+        ollama_timeout: float = 30.0,
+        ollama_api_key: str | None = None,
+        fallback_to_sentence_transformers: bool = False,
+        sentence_transformers_model_name: str = DEFAULT_SENTENCE_TRANSFORMERS_MODEL,
     ) -> None:
-        self._embedder = _LazyEmbedder(model_name, device, cache_dir)
+        if backend == "ollama":
+            primary: Embedder = OllamaEmbedder(
+                model_name=model_name,
+                base_url=ollama_base_url,
+                timeout=ollama_timeout,
+                api_key=ollama_api_key,
+            )
+            fallback: Embedder | None = (
+                _LazySentenceTransformersEmbedder(
+                    sentence_transformers_model_name, device, cache_dir
+                )
+                if fallback_to_sentence_transformers
+                else None
+            )
+            self._embedder: Embedder = _FallbackEmbedder(primary, fallback)
+        elif backend == "sentence_transformers":
+            self._embedder = _LazySentenceTransformersEmbedder(model_name, device, cache_dir)
+        else:
+            raise ValueError("semantic backend must be 'ollama' or 'sentence_transformers'")
         self._role_definitions = role_definitions or ROLE_DEFINITIONS
         self._embedding_cache_path = embedding_cache_path
         self._roles: list[RoleEmbedding] = []
         self._loaded = False
 
     @property
-    def embedder(self) -> _LazyEmbedder:
-        """Share the lazily loaded model with other semantic classifiers."""
+    def embedder(self) -> Embedder:
+        """Share the configured embedding provider with semantic classifiers."""
         return self._embedder
 
     def _ensure_role_embeddings(self) -> bool:

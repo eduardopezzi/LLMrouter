@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from llmrouter.api.routes import create_app
 from llmrouter.benchmark_catalog import RefreshReport
+from llmrouter.benchmark_research import BenchmarkResearcher
 from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
 from llmrouter.cli_panel import demote_model_priority
 from llmrouter.config import ProviderConfig, Settings, get_settings
@@ -140,6 +141,17 @@ def build_app(settings: Settings | None = None) -> FastAPI:
                 router,
                 app_holder,
             ),
+            researcher=(
+                BenchmarkResearcher(
+                    base_url=resolved_settings.evaluator.ollama.base_url,
+                    api_key=resolve_api_key(resolved_settings.evaluator.ollama, "OLLAMA_API_KEY"),
+                    model=resolved_settings.evaluator.ollama.model,
+                    timeout=resolved_settings.benchmarks.research_timeout_seconds,
+                    proposal_path=resolved_settings.benchmarks.research_proposals_path,
+                )
+                if resolved_settings.benchmarks.research_enabled
+                else None
+            ),
         )
         if resolved_settings.benchmarks.refresh_enabled
         else None
@@ -253,6 +265,16 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
             device=settings.semantic.device,
             cache_dir=settings.semantic.cache_dir,
             embedding_cache_path=settings.semantic.embedding_cache_path,
+            backend=settings.semantic.backend,
+            ollama_base_url=(
+                settings.semantic.ollama_base_url
+                or settings.providers.ollama.base_url
+                or "http://localhost:11434"
+            ),
+            ollama_timeout=settings.semantic.ollama_timeout_seconds,
+            ollama_api_key=resolve_api_key(settings.providers.ollama, "OLLAMA_API_KEY"),
+            fallback_to_sentence_transformers=settings.semantic.fallback_to_sentence_transformers,
+            sentence_transformers_model_name=settings.semantic.sentence_transformers_model_name,
         )
         benchmark_scorer = BenchmarkAffinityScorer(
             semantic_scorer.embedder,

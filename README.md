@@ -79,9 +79,16 @@ llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
 
 Com `LLMROUTER_BENCHMARKS__REFRESH_ENABLED=true` (padrão), o próprio processo
 do LLMrouter executa a primeira verificação em background ao iniciar e repete a
-cada 168 horas. Uma fonte que não valide a tabela declarada falha sem alterar o
-catálogo anterior. Quando há mudança, o router recarrega as notas em memória,
-sem reinício. Para persistir atualizações em Docker, monte `data/` como volume.
+cada 360 horas (15 dias). Uma fonte que não valide a tabela declarada falha sem
+alterar o catálogo anterior. Quando há mudança, o router recarrega as notas em
+memória, sem reinício. Para persistir atualizações em Docker, monte `data/`
+como volume.
+
+No mesmo ciclo, o LLM configurado em `evaluator.ollama` avalia os extratos das
+fontes e grava sugestões em `data/benchmark_research_proposals.json`. Modelos
+com capacidade de navegação podem também sugerir novas fontes e modelos; essas
+sugestões **nunca** alteram automaticamente as fontes, notas ou catálogo. A
+revisão humana continua obrigatória antes de promover uma proposta.
 
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 
@@ -264,19 +271,22 @@ permite que um prompt misto distribua peso entre, por exemplo, contexto longo,
 engenharia de software e terminal. O ranking dinâmico só é aplicado quando há
 notas compatíveis; caso contrário, o comportamento anterior é preservado.
 
-Instale as dependências opcionais de embeddings antes de habilitar o recurso:
-
-```bash
-pip install -e '.[ml]'
-```
-
 ```env
 LLMROUTER_SEMANTIC__ENABLED=true
+LLMROUTER_SEMANTIC__BACKEND=ollama
+LLMROUTER_SEMANTIC__MODEL_NAME=embeddinggemma:latest
+LLMROUTER_SEMANTIC__OLLAMA_BASE_URL=http://localhost:11434
 LLMROUTER_SEMANTIC__BENCHMARK_KNOWLEDGE_BASE_PATH=benchmark_knowledge_base.py
 LLMROUTER_SEMANTIC__BENCHMARK_SIMILARITY_THRESHOLD=0.30
 LLMROUTER_SEMANTIC__BENCHMARK_TOP_K=5
 LLMROUTER_ROUTING__DYNAMIC_BENCHMARK_ROUTING=true
 ```
+
+Por padrão, os embeddings são gerados localmente pela API do Ollama usando
+`embeddinggemma:latest`; o mesmo vetor é usado para os papéis e para a base de
+benchmarks. Caso necessário, habilite o fallback opcional do SentenceTransformers
+com `LLMROUTER_SEMANTIC__FALLBACK_TO_SENTENCE_TRANSFORMERS=true` e instale
+`pip install -e '.[ml]'`.
 
 ```bash
 curl -X POST http://localhost:12345/v1/llmrouter/semantic/inspect \
