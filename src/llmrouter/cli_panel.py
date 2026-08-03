@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import shutil
 import sqlite3
@@ -153,13 +152,24 @@ def render_benchmark_leaderboards(registry: ModelRegistry, *, limit: int = 3) ->
     if not entries:
         return "Benchmark leaders: no published scores loaded."
 
-    lines = [f"Benchmark leaders (top {top_n} by normalized score)"]
+    scored_models = {model.name for models in entries.values() for model, _, _ in models}
+    total_models = len(registry.all())
+    lines = [
+        f"Benchmark leaders (top {top_n} by normalized score)",
+        f"Coverage: {len(scored_models)}/{total_models} configured model(s) have published scores.",
+    ]
     for benchmark in sorted(entries, key=str.casefold):
+        candidates = entries[benchmark]
         ranked = sorted(
-            entries[benchmark],
+            candidates,
             key=lambda entry: (-entry[2], entry[0].priority, entry[0].name),
         )[:top_n]
-        lines.append(f"\n{benchmark}")
+        if len(candidates) < 2:
+            lines.append(f"\n{benchmark} — insufficient coverage: 1 candidate")
+        else:
+            lines.append(
+                f"\n{benchmark} — {len(candidates)} candidates, showing top {len(ranked)}"
+            )
         for rank, (model, raw_score, normalized) in enumerate(ranked, 1):
             lines.append(f"  {rank}. {model.name} — raw={raw_score:g}, normalized={normalized:.3f}")
     return "\n".join(lines)
@@ -1349,7 +1359,6 @@ def set_model_rollout_percentage(
 
     import fcntl
     import os
-    import tempfile
 
     path = Path(models_file)
     blocks = _model_blocks(path)
@@ -1361,7 +1370,7 @@ def set_model_rollout_percentage(
     target = next(block for block in blocks if block.name == model_name)
 
     # Read, modify, write atomically under file lock
-    with open(path, "r") as f:
+    with open(path) as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
             lines = f.read().splitlines()

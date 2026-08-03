@@ -94,6 +94,12 @@ class RoutingConfig(BaseModel):
             "when semantic routing and model benchmark scores are available."
         ),
     )
+    intent_routing: bool = Field(
+        default=True,
+        description="Prefer models whose declared role matches the inferred prompt demand.",
+    )
+    simple_prompt_threshold: float = Field(default=0.33, ge=0.0, le=1.0)
+    complex_prompt_threshold: float = Field(default=0.66, ge=0.0, le=1.0)
     scorer_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "length": 0.15,

@@ -6,10 +6,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+import llmrouter.main as main_module
 from llmrouter.main import (
     _build_health_tracker,
     _build_health_tracker_from_settings,
@@ -567,3 +569,24 @@ class TestMainCommands:
 
         captured = capsys.readouterr()
         assert "Model health" in captured.out or "no data" in captured.out
+
+
+def test_benchmarks_refresh_does_not_load_model_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    invalid_models = tmp_path / "models.yaml"
+    invalid_models.write_text("models:\n  - name: broken\n    invalid yaml", encoding="utf-8")
+    settings = main_module.Settings(models_file=str(invalid_models))
+    report = SimpleNamespace(
+        changed=False,
+        models_updated=0,
+        scores_updated=0,
+        output_path="data/model_benchmarks.yaml",
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "refresh_benchmark_catalog", lambda *args, **kwargs: report)
+    monkeypatch.setattr(sys, "argv", ["llmrouter", "benchmarks-refresh", "--check"])
+
+    main()
+
+    assert "Benchmark catalog up to date" in capsys.readouterr().out

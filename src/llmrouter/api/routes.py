@@ -1510,6 +1510,8 @@ def _semantic_inspect_payload(scoring: Any) -> dict[str, object]:
     return {
         "score": getattr(scoring, "score", 0.0),
         "tier": getattr(getattr(scoring, "tier", None), "value", None),
+        "complexity_level": signals.get("complexity_level", "unknown"),
+        "task_type": signals.get("task_type", "general"),
         "semantic_role": signals.get("semantic_role", "none"),
         "semantic_confidence": semantic_confidence,
         "semantic_used": bool(signals.get("semantic_used", False)),

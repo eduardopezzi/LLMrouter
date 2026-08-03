@@ -135,6 +135,7 @@ models:
 
   - name: "ollama/qwen2.5-coder:3b"
     provider: "ollama"
+    tier: 1
     api_base: "http://localhost:11434"
     roles: ["summarization", "documentation"]
     priority: 10

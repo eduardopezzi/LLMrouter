@@ -63,7 +63,7 @@ modelo. Percentuais podem ser informados em `0–100` ou `0–1`; o rating de
 estimadas: sem dados para um modelo ou benchmark, o router usa tier, custo,
 prioridade e saúde como fallback.
 
-### Atualização semanal dos benchmarks
+### Atualização periódica dos benchmarks
 
 As notas coletadas ficam separadas do catálogo de modelos em
 `data/model_benchmarks.yaml`. Cada valor traz fonte, data de coleta e
@@ -76,6 +76,12 @@ make benchmarks-refresh # baixa, valida e atualiza o catálogo local
 make benchmarks-check   # verifica se há mudança sem gravar arquivos
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
 ```
+
+O painel informa a cobertura total e quantos modelos participaram de cada
+benchmark. Quando existe apenas um candidato, o resultado aparece como
+`insufficient coverage`, pois não representa uma comparação. Benchmarks com
+métricas ou versões diferentes permanecem separados para evitar rankings
+enganosos.
 
 Com `LLMROUTER_BENCHMARKS__REFRESH_ENABLED=true` (padrão), o próprio processo
 do LLMrouter executa a primeira verificação em background ao iniciar e repete a
@@ -264,6 +270,25 @@ Quando `LLMROUTER_SEMANTIC__ENABLED=true`, o runtime usa o `HybridScorer`
 para combinar heurísticas e embeddings. Para calibrar a classificação sem chamar
 provedores externos:
 
+Antes da afinidade semântica, o router classifica a complexidade e o tipo de
+demanda. Prompts simples permanecem em T1, demandas moderadas usam T2 e tarefas
+complexas usam T3. Se a demanda inferida não tiver especialista no tier escolhido,
+um modelo de outro tier com a role adequada é incluído e priorizado.
+
+| Complexidade | Exemplos | Tier preferencial |
+| --- | --- | --- |
+| Simples | resumo curto, documentação pequena, pergunta direta | T1 / modelo leve |
+| Moderada | correção, review, testes, refatoração ou migração pontual | T2 |
+| Complexa | segurança, várias ações, código/contexto extenso | T3 / modelo forte |
+
+Os limiares e o redirecionamento por intenção são configuráveis:
+
+```env
+LLMROUTER_ROUTING__INTENT_ROUTING=true
+LLMROUTER_ROUTING__SIMPLE_PROMPT_THRESHOLD=0.33
+LLMROUTER_ROUTING__COMPLEX_PROMPT_THRESHOLD=0.66
+```
+
 Além da role, o scorer compara o prompt com a base
 `benchmark_knowledge_base.py`. As afinidades acima do limiar são normalizadas
 para somar `1.0` e usadas como pesos sobre `benchmark_scores` dos modelos. Isso
@@ -300,6 +325,9 @@ Via CLI:
 ```bash
 llmrouter semantic-inspect "Review this architecture and identify security risks." --json
 ```
+
+O resultado inclui `complexity_level`, `task_type`, score, tier, afinidades de
+benchmark e a decomposição completa dos sinais usados na decisão.
 
 ## Integração com o Cline
 

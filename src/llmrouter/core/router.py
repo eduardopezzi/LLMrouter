@@ -332,6 +332,7 @@ class MultiModelRouter:
         provider_cooldowns: ProviderCooldownStore | None = None,
         client_provider_affinity: bool = True,
         dynamic_benchmark_routing: bool = True,
+        intent_routing: bool = True,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
@@ -345,6 +346,7 @@ class MultiModelRouter:
         self._provider_cooldowns = provider_cooldowns
         self._client_provider_affinity = client_provider_affinity
         self._dynamic_benchmark_routing = dynamic_benchmark_routing
+        self._intent_routing = intent_routing
         if health_tracker is not None:
             self._strategy.set_health_tracker(health_tracker)
 
@@ -434,6 +436,7 @@ class MultiModelRouter:
 
         # Get candidate models for the recommended tier
         candidates = self._get_candidates(scoring.tier, constraints)
+        candidates = self._augment_inferred_task_candidates(candidates, scoring, constraints)
 
         # Apply canary/blue-green rollout filter (pre-strategy eligibility)
         candidates = self._apply_rollout(candidates, request)
@@ -461,6 +464,7 @@ class MultiModelRouter:
         # Apply selection strategy
         ordered = _unique_models(self._strategy.select(candidates, constraints))
         ordered = self._apply_dynamic_benchmark_ranking(ordered, scoring)
+        ordered = self._apply_inferred_task_affinity(ordered, scoring)
         ordered = self._apply_client_provider_affinity(ordered, request, constraints)
         primary = ordered[0]
         fallbacks = ordered[1 : 1 + self._fallback_count]
@@ -553,6 +557,40 @@ class MultiModelRouter:
             all_models = [m for m in all_models if m.name != primary.name]
         ordered = _unique_models(self._strategy.select(all_models, constraints))
         return ordered[: self._fallback_count]
+
+    def _augment_inferred_task_candidates(
+        self,
+        candidates: list[ModelInfo],
+        scoring: ScoringResult,
+        constraints: RoutingConstraints,
+    ) -> list[ModelInfo]:
+        """Include specialists when the inferred task has none in the selected tier."""
+        if not self._intent_routing or constraints.required_capabilities:
+            return candidates
+        task_type = _inferred_task_type(scoring)
+        if task_type is None or any(task_type in model.capabilities for model in candidates):
+            return candidates
+        specialists = self._available_models(
+            [model for model in self._registry.all() if task_type in model.capabilities]
+        )
+        return _unique_models([*specialists, *candidates]) if specialists else candidates
+
+    def _apply_inferred_task_affinity(
+        self,
+        ordered: list[ModelInfo],
+        scoring: ScoringResult,
+    ) -> list[ModelInfo]:
+        """Prefer matching specialists while retaining non-matches as fallbacks."""
+        if not self._intent_routing:
+            return ordered
+        task_type = _inferred_task_type(scoring)
+        if task_type is None:
+            return ordered
+        matching = [model for model in ordered if task_type in model.capabilities]
+        if not matching:
+            return ordered
+        remaining = [model for model in ordered if task_type not in model.capabilities]
+        return [*matching, *remaining]
 
     def _apply_dynamic_benchmark_ranking(
         self,
@@ -753,9 +791,21 @@ class MultiModelRouter:
             and benchmark_top not in {"none", "unknown", "unavailable"}
             else ""
         )
+        task_type = scoring.signals.get("task_type")
+        task_part = (
+            f"task={task_type}, "
+            if isinstance(task_type, str) and task_type != "general"
+            else ""
+        )
+        complexity_level = scoring.signals.get("complexity_level")
+        complexity_part = (
+            f"complexity={complexity_level}, "
+            if isinstance(complexity_level, str)
+            else ""
+        )
         return (
             f"Prompt scored {scoring.score:.2f} (tier {scoring.tier.name}), "
-            f"{role_part}{benchmark_part}signals: {signal_str}. "
+            f"{complexity_part}{task_part}{role_part}{benchmark_part}signals: {signal_str}. "
             f"Selected {model.name} via {model.provider.value}."
         )
 
@@ -783,3 +833,19 @@ def _unique_models(models: list[ModelInfo]) -> list[ModelInfo]:
         unique.append(model)
         seen.add(model.name)
     return unique
+
+
+def _inferred_task_type(scoring: ScoringResult) -> str | None:
+    task_type = scoring.signals.get("task_type")
+    if isinstance(task_type, str) and task_type != "general":
+        return task_type
+    semantic_role = scoring.signals.get("semantic_role")
+    semantic_confidence = scoring.signals.get("semantic_confidence", 0.0)
+    if (
+        isinstance(semantic_role, str)
+        and semantic_role not in {"none", "unknown"}
+        and isinstance(semantic_confidence, (int, float))
+        and semantic_confidence >= 0.5
+    ):
+        return semantic_role
+    return None

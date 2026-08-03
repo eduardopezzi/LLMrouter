@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import sys
+from typing import Any
 
 import uvicorn
 
@@ -35,7 +36,27 @@ from llmrouter.cross_repository import (
 from llmrouter.logging_config import setup_logging
 from llmrouter.runtime import _build_scorer, build_app, build_registry
 
-app = build_app()
+
+class _LazyASGIApp:
+    """Build the web application only when an ASGI server receives a request.
+
+    Keeping module import side-effect free lets maintenance commands, such as
+    ``benchmarks-refresh``, run without parsing the independent model catalog.
+    """
+
+    def __init__(self) -> None:
+        self._application: Any | None = None
+
+    def _get_application(self) -> Any:
+        if self._application is None:
+            self._application = build_app()
+        return self._application
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self._get_application()(scope, receive, send)
+
+
+app = _LazyASGIApp()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -450,6 +471,8 @@ def main() -> None:
         else:
             print(f"score: {payload['score']}")
             print(f"tier: {payload['tier']}")
+            print(f"complexity_level: {payload['complexity_level']}")
+            print(f"task_type: {payload['task_type']}")
             print(f"semantic_role: {payload['semantic_role']}")
             print(f"semantic_confidence: {payload['semantic_confidence']}")
             print(f"semantic_used: {payload['semantic_used']}")
@@ -544,6 +567,8 @@ def _semantic_inspect_payload(scoring: object) -> dict[str, object]:
     return {
         "score": getattr(scoring, "score", 0.0),
         "tier": getattr(getattr(scoring, "tier", None), "value", None),
+        "complexity_level": signals.get("complexity_level", "unknown"),
+        "task_type": signals.get("task_type", "general"),
         "semantic_role": signals.get("semantic_role", "none"),
         "semantic_confidence": semantic_confidence,
         "semantic_used": bool(signals.get("semantic_used", False)),

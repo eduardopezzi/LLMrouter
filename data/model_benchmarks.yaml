@@ -1,5 +1,174 @@
-generated_at: '2026-08-03T16:30:17Z'
+generated_at: '2026-08-03T19:24:43Z'
 models:
+  ollama/deepseek-v4-pro:cloud:
+    benchmark_scores:
+      GPQA Diamond:
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 90.1
+      HMMT:
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 95.2
+      Humanity's Last Exam (HLE):
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 37.7
+      MCP Atlas:
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 73.6
+      Program Bench:
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 47.8
+      SWE-Bench Pro:
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 55.4
+      TerminalBench 2.1:
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 64.0
+      Tool Decathlon:
+        collected_at: '2026-08-03T19:23:19Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 52.8
+  ollama/gemma4:31b:
+    benchmark_scores:
+      Codeforces:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Gemma 4 instruction-tuned model-card results.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/google/gemma-4-31B/raw/main/README.md
+        value: 2150.0
+      GPQA Diamond:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Gemma 4 instruction-tuned model-card results.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/google/gemma-4-31B/raw/main/README.md
+        value: 84.3
+      Humanity's Last Exam (HLE):
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Gemma 4 instruction-tuned model-card results.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/google/gemma-4-31B/raw/main/README.md
+        value: 19.5
+      LiveCodeBench:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Gemma 4 instruction-tuned model-card results.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/google/gemma-4-31B/raw/main/README.md
+        value: 80.0
+      MMLU-Pro:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Gemma 4 instruction-tuned model-card results.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/google/gemma-4-31B/raw/main/README.md
+        value: 85.2
+  ollama/glm-5.2:cloud:
+    benchmark_scores:
+      GPQA Diamond:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 91.2
+      HMMT:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 92.5
+      Humanity's Last Exam (HLE):
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 40.5
+      MCP Atlas:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 76.8
+      Program Bench:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 63.7
+      SWE-Bench Pro:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 62.1
+      TerminalBench 2.1:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 81.0
+      Tool Decathlon:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 48.2
   ollama/kimi-k2.7-code:cloud:
     benchmark_scores:
       Kimi Claw 24/7 Bench:
@@ -50,4 +219,170 @@ models:
         source_type: official_model_card
         source_url: https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md
         value: 53.6
+  ollama/kimi-k3:cloud:
+    benchmark_scores:
+      BrowseComp:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Kimi K3 model card at max reasoning; per-benchmark harnesses
+          documented in footnotes.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K3/raw/main/README.md
+        value: 91.2
+      GPQA Diamond:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Kimi K3 model card at max reasoning; per-benchmark harnesses
+          documented in footnotes.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K3/raw/main/README.md
+        value: 93.5
+      MCP Atlas:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Kimi K3 model card at max reasoning; per-benchmark harnesses
+          documented in footnotes.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K3/raw/main/README.md
+        value: 84.2
+      MLS Bench Lite:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Kimi K3 model card at max reasoning; per-benchmark harnesses
+          documented in footnotes.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K3/raw/main/README.md
+        value: 48.3
+      Program Bench:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Kimi K3 model card at max reasoning; per-benchmark harnesses
+          documented in footnotes.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K3/raw/main/README.md
+        value: 77.8
+      TerminalBench 2.1:
+        collected_at: '2026-08-03T19:24:43Z'
+        methodology: Official Kimi K3 model card at max reasoning; per-benchmark harnesses
+          documented in footnotes.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K3/raw/main/README.md
+        value: 88.3
+  ollama/minimax-m3:cloud:
+    benchmark_scores:
+      GPQA Diamond:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 93.0
+      HMMT:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 84.4
+      Humanity's Last Exam (HLE):
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 37.0
+      MCP Atlas:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 74.2
+      SWE-Bench Pro:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 59.0
+      TerminalBench 2.1:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 65.0
+  zhipu/glm-5.1:
+    benchmark_scores:
+      GPQA Diamond:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 86.2
+      HMMT:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 82.6
+      Humanity's Last Exam (HLE):
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 31.0
+      MCP Atlas:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 71.8
+      Program Bench:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 50.9
+      SWE-Bench Pro:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 58.4
+      TerminalBench 2.1:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 63.5
+      Tool Decathlon:
+        collected_at: '2026-08-03T19:23:18Z'
+        methodology: Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented
+          harnesses.
+        published_at: null
+        source_type: benchmark_leaderboard
+        source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
+        value: 40.7
 schema_version: 1

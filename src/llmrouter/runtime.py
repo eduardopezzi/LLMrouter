@@ -82,6 +82,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         provider_cooldowns=provider_cooldowns,
         client_provider_affinity=resolved_settings.routing.client_provider_affinity,
         dynamic_benchmark_routing=resolved_settings.routing.dynamic_benchmark_routing,
+        intent_routing=resolved_settings.routing.intent_routing,
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
@@ -255,7 +256,11 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
     Semantic scoring is lazy: enabling it wires the hybrid scorer, but the
     embedding model is only loaded when a prompt is scored.
     """
-    rule_scorer = PromptScorer(_scorer_weights(settings.routing.scorer_weights))
+    rule_scorer = PromptScorer(
+        _scorer_weights(settings.routing.scorer_weights),
+        simple_threshold=settings.routing.simple_prompt_threshold,
+        complex_threshold=settings.routing.complex_prompt_threshold,
+    )
     if not settings.semantic.enabled:
         return rule_scorer
 

@@ -34,6 +34,27 @@ TABLE = """
 </table>
 """
 
+MARKDOWN_SOURCE_YAML = """
+sources:
+  - model: "ollama/model-b:cloud"
+    source_type: benchmark_leaderboard
+    url: "https://example.test/model-card.md"
+    format: markdown_table
+    benchmark_column: Benchmark
+    model_column: Model B
+    metrics:
+      "GPQA Diamond": "GPQA-Diamond"
+      "SWE-Bench Pro": "SWE-bench Pro"
+"""
+
+MARKDOWN_TABLE = """
+|Benchmark|Model A|Model B|
+|:---|:---:|:---:|
+|Reasoning|||
+|GPQA-Diamond|88.0|91.2|
+|SWE-bench Pro|61.0|62.1|
+"""
+
 
 def test_refresh_writes_provenance_and_is_idempotent(tmp_path) -> None:
     sources = tmp_path / "sources.yaml"
@@ -77,6 +98,24 @@ def test_failed_refresh_does_not_overwrite_approved_catalog(tmp_path) -> None:
         refresh_benchmark_catalog(sources, output, fetch=lambda _url, _timeout: "<table></table>")
 
     assert output.read_text() == "schema_version: 1\ngenerated_at: old\nmodels: {}\n"
+
+
+def test_refresh_extracts_markdown_model_card_table(tmp_path) -> None:
+    sources = tmp_path / "sources.yaml"
+    output = tmp_path / "catalog.yaml"
+    sources.write_text(MARKDOWN_SOURCE_YAML)
+
+    report = refresh_benchmark_catalog(
+        sources,
+        output,
+        fetch=lambda _url, _timeout: MARKDOWN_TABLE,
+    )
+
+    assert report.scores_updated == 2
+    assert load_catalog_scores(output)["ollama/model-b:cloud"] == {
+        "GPQA Diamond": 91.2,
+        "SWE-Bench Pro": 62.1,
+    }
 
 
 def test_registry_merges_refreshed_scores_over_manual_values(tmp_path) -> None:

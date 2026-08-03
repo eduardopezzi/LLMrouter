@@ -189,8 +189,10 @@ def _load_sources(path: Path) -> list[dict[str, Any]]:
             raise BenchmarkRefreshError(f"{model}: unsupported source_type")
         if not isinstance(metrics, dict) or not metrics:
             raise BenchmarkRefreshError(f"{model}: metrics must be a non-empty mapping")
-        if entry.get("format", "html_table") != "html_table":
-            raise BenchmarkRefreshError(f"{model}: only html_table sources are supported")
+        if entry.get("format", "html_table") not in {"html_table", "markdown_table"}:
+            raise BenchmarkRefreshError(
+                f"{model}: format must be html_table or markdown_table"
+            )
         if not all(
             isinstance(key, str) and isinstance(value, str) for key, value in metrics.items()
         ):
@@ -205,13 +207,18 @@ def _extract_source_scores(
     timeout: float,
 ) -> dict[str, float]:
     document = fetch(source["url"], timeout)
-    parser = _HTMLTableParser()
-    parser.feed(document)
+    source_format = source.get("format", "html_table")
+    if source_format == "markdown_table":
+        tables = _parse_markdown_tables(document)
+    else:
+        parser = _HTMLTableParser()
+        parser.feed(document)
+        tables = parser.tables
     benchmark_column = str(source.get("benchmark_column", "Benchmark"))
     model_column = str(source.get("model_column", ""))
     if not model_column:
         raise BenchmarkRefreshError("model_column is required")
-    table = _find_table(parser.tables, benchmark_column, model_column)
+    table = _find_table(tables, benchmark_column, model_column)
     headers = table[0]
     benchmark_index = _find_column(headers, benchmark_column)
     model_index = _find_column(headers, model_column)
@@ -227,6 +234,44 @@ def _extract_source_scores(
             raise BenchmarkRefreshError(f"missing declared benchmark row '{source_label}'")
         extracted[benchmark] = _parse_score(row[model_index])
     return extracted
+
+
+def _parse_markdown_tables(document: str) -> list[list[list[str]]]:
+    """Extract GitHub-flavored Markdown tables into the HTML parser's row shape."""
+    lines = document.splitlines()
+    tables: list[list[list[str]]] = []
+    index = 0
+    while index + 1 < len(lines):
+        header = _markdown_row(lines[index])
+        separator = _markdown_row(lines[index + 1])
+        if (
+            not header
+            or not separator
+            or not all(_is_markdown_separator(cell) for cell in separator)
+        ):
+            index += 1
+            continue
+        table = [header]
+        index += 2
+        while index < len(lines):
+            row = _markdown_row(lines[index])
+            if not row:
+                break
+            table.append(row)
+            index += 1
+        tables.append(table)
+    return tables
+
+
+def _markdown_row(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return None
+    return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def _is_markdown_separator(value: str) -> bool:
+    return re.fullmatch(r":?-{3,}:?", value.strip()) is not None
 
 
 def _find_table(

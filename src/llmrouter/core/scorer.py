@@ -44,7 +44,98 @@ _COMPLEXITY_KEYWORDS = frozenset(
         "synthesis",
         "translate",
         "troubleshoot",
+        "analise",
+        "analisar",
+        "arquitetar",
+        "comparar",
+        "complexo",
+        "depurar",
+        "diagnosticar",
+        "implementar",
+        "investigar",
+        "otimizar",
+        "pesquisar",
+        "refatorar",
+        "revisar",
     ]
+)
+
+_TASK_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "security_audit",
+        (
+            r"\b(?:security audit|auditoria de seguran[cç]a|owasp|cve|"
+            r"vulnerabilit\w*|vulnerabil\w*)\b",
+            r"\b(?:injection|inje[cç][aã]o|xss|csrf|secret leakage|vazamento de segredo)\b",
+        ),
+    ),
+    (
+        "architecture",
+        (
+            r"\b(?:system design|software architecture|arquitetura de software|"
+            r"arquitetura do sistema)\b",
+            r"\b(?:desenhe|projete|design|architect)\b.*\b(?:sistema|system|servi[cç]o|service)\b",
+        ),
+    ),
+    (
+        "migration",
+        (
+            r"\b(?:migrat\w*|migra[cç]\w*|upgrade|atualiz\w*)\b.*\b(?:framework|vers[aã]o|version|api|banco|database)\b",
+        ),
+    ),
+    (
+        "test_generation",
+        (
+            r"\b(?:generate|write|create|gerar|criar|escrever)\b.*"
+            r"\b(?:tests?|testes?|pytest|unit tests?|e2e)\b",
+            r"\b(?:test coverage|cobertura de testes?|fixtures?|mocks?)\b",
+        ),
+    ),
+    (
+        "refactoring",
+        (r"\b(?:refactor\w*|refator\w*|clean code|c[oó]digo legado|legacy code)\b",),
+    ),
+    (
+        "review",
+        (
+            r"\b(?:code review|review (?:this|the)|revis(?:e|ar|[aã]o)|pull request|\bpr\b)\b",
+        ),
+    ),
+    (
+        "fix",
+        (
+            r"\b(?:debug|fix|corrij\w*|corrig\w*|depur\w*|bug|erro|error|"
+            r"exception|stack trace|crash)\b",
+        ),
+    ),
+    (
+        "documentation",
+        (
+            r"\b(?:document\w*|documenta[cç]\w*|readme|docstring|swagger|openapi)\b",
+        ),
+    ),
+    (
+        "summarization",
+        (r"\b(?:summari[sz]\w*|resum\w*|s[ií]ntese|tl;?dr)\b",),
+    ),
+)
+
+_TASK_COMPLEXITY_FLOORS = {
+    "security_audit": 0.67,
+    "architecture": 0.52,
+    "migration": 0.45,
+    "test_generation": 0.40,
+    "refactoring": 0.40,
+    "review": 0.36,
+    "fix": 0.36,
+}
+
+_ACTION_RE = re.compile(
+    r"\b(?:analyze|architect|compare|debug|design|diagnose|evaluate|implement|investigate|"
+    r"optimize|refactor|review|test|analis\w*|arquitet\w*|compar\w*|depur\w*|desenh\w*|"
+    r"diagnostic\w*|implement(?:ar|e|a|amos|em|ando)|investig\w*|otimiz\w*|"
+    r"refator\w*|revis\w*|test\w*)\b",
+    re.IGNORECASE,
 )
 
 _CODE_PATTERNS = [
@@ -139,11 +230,25 @@ class PromptScorer:
     The scorer is stateless and safe to share across tasks.
     """
 
-    def __init__(self, weights: ScorerWeights | None = None) -> None:
+    def __init__(
+        self,
+        weights: ScorerWeights | None = None,
+        *,
+        simple_threshold: float = 0.33,
+        complex_threshold: float = 0.66,
+    ) -> None:
         self._weights = weights or ScorerWeights()
+        if not 0.0 <= simple_threshold < complex_threshold <= 1.0:
+            raise ValueError("complexity thresholds must satisfy 0 <= simple < complex <= 1")
+        self._simple_threshold = simple_threshold
+        self._complex_threshold = complex_threshold
         self._code_re = [re.compile(p, re.IGNORECASE) for p in _CODE_PATTERNS]
         self._math_re = [re.compile(p, re.IGNORECASE) for p in _MATH_PATTERNS]
         self._complexity_kw = _COMPLEXITY_KEYWORDS
+        self._task_patterns = [
+            (task, [re.compile(pattern, re.IGNORECASE) for pattern in patterns])
+            for task, patterns in _TASK_PATTERNS
+        ]
 
     def score(self, prompt: str) -> ScoringResult:
         """Score the complexity of a prompt.
@@ -157,7 +262,7 @@ class PromptScorer:
         if not prompt or not prompt.strip():
             return ScoringResult(score=0.0, tier=Tier.T1, signals={})
 
-        signals: dict[str, float] = {
+        numeric_signals: dict[str, float] = {
             "length": self._score_length(prompt),
             "code_detection": self._score_code(prompt),
             "complexity_keywords": self._score_keywords(prompt),
@@ -173,11 +278,67 @@ class PromptScorer:
             "language_complexity": self._weights.language_complexity,
         }
 
-        total = sum(signals.get(name, 0.0) * weight for name, weight in weight_map.items())
+        total = sum(
+            numeric_signals.get(name, 0.0) * weight for name, weight in weight_map.items()
+        )
 
-        score = min(max(total, 0.0), 1.0)
-        tier = _score_to_tier(score)
+        task_type, task_hits = self._detect_task_type(prompt)
+        complexity_floor = self._complexity_floor(prompt, task_type, numeric_signals)
+
+        score = min(max(total, complexity_floor, 0.0), 1.0)
+        tier = self._score_to_tier(score)
+        complexity_level = (
+            "simple"
+            if tier == Tier.T1
+            else "moderate"
+            if tier == Tier.T2
+            else "complex"
+        )
+        signals: dict[str, Any] = {
+            **numeric_signals,
+            "task_type": task_type,
+            "task_confidence": min(task_hits / 2.0, 1.0),
+            "complexity_floor": complexity_floor,
+            "complexity_level": complexity_level,
+        }
         return ScoringResult(score=score, tier=tier, signals=signals)
+
+    def _score_to_tier(self, score: float) -> Tier:
+        if score < self._simple_threshold:
+            return Tier.T1
+        if score < self._complex_threshold:
+            return Tier.T2
+        return Tier.T3
+
+    def _detect_task_type(self, prompt: str) -> tuple[str, int]:
+        ranked: list[tuple[int, int, str]] = []
+        for priority, (task, patterns) in enumerate(self._task_patterns):
+            hits = sum(1 for pattern in patterns if pattern.search(prompt))
+            if hits:
+                ranked.append((hits, -priority, task))
+        if not ranked:
+            return "general", 0
+        hits, _, task = max(ranked)
+        return task, hits
+
+    @staticmethod
+    def _complexity_floor(
+        prompt: str,
+        task_type: str,
+        signals: dict[str, float],
+    ) -> float:
+        floor = _TASK_COMPLEXITY_FLOORS.get(task_type, 0.0)
+        prompt_length = len(prompt)
+        if prompt_length >= 12_000:
+            floor = max(floor, 0.67)
+        elif prompt_length >= 4_000:
+            floor = max(floor, 0.36)
+        action_count = len({match.group(0).lower() for match in _ACTION_RE.finditer(prompt)})
+        if action_count >= 3:
+            floor = max(floor, 0.67)
+        elif signals["code_detection"] >= 0.67 and prompt_length >= 1_500:
+            floor = max(floor, 0.67)
+        return floor
 
     # ------------------------------------------------------------------
     # Individual signal scorers (each returns 0.0–1.0)
@@ -200,7 +361,7 @@ class PromptScorer:
 
     def _score_keywords(self, prompt: str) -> float:
         """Score based on complexity-related keyword density."""
-        words = set(prompt.lower().split())
+        words = set(re.findall(r"\w+", prompt.lower(), flags=re.UNICODE))
         if not words:
             return 0.0
         hits = words & self._complexity_kw
