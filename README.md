@@ -26,6 +26,99 @@ Use:
 curl -H "Authorization: Bearer your-secret-key" http://localhost:12345/v1/models
 ```
 
+## Atualizar os modelos utilizados
+
+O catálogo carregado pelo LLMrouter fica em `config/models.yaml` (ou no caminho
+definido por `LLMROUTER_MODELS_FILE`). Para adicionar, remover ou atualizar um
+modelo, edite a lista `models` desse arquivo. Exemplo:
+
+```yaml
+models:
+  - name: "ollama/exemplo:latest"
+    provider: "ollama"
+    api_base: "http://localhost:11434"
+    roles: ["review", "fix"]
+    priority: 1
+    rollout_percentage: 100
+    description: "Modelo usado para revisão e correções."
+    max_tokens: 32768
+    context_window: 131072
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    benchmark_scores:
+      MMLU-Pro: 84.2
+      LiveCodeBench: 71.5
+      Codeforces: 2816
+```
+
+Os campos `name` e `provider` são obrigatórios. `roles` define para quais tarefas
+o modelo pode ser selecionado, `priority` desempata modelos equivalentes (menor
+número tem preferência) e `rollout_percentage` controla quanto tráfego ele pode
+receber (`0` desativa e `100` libera totalmente). Use em `provider` um provedor
+suportado pelo projeto e configure sua credencial correspondente no `.env`.
+
+`benchmark_scores` é opcional e recebe as medições reais publicadas para o
+modelo. Percentuais podem ser informados em `0–100` ou `0–1`; o rating de
+`Codeforces` pode permanecer na escala Elo original. Não preencha notas
+estimadas: sem dados para um modelo ou benchmark, o router usa tier, custo,
+prioridade e saúde como fallback.
+
+### Atualização semanal dos benchmarks
+
+As notas coletadas ficam separadas do catálogo de modelos em
+`data/model_benchmarks.yaml`. Cada valor traz fonte, data de coleta e
+metodologia; as URLs, tabelas e colunas aceitas ficam em
+`data/benchmark_sources.yaml`. Cadastre somente fontes oficiais/model cards e
+nunca faça scraping genérico de páginas de terceiros.
+
+```bash
+make benchmarks-refresh # baixa, valida e atualiza o catálogo local
+make benchmarks-check   # verifica se há mudança sem gravar arquivos
+```
+
+Com `LLMROUTER_BENCHMARKS__REFRESH_ENABLED=true` (padrão), o próprio processo
+do LLMrouter executa a primeira verificação em background ao iniciar e repete a
+cada 168 horas. Uma fonte que não valide a tabela declarada falha sem alterar o
+catálogo anterior. Quando há mudança, o router recarrega as notas em memória,
+sem reinício. Para persistir atualizações em Docker, monte `data/` como volume.
+
+Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
+
+```bash
+ollama pull exemplo:latest
+```
+
+Valide o YAML e o catálogo sem iniciar o servidor:
+
+```bash
+PYTHONPATH=src python -c \
+  'from llmrouter.core.registry import load_model_registry; print([m.name for m in load_model_registry("config/models.yaml").all()])'
+```
+
+Depois da edição, reinicie o LLMrouter, pois alterações manuais no YAML não são
+recarregadas automaticamente:
+
+```bash
+# execução local: encerre o processo atual e rode novamente
+llmrouter
+
+# serviço systemd
+sudo systemctl restart llmrouter
+```
+
+Se estiver usando Docker sem montar `config/models.yaml` como volume, reconstrua
+a imagem antes de recriar o container. Por fim, confirme o catálogo carregado:
+
+```bash
+curl -H "Authorization: Bearer $LLMROUTER_SERVER__API_KEY" \
+  http://localhost:12345/v1/models
+```
+
+Mantenha também `config/models.example.yaml` atualizado quando a alteração deve
+virar o padrão do projeto. Se `config/models.yaml` não existir, o LLMrouter cria
+esse arquivo copiando o catálogo de exemplo; ele não sobrescreve um catálogo
+ativo já existente.
+
 ## Integração com PRecog
 
 O LLMrouter pode ser usado pelo PRecog como backend OpenAI-compatible. Neste
@@ -156,6 +249,27 @@ curl http://localhost:12345/health
 Quando `LLMROUTER_SEMANTIC__ENABLED=true`, o runtime usa o `HybridScorer`
 para combinar heurísticas e embeddings. Para calibrar a classificação sem chamar
 provedores externos:
+
+Além da role, o scorer compara o prompt com a base
+`benchmark_knowledge_base.py`. As afinidades acima do limiar são normalizadas
+para somar `1.0` e usadas como pesos sobre `benchmark_scores` dos modelos. Isso
+permite que um prompt misto distribua peso entre, por exemplo, contexto longo,
+engenharia de software e terminal. O ranking dinâmico só é aplicado quando há
+notas compatíveis; caso contrário, o comportamento anterior é preservado.
+
+Instale as dependências opcionais de embeddings antes de habilitar o recurso:
+
+```bash
+pip install -e '.[ml]'
+```
+
+```env
+LLMROUTER_SEMANTIC__ENABLED=true
+LLMROUTER_SEMANTIC__BENCHMARK_KNOWLEDGE_BASE_PATH=benchmark_knowledge_base.py
+LLMROUTER_SEMANTIC__BENCHMARK_SIMILARITY_THRESHOLD=0.30
+LLMROUTER_SEMANTIC__BENCHMARK_TOP_K=5
+LLMROUTER_ROUTING__DYNAMIC_BENCHMARK_ROUTING=true
+```
 
 ```bash
 curl -X POST http://localhost:12345/v1/llmrouter/semantic/inspect \

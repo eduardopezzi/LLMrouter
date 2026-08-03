@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
 from llmrouter.core.cache import CacheManager
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy
@@ -120,6 +121,7 @@ def create_app(
     health_tracker: ModelHealthTracker | None = None,
     metrics_collector: MetricsCollector | None = None,
     cache_manager: CacheManager | None = None,
+    benchmark_scheduler: BenchmarkRefreshScheduler | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -132,10 +134,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         worker: asyncio.Task[None] | None = None
+        benchmark_worker: asyncio.Task[None] | None = None
         if feedback_loop is not None and evaluator_interval_seconds:
             worker = asyncio.create_task(
                 _run_feedback_worker(feedback_loop, evaluator_interval_seconds)
             )
+        if benchmark_scheduler is not None:
+            benchmark_worker = asyncio.create_task(benchmark_scheduler.run())
         try:
             yield
         finally:
@@ -143,6 +148,10 @@ def create_app(
                 worker.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await worker
+            if benchmark_worker is not None:
+                benchmark_worker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await benchmark_worker
             if app.state.proxy is not None and hasattr(app.state.proxy, "close"):
                 await app.state.proxy.close()
 
@@ -166,6 +175,7 @@ def create_app(
     app.state.health_tracker = health_tracker
     app.state.metrics_collector = metrics_collector
     app.state.cache_manager = cache_manager
+    app.state.benchmark_scheduler = benchmark_scheduler
 
     @app.get("/health/models")
     async def health_models(request: Request) -> dict[str, object]:
@@ -411,7 +421,7 @@ def create_app(
             _cache_usage_label(response.usage),
             latency_ms,
             decision.primary.name,
-            decision.tier.name if hasattr(decision, 'tier') else '?',
+            decision.tier.name if hasattr(decision, "tier") else "?",
         )
         _record_observation(
             collector=app.state.collector,
@@ -1218,8 +1228,8 @@ def _record_memory(
     )
     if recorded:
         _logger.debug(
-        "Memory recorded successfully: project=%s model=%s", project, selected_model.name
-    )
+            "Memory recorded successfully: project=%s model=%s", project, selected_model.name
+        )
     else:
         _logger.debug(
             "Memory not recorded: project=%s model=%s reason=min_size_or_filters",
@@ -1249,6 +1259,7 @@ def _model_payload(model: ModelInfo) -> dict[str, object]:
             "context_window": model.context_window,
             "api_base": model.api_base,
             "description": model.description,
+            "benchmark_scores": dict(model.benchmark_scores),
         },
     }
 
@@ -1502,6 +1513,9 @@ def _semantic_inspect_payload(scoring: Any) -> dict[str, object]:
         "semantic_role": signals.get("semantic_role", "none"),
         "semantic_confidence": semantic_confidence,
         "semantic_used": bool(signals.get("semantic_used", False)),
+        "benchmark_top": signals.get("benchmark_top", "none"),
+        "benchmark_affinities": signals.get("benchmark_affinities", {}),
+        "benchmark_used": bool(signals.get("benchmark_used", False)),
         "signals": signals,
     }
 

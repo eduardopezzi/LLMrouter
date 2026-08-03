@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from llmrouter.core.types import RoutingStrategy
@@ -87,6 +87,13 @@ class RoutingConfig(BaseModel):
         description="Fallback provider cooldown duration when a quota reset time is not reported.",
     )
     max_cost_per_request: float | None = None
+    dynamic_benchmark_routing: bool = Field(
+        default=True,
+        description=(
+            "Reorder eligible models using prompt-specific benchmark affinities "
+            "when semantic routing and model benchmark scores are available."
+        ),
+    )
     scorer_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "length": 0.15,
@@ -195,7 +202,21 @@ class SemanticConfig(BaseModel):
     device: str = "cpu"  # cpu | cuda | mps
     cache_dir: str | None = None
     embedding_cache_path: str = "data/semantic_role_embeddings.json"
+    benchmark_knowledge_base_path: str = "benchmark_knowledge_base.py"
+    benchmark_embedding_cache_path: str = "data/semantic_benchmark_embeddings.json"
+    benchmark_similarity_threshold: float = 0.30
+    benchmark_top_k: int = 5
     fallback_to_rule_based: bool = True
+
+
+class BenchmarksConfig(BaseModel):
+    """Locally versioned, externally refreshed benchmark score catalog."""
+
+    refresh_enabled: bool = True
+    refresh_interval_hours: float = Field(default=168.0, gt=0)
+    refresh_timeout_seconds: float = Field(default=30.0, gt=0)
+    catalog_path: str = "data/model_benchmarks.yaml"
+    sources_path: str = "data/benchmark_sources.yaml"
 
 
 class HybridScorerConfig(BaseModel):
@@ -263,9 +284,19 @@ class Settings(BaseSettings):
     server: ServerConfig = Field(default_factory=ServerConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    benchmarks: BenchmarksConfig = Field(default_factory=BenchmarksConfig)
     evaluator: EvaluatorConfig = Field(default_factory=EvaluatorConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     precog: PrecogConfig = Field(default_factory=PrecogConfig)
+    precog_api_key_alias: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "PRECOG_INTERNAL_API_KEY",
+            "LLMROUTER_OBSERVATION_API_KEY",
+        ),
+        exclude=True,
+        repr=False,
+    )
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     semantic: SemanticConfig = Field(default_factory=SemanticConfig)

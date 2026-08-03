@@ -16,120 +16,10 @@ from typing import Any
 
 from llmrouter.core.types import ModelInfo, Provider, Tier
 
-
-# Normalized benchmark scores (0.0-1.0) keyed by canonical model name fragment.
-# These are illustrative defaults based on widely reported leaderboard results.
-# Users can override/extend via the BENCHMARK_SCORES mapping below.
-BENCHMARK_SCORES: dict[str, dict[str, float]] = {
-    # Ollama models
-    "kimi-k2.7-code": {
-        "mmlu": 0.91,
-        "humaneval": 0.89,
-        "gpqa": 0.82,
-        "mt_bench": 0.88,
-        "ruler": 0.85,
-    },
-    "deepseek-v4-pro": {
-        "mmlu": 0.93,
-        "humaneval": 0.91,
-        "gpqa": 0.88,
-        "mt_bench": 0.90,
-        "ruler": 0.87,
-    },
-    "deepseek-v4-flash": {
-        "mmlu": 0.89,
-        "humaneval": 0.86,
-        "gpqa": 0.80,
-        "mt_bench": 0.85,
-        "ruler": 0.84,
-    },
-    "qwen3-coder": {
-        "mmlu": 0.88,
-        "humaneval": 0.87,
-        "gpqa": 0.78,
-        "mt_bench": 0.84,
-        "ruler": 0.82,
-    },
-    "glm-5.2": {
-        "mmlu": 0.85,
-        "humaneval": 0.84,
-        "gpqa": 0.74,
-        "mt_bench": 0.83,
-        "ruler": 0.80,
-    },
-    "north-mini-code": {
-        "mmlu": 0.76,
-        "humaneval": 0.78,
-        "gpqa": 0.62,
-        "mt_bench": 0.75,
-        "ruler": 0.70,
-    },
-    "qwen3.6": {
-        "mmlu": 0.83,
-        "humaneval": 0.80,
-        "gpqa": 0.70,
-        "mt_bench": 0.80,
-        "ruler": 0.78,
-    },
-    "gemma4:31b": {
-        "mmlu": 0.86,
-        "humaneval": 0.84,
-        "gpqa": 0.75,
-        "mt_bench": 0.83,
-        "ruler": 0.81,
-    },
-    "qwen2.5-coder:3b": {
-        "mmlu": 0.68,
-        "humaneval": 0.72,
-        "gpqa": 0.50,
-        "mt_bench": 0.70,
-        "ruler": 0.60,
-    },
-    "deepseek-v3.2": {
-        "mmlu": 0.88,
-        "humaneval": 0.87,
-        "gpqa": 0.80,
-        "mt_bench": 0.86,
-        "ruler": 0.83,
-    },
-    "deepseek-v3.1": {
-        "mmlu": 0.86,
-        "humaneval": 0.84,
-        "gpqa": 0.76,
-        "mt_bench": 0.84,
-        "ruler": 0.80,
-    },
-    # Zhipu models
-    "zhipu/glm-5.2": {
-        "mmlu": 0.85,
-        "humaneval": 0.84,
-        "gpqa": 0.74,
-        "mt_bench": 0.83,
-        "ruler": 0.80,
-    },
-    "zhipu/glm-5.1": {
-        "mmlu": 0.82,
-        "humaneval": 0.80,
-        "gpqa": 0.70,
-        "mt_bench": 0.80,
-        "ruler": 0.76,
-    },
-    # DeepSeek API models
-    "deepseek/deepseek-chat": {
-        "mmlu": 0.89,
-        "humaneval": 0.88,
-        "gpqa": 0.80,
-        "mt_bench": 0.87,
-        "ruler": 0.84,
-    },
-    "deepseek/deepseek-reasoner": {
-        "mmlu": 0.91,
-        "humaneval": 0.90,
-        "gpqa": 0.86,
-        "mt_bench": 0.89,
-        "ruler": 0.85,
-    },
-}
+# Kept as an empty compatibility hook. Scores must come from an explicit
+# ``benchmark_scores`` catalog entry or the versioned refresh catalog; the
+# router never ships estimated/illustrative performance figures.
+BENCHMARK_SCORES: dict[str, dict[str, float]] = {}
 
 # Which benchmarks participate in the composite quality score and with what weight.
 BENCHMARK_WEIGHTS: dict[str, float] = {
@@ -141,6 +31,33 @@ BENCHMARK_WEIGHTS: dict[str, float] = {
 }
 
 assert math.isclose(sum(BENCHMARK_WEIGHTS.values()), 1.0), "benchmark weights must sum to 1.0"
+
+_BENCHMARK_ALIASES: dict[str, str] = {
+    "mmlu": "MMLU-Pro",
+    "mmlupro": "MMLU-Pro",
+    "simpleqa": "SimpleQA",
+    "gpqa": "GPQA Diamond",
+    "gpqadiamond": "GPQA Diamond",
+    "hle": "Humanity's Last Exam (HLE)",
+    "humanityslastexam": "Humanity's Last Exam (HLE)",
+    "hmmt": "HMMT",
+    "imoanswerbench": "IMOAnswerBench",
+    "math": "MATH",
+    "gsm8k": "GSM8K",
+    "livecodebench": "LiveCodeBench",
+    "codeforces": "Codeforces",
+    "mrcr": "MRCR 1M",
+    "mrcr1m": "MRCR 1M",
+    "corpusqa": "CorpusQA 1M",
+    "corpusqa1m": "CorpusQA 1M",
+    "terminalbench20": "TerminalBench 2.0",
+    "swebenchverified": "SWE-Bench Verified",
+    "swebenchpro": "SWE-Bench Pro",
+    "browsecomp": "BrowseComp",
+    "ifeval": "IFEval",
+    "bfcl": "BFCL",
+    "musr": "MuSR",
+}
 
 
 @dataclass(frozen=True)
@@ -166,7 +83,10 @@ def _lookup_benchmark_scores(name: str) -> dict[str, float] | None:
     return None
 
 
-def _benchmark_quality_score(scores: dict[str, float] | None) -> float:
+def _benchmark_quality_score(
+    scores: dict[str, float] | None,
+    weights: dict[str, float] | None = None,
+) -> float:
     """Compute weighted normalized score from available benchmarks.
 
     Missing benchmarks are ignored; if none are available, returns 0.0 so the
@@ -175,17 +95,54 @@ def _benchmark_quality_score(scores: dict[str, float] | None) -> float:
     if not scores:
         return 0.0
 
-    available: dict[str, float] = {
-        name: value
+    active_weights = weights or BENCHMARK_WEIGHTS
+    normalized_weights = {
+        _canonical_benchmark_name(name): value
+        for name, value in active_weights.items()
+        if value > 0
+    }
+    normalized_scores = {
+        _canonical_benchmark_name(name): _normalize_benchmark_value(name, value)
         for name, value in scores.items()
-        if name in BENCHMARK_WEIGHTS and value > 0
+        if value > 0
+    }
+    available = {
+        name: value for name, value in normalized_scores.items() if name in normalized_weights
     }
     if not available:
         return 0.0
 
-    total_weight = sum(BENCHMARK_WEIGHTS[name] for name in available)
-    weighted = sum(scores[name] * BENCHMARK_WEIGHTS[name] for name in available)
+    total_weight = sum(normalized_weights[name] for name in available)
+    weighted = sum(available[name] * normalized_weights[name] for name in available)
     return weighted / total_weight
+
+
+def _canonical_benchmark_name(name: str) -> str:
+    compact = "".join(character for character in name.lower() if character.isalnum())
+    return _BENCHMARK_ALIASES.get(compact, name.strip())
+
+
+def _normalize_benchmark_value(name: str, value: float) -> float:
+    """Normalize percentage, 0–1, and native Codeforces rating values."""
+    numeric = float(value)
+    if _canonical_benchmark_name(name) == "Codeforces" and numeric > 100:
+        return min(1.0, max(0.0, (numeric - 800.0) / (4000.0 - 800.0)))
+    if numeric > 1.0:
+        numeric /= 100.0
+    return min(1.0, max(0.0, numeric))
+
+
+def _benchmark_coverage(
+    scores: dict[str, float] | None,
+    weights: dict[str, float] | None,
+) -> float:
+    if not scores or not weights:
+        return 0.0
+    available = {_canonical_benchmark_name(name) for name in scores}
+    normalized_weights = {
+        _canonical_benchmark_name(name): value for name, value in weights.items() if value > 0
+    }
+    return sum(value for name, value in normalized_weights.items() if name in available)
 
 
 def _tier_score(tier: Tier) -> float:
@@ -229,10 +186,12 @@ def score_model(
     *,
     strategy: str,
     provider_cost_order: list[str],
+    benchmark_weights: dict[str, float] | None = None,
 ) -> ModelScore:
     """Compute a full scoring breakdown for a model under a routing strategy."""
-    benchmark_scores = _lookup_benchmark_scores(model.name)
-    benchmark_score = _benchmark_quality_score(benchmark_scores)
+    benchmark_scores = dict(model.benchmark_scores) or _lookup_benchmark_scores(model.name)
+    benchmark_score = _benchmark_quality_score(benchmark_scores, benchmark_weights)
+    benchmark_coverage = _benchmark_coverage(benchmark_scores, benchmark_weights)
 
     tier_score = _tier_score(model.tier)
     ctx_score = _context_window_score(model.context_window)
@@ -241,39 +200,25 @@ def score_model(
 
     # If no benchmark data is known, fall back to tier as the primary signal.
     effective_benchmark = benchmark_score if benchmark_score > 0 else tier_score
+    if benchmark_weights is not None and benchmark_coverage == 0:
+        effective_benchmark = 0.5 * tier_score
 
     # Quality component: benchmark-first, but metadata smooths out the result.
-    quality_score = (
-        0.70 * effective_benchmark
-        + 0.15 * tier_score
-        + 0.10 * ctx_score
-        + 0.05 * cost
-    )
+    quality_score = 0.70 * effective_benchmark + 0.15 * tier_score + 0.10 * ctx_score + 0.05 * cost
 
     strategy = strategy.lower()
     if strategy == "cost":
-        strategy_score = (
-            0.60 * cost
-            + 0.25 * quality_score
-            + 0.15 * provider_mult
-        )
+        strategy_score = 0.60 * cost + 0.25 * quality_score + 0.15 * provider_mult
     elif strategy == "quality":
         strategy_score = quality_score
     elif strategy == "latency":
         # Prefer cheaper models (often smaller/faster) while keeping quality as tie-break.
-        strategy_score = (
-            0.55 * cost
-            + 0.30 * quality_score
-            + 0.15 * provider_mult
-        )
+        strategy_score = 0.55 * cost + 0.30 * quality_score + 0.15 * provider_mult
     else:
         # balanced: penalize very expensive models, reward quality and provider ranking.
         cost_penalty = max(0.0, 1.0 - model.cost_ratio / 50.0)
         strategy_score = (
-            0.55 * quality_score
-            + 0.20 * ctx_score
-            + 0.15 * provider_mult
-            + 0.10 * cost_penalty
+            0.55 * quality_score + 0.20 * ctx_score + 0.15 * provider_mult + 0.10 * cost_penalty
         )
 
     return ModelScore(
@@ -288,6 +233,8 @@ def score_model(
             "strategy": strategy,
             "provider_cost_order": provider_cost_order,
             "benchmark_breakdown": benchmark_scores,
+            "benchmark_weights": benchmark_weights,
+            "benchmark_coverage": round(benchmark_coverage, 4),
         },
     )
 
@@ -297,10 +244,19 @@ def rank_models(
     *,
     strategy: str,
     provider_cost_order: list[str],
+    benchmark_weights: dict[str, float] | None = None,
 ) -> list[ModelInfo]:
     """Return models sorted by composite benchmark+metadata score descending."""
     scored = [
-        (model, score_model(model, strategy=strategy, provider_cost_order=provider_cost_order))
+        (
+            model,
+            score_model(
+                model,
+                strategy=strategy,
+                provider_cost_order=provider_cost_order,
+                benchmark_weights=benchmark_weights,
+            ),
+        )
         for model in models
     ]
     scored.sort(key=lambda item: item[1].strategy_score, reverse=True)

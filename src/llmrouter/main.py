@@ -10,6 +10,7 @@ import sys
 
 import uvicorn
 
+from llmrouter.benchmark_catalog import BenchmarkRefreshError, refresh_benchmark_catalog
 from llmrouter.cli_panel import (
     promote_model_priority,
     render_model_health,
@@ -21,9 +22,9 @@ from llmrouter.cli_panel import (
     set_provider_cost_order,
     set_routing_strategy,
 )
-from llmrouter.core.health import InMemoryHealthStore, ModelHealthTracker
-from llmrouter.config import get_settings, reload_settings
+from llmrouter.config import Settings, get_settings, reload_settings
 from llmrouter.contract_publisher import ContractPublisher
+from llmrouter.core.health import InMemoryHealthStore, ModelHealthTracker
 from llmrouter.cross_repository import (
     BreakingChangeDetector,
     ContractRegistry,
@@ -238,8 +239,37 @@ def _parse_args() -> argparse.Namespace:
         help="Output scorer details as JSON.",
     )
 
+    refresh_parser = subparsers.add_parser(
+        "benchmarks-refresh",
+        help="Refresh the local benchmark catalog from declared official sources.",
+    )
+    refresh_parser.add_argument(
+        "--sources",
+        type=str,
+        default=None,
+        help="Source definitions YAML (default: from config).",
+    )
+    refresh_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Generated local score catalog YAML (default: from config).",
+    )
+    refresh_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Do not write; return status 1 when a catalog update is available.",
+    )
+    refresh_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Per-source network timeout in seconds.",
+    )
+
     parser.add_argument(
-        "--debug", "-d",
+        "--debug",
+        "-d",
         action="store_true",
         default=False,
         help="Enable debug mode with detailed request/routing/decision logging.",
@@ -251,7 +281,8 @@ def _parse_args() -> argparse.Namespace:
         help="Server host (default: from config, usually 0.0.0.0).",
     )
     parser.add_argument(
-        "--port", "-p",
+        "--port",
+        "-p",
         type=int,
         default=None,
         help="Server port (default: from config, usually 12345).",
@@ -278,7 +309,10 @@ def main() -> None:
     settings = get_settings()
 
     if args.command == "export-contracts":
-        registry = build_registry(args.models_file or settings.models_file)
+        registry = build_registry(
+            args.models_file or settings.models_file,
+            benchmark_catalog_path=settings.benchmarks.catalog_path,
+        )
         output = (
             resolve_project_contract_path(
                 args.contracts_root,
@@ -301,7 +335,10 @@ def main() -> None:
         return
 
     if args.command == "publish-contracts":
-        registry = build_registry(args.models_file or settings.models_file)
+        registry = build_registry(
+            args.models_file or settings.models_file,
+            benchmark_catalog_path=settings.benchmarks.catalog_path,
+        )
         result = ContractPublisher(
             repository_url=args.repo,
             branch=args.branch,
@@ -317,7 +354,10 @@ def main() -> None:
 
     if args.command == "panel":
         models_file = args.models_file or settings.models_file
-        registry = build_registry(models_file)
+        registry = build_registry(
+            models_file,
+            benchmark_catalog_path=settings.benchmarks.catalog_path,
+        )
         health_tracker = _build_health_tracker_from_settings(settings)
         changed = False
         if args.list_model_priorities:
@@ -326,7 +366,10 @@ def main() -> None:
         if args.promote_model:
             promote_model_priority(models_file, args.promote_model)
             print(f"Promoted model to priority 1: {args.promote_model}")
-            registry = build_registry(models_file)
+            registry = build_registry(
+                models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+            )
             print(render_model_priorities(registry, limit=args.priority_limit))
             return
         if args.set_strategy:
@@ -339,9 +382,7 @@ def main() -> None:
             changed = True
         if args.set_provider_cost_order:
             providers = [
-                item.strip()
-                for item in args.set_provider_cost_order.split(",")
-                if item.strip()
+                item.strip() for item in args.set_provider_cost_order.split(",") if item.strip()
             ]
             set_provider_cost_order(args.env_file, providers)
             print(f"Updated provider cost order: {', '.join(providers)}")
@@ -355,7 +396,10 @@ def main() -> None:
                 return
             set_model_rollout_percentage(models_file, rollout_model, rollout_pct)
             print(f"Set rollout_percentage={rollout_pct:g} for {rollout_model}")
-            registry = build_registry(models_file)
+            registry = build_registry(
+                models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+            )
             print(render_model_priorities(registry, limit=args.priority_limit))
             return
         if args.stats or changed:
@@ -363,7 +407,9 @@ def main() -> None:
                 settings = reload_settings()
             print(render_panel_summary(settings, registry))
             return
-        run_interactive_panel(settings, registry, health_tracker=health_tracker, env_path=args.env_file)
+        run_interactive_panel(
+            settings, registry, health_tracker=health_tracker, env_path=args.env_file
+        )
         return
 
     if args.command == "health":
@@ -373,10 +419,7 @@ def main() -> None:
         if args.json:
             payload = {
                 "window_minutes": tracker.window_minutes,
-                "models": [
-                    {**h.to_dict(), "score": scores.get(h.model_name, None)}
-                    for h in rows
-                ],
+                "models": [{**h.to_dict(), "score": scores.get(h.model_name, None)} for h in rows],
             }
             print(json.dumps(payload, indent=2, default=str))
         else:
@@ -401,6 +444,29 @@ def main() -> None:
             print(f"semantic_role: {payload['semantic_role']}")
             print(f"semantic_confidence: {payload['semantic_confidence']}")
             print(f"semantic_used: {payload['semantic_used']}")
+            print(f"benchmark_top: {payload['benchmark_top']}")
+            print(f"benchmark_affinities: {payload['benchmark_affinities']}")
+            print(f"benchmark_used: {payload['benchmark_used']}")
+        return
+
+    if args.command == "benchmarks-refresh":
+        try:
+            report = refresh_benchmark_catalog(
+                args.sources or settings.benchmarks.sources_path,
+                args.output or settings.benchmarks.catalog_path,
+                timeout=args.timeout,
+                write=not args.check,
+            )
+        except BenchmarkRefreshError as exc:
+            print(f"Benchmark refresh failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        status = "changed" if report.changed else "up to date"
+        print(
+            f"Benchmark catalog {status}: {report.models_updated} model(s), "
+            f"{report.scores_updated} score(s) checked ({report.output_path})"
+        )
+        if args.check and report.changed:
+            sys.exit(1)
         return
 
     # Configure logging based on --debug flag
@@ -472,6 +538,9 @@ def _semantic_inspect_payload(scoring: object) -> dict[str, object]:
         "semantic_role": signals.get("semantic_role", "none"),
         "semantic_confidence": semantic_confidence,
         "semantic_used": bool(signals.get("semantic_used", False)),
+        "benchmark_top": signals.get("benchmark_top", "none"),
+        "benchmark_affinities": signals.get("benchmark_affinities", {}),
+        "benchmark_used": bool(signals.get("benchmark_used", False)),
         "signals": signals,
     }
 

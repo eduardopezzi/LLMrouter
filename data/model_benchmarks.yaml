@@ -1,0 +1,53 @@
+generated_at: '2026-08-03T16:30:17Z'
+models:
+  ollama/kimi-k2.7-code:cloud:
+    benchmark_scores:
+      Kimi Claw 24/7 Bench:
+        collected_at: '2026-08-03T16:30:17Z'
+        methodology: Kimi Code CLI with thinking; see the model card for per-benchmark
+          details.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md
+        value: 46.9
+      Kimi Code Bench v2:
+        collected_at: '2026-08-03T16:30:17Z'
+        methodology: Kimi Code CLI with thinking; see the model card for per-benchmark
+          details.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md
+        value: 62.0
+      MCP Atlas:
+        collected_at: '2026-08-03T16:30:17Z'
+        methodology: Kimi Code CLI with thinking; see the model card for per-benchmark
+          details.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md
+        value: 76.0
+      MCP Mark Verified:
+        collected_at: '2026-08-03T16:30:17Z'
+        methodology: Kimi Code CLI with thinking; see the model card for per-benchmark
+          details.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md
+        value: 81.1
+      MLS Bench Lite:
+        collected_at: '2026-08-03T16:30:17Z'
+        methodology: Kimi Code CLI with thinking; see the model card for per-benchmark
+          details.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md
+        value: 35.1
+      Program Bench:
+        collected_at: '2026-08-03T16:30:17Z'
+        methodology: Kimi Code CLI with thinking; see the model card for per-benchmark
+          details.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md
+        value: 53.6
+schema_version: 1

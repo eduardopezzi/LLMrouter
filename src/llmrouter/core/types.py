@@ -85,6 +85,9 @@ class ModelInfo:
         rollout_percentage: Traffic percentage this model receives during
             a canary/blue-green rollout (0–100). Defaults to ``100`` (full traffic).
             Set to ``0`` to instantly remove from routing without deleting the entry.
+        benchmark_scores: Raw public benchmark measurements as ``(name, value)``
+            pairs. Percentages may use 0–100; normalized values may use 0–1;
+            Codeforces may use its native rating scale.
     """
 
     name: str
@@ -99,6 +102,7 @@ class ModelInfo:
     api_base: str | None = None
     description: str = ""
     rollout_percentage: float = 100.0
+    benchmark_scores: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         """Validate rollout_percentage range."""

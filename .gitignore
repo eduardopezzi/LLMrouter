@@ -31,6 +31,10 @@ dist/
 !.env.example
 config/config.yaml
 data/
+!data/
+data/*
+!data/benchmark_sources.yaml
+!data/model_benchmarks.yaml
 *.db
 *.sqlite
 *.sqlite3

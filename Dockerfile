@@ -13,8 +13,10 @@ RUN addgroup --system llmrouter \
     && adduser --system --ingroup llmrouter --home /app llmrouter
 
 COPY pyproject.toml README.md ./
+COPY benchmark_knowledge_base.py ./
 COPY src ./src
 COPY config ./config
+COPY data ./data
 
 RUN pip install --upgrade pip \
     && pip install .

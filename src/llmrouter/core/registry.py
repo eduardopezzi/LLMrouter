@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml
 
+from llmrouter.benchmark_catalog import load_catalog_scores
 from llmrouter.core.types import ModelInfo, Provider, Tier
 
 
@@ -44,13 +45,18 @@ class ModelRegistry:
         return ModelRegistry(models=tuple(result))
 
 
-def load_model_registry(path: str | Path) -> ModelRegistry:
+def load_model_registry(
+    path: str | Path,
+    *,
+    benchmark_catalog_path: str | Path | None = None,
+) -> ModelRegistry:
     """Load model definitions from a YAML catalog."""
     data = _load_yaml(Path(path))
     raw_models = data.get("models", [])
     if not isinstance(raw_models, list):
         raise ValueError("models file must contain a top-level 'models' list")
-    models = [_model_from_mapping(item) for item in raw_models]
+    refreshed_scores = load_catalog_scores(benchmark_catalog_path) if benchmark_catalog_path else {}
+    models = [_model_from_mapping(item, refreshed_scores) for item in raw_models]
     return ModelRegistry(models=tuple(sorted(models, key=lambda model: model.priority)))
 
 
@@ -64,7 +70,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _model_from_mapping(item: object) -> ModelInfo:
+def _model_from_mapping(
+    item: object,
+    refreshed_scores: dict[str, dict[str, float]] | None = None,
+) -> ModelInfo:
     if not isinstance(item, dict):
         raise ValueError("each model entry must be a mapping")
 
@@ -78,6 +87,8 @@ def _model_from_mapping(item: object) -> ModelInfo:
     # Let ModelInfo.__post_init__ validate the range; do NOT clamp silently.
     rollout_percentage = float(item.get("rollout_percentage", 100.0))
 
+    configured_scores = dict(_benchmark_scores(item.get("benchmark_scores", {})))
+    configured_scores.update((refreshed_scores or {}).get(name, {}))
     return ModelInfo(
         name=name,
         provider=provider,
@@ -91,6 +102,7 @@ def _model_from_mapping(item: object) -> ModelInfo:
         api_base=_optional_str(item.get("api_base")),
         description=_optional_str(item.get("description")) or "",
         rollout_percentage=rollout_percentage,
+        benchmark_scores=tuple(sorted(configured_scores.items())),
     )
 
 
@@ -137,3 +149,22 @@ def _string_set(value: object) -> frozenset[str]:
     if not isinstance(value, list):
         return frozenset()
     return frozenset(str(item) for item in value if isinstance(item, str))
+
+
+def _benchmark_scores(value: object) -> tuple[tuple[str, float], ...]:
+    """Parse optional raw benchmark measurements from a model catalog entry."""
+    if not isinstance(value, dict):
+        return ()
+    parsed: list[tuple[str, float]] = []
+    for name, score in value.items():
+        if (
+            not isinstance(name, str)
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float, str))
+        ):
+            continue
+        try:
+            parsed.append((name, float(score)))
+        except (TypeError, ValueError):
+            continue
+    return tuple(sorted(parsed))

@@ -10,8 +10,12 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from llmrouter.api.routes import create_app
+from llmrouter.benchmark_catalog import RefreshReport
+from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
 from llmrouter.cli_panel import demote_model_priority
 from llmrouter.config import ProviderConfig, Settings, get_settings
+from llmrouter.core.benchmark_affinity import BenchmarkAffinityScorer
+from llmrouter.core.cache import CacheManager, SQLiteCacheBackend
 from llmrouter.core.cooldown import ProviderCooldownStore, is_quota_exhaustion_error
 from llmrouter.core.health import (
     HealthBackend,
@@ -21,7 +25,6 @@ from llmrouter.core.health import (
     ReviewQualitySource,
     SQLiteHealthStore,
 )
-from llmrouter.core.cache import CacheManager, SQLiteCacheBackend
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry, load_model_registry
 from llmrouter.core.router import MultiModelRouter
@@ -57,11 +60,12 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     """Create a fully wired FastAPI app from configuration."""
     resolved_settings = settings or get_settings()
     _ensure_runtime_logging(debug=resolved_settings.debug)
-    registry = build_registry(resolved_settings.models_file)
+    registry = build_registry(
+        resolved_settings.models_file,
+        benchmark_catalog_path=resolved_settings.benchmarks.catalog_path,
+    )
     health_tracker = (
-        _build_health_tracker(resolved_settings)
-        if resolved_settings.health.enabled
-        else None
+        _build_health_tracker(resolved_settings) if resolved_settings.health.enabled else None
     )
     provider_cooldowns = ProviderCooldownStore(
         default_seconds=resolved_settings.routing.quota_cooldown_seconds
@@ -76,6 +80,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         rollout_config=resolved_settings.rollout,
         provider_cooldowns=provider_cooldowns,
         client_provider_affinity=resolved_settings.routing.client_provider_affinity,
+        dynamic_benchmark_routing=resolved_settings.routing.dynamic_benchmark_routing,
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
@@ -88,9 +93,10 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         on_provider_error=_priority_demoter(
             resolved_settings.models_file,
             router,
-            provider_cooldowns,
-            app_holder,
-            proxy_holder,
+            benchmark_catalog_path=resolved_settings.benchmarks.catalog_path,
+            provider_cooldowns=provider_cooldowns,
+            app_holder=app_holder,
+            proxy_holder=proxy_holder,
         ),
         health_tracker=health_tracker,
         provider_cooldowns=provider_cooldowns,
@@ -123,16 +129,35 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         if collector is not None
         else None
     )
+    benchmark_scheduler = (
+        BenchmarkRefreshScheduler(
+            sources_path=resolved_settings.benchmarks.sources_path,
+            catalog_path=resolved_settings.benchmarks.catalog_path,
+            interval_seconds=resolved_settings.benchmarks.refresh_interval_hours * 60 * 60,
+            timeout=resolved_settings.benchmarks.refresh_timeout_seconds,
+            on_catalog_changed=_benchmark_catalog_reloader(
+                resolved_settings,
+                router,
+                app_holder,
+            ),
+        )
+        if resolved_settings.benchmarks.refresh_enabled
+        else None
+    )
+    precog_api_key = _resolve_precog_api_key(resolved_settings)
     precog_publisher = (
         PrecogPublisher(
             base_url=resolved_settings.precog.base_url,
-            api_key=resolved_settings.precog.api_key,
+            api_key=precog_api_key,
             timeout=resolved_settings.precog.timeout,
         )
         if resolved_settings.precog.enabled
         else None
     )
-    memory_store = _build_memory_store(resolved_settings)
+    memory_store = _build_memory_store(
+        resolved_settings,
+        precog_api_key=precog_api_key,
+    )
     app = create_app(
         registry=registry,
         router=router,
@@ -150,16 +175,26 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         health_tracker=health_tracker,
         metrics_collector=metrics_collector,
         cache_manager=cache_manager,
+        benchmark_scheduler=benchmark_scheduler,
     )
     app_holder["app"] = app
     return app
 
 
-def _precog_memory_config(settings: Settings) -> PrecogMemoryConfig:
+def _resolve_precog_api_key(settings: Settings) -> str | None:
+    """Resolve the shared PRecog token using both projects' supported names."""
+    return resolve_api_key(settings.precog) or settings.precog_api_key_alias
+
+
+def _precog_memory_config(
+    settings: Settings,
+    *,
+    api_key: str | None = None,
+) -> PrecogMemoryConfig:
     return PrecogMemoryConfig(
         enabled=True,
         base_url=settings.precog.base_url,
-        api_key=settings.precog.api_key,
+        api_key=api_key if api_key is not None else _resolve_precog_api_key(settings),
         timeout=settings.precog.timeout,
         default_project=settings.memory.default_project,
         top_k=settings.memory.top_k,
@@ -186,15 +221,17 @@ def _local_memory_config(settings: Settings) -> MemoryConfig:
 
 def _build_memory_store(
     settings: Settings,
+    *,
+    precog_api_key: str | None = None,
 ) -> SQLiteMemoryStore | PrecogMemoryStore | HybridMemoryStore | None:
     if not settings.memory.enabled:
         return None
     backend = settings.memory.backend.lower()
     if backend == "precog":
-        return PrecogMemoryStore(_precog_memory_config(settings))
+        return PrecogMemoryStore(_precog_memory_config(settings, api_key=precog_api_key))
     if backend == "hybrid":
         return HybridMemoryStore(
-            _precog_memory_config(settings),
+            _precog_memory_config(settings, api_key=precog_api_key),
             _local_memory_config(settings),
         )
     return SQLiteMemoryStore(_local_memory_config(settings))
@@ -209,6 +246,7 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
     rule_scorer = PromptScorer(_scorer_weights(settings.routing.scorer_weights))
     if not settings.semantic.enabled:
         return rule_scorer
+
     try:
         semantic_scorer = SemanticPromptScorer(
             model_name=settings.semantic.model_name,
@@ -216,9 +254,17 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
             cache_dir=settings.semantic.cache_dir,
             embedding_cache_path=settings.semantic.embedding_cache_path,
         )
+        benchmark_scorer = BenchmarkAffinityScorer(
+            semantic_scorer.embedder,
+            knowledge_base_path=settings.semantic.benchmark_knowledge_base_path,
+            embedding_cache_path=settings.semantic.benchmark_embedding_cache_path,
+            similarity_threshold=settings.semantic.benchmark_similarity_threshold,
+            top_k=settings.semantic.benchmark_top_k,
+        )
         return HybridScorer(
             rule_scorer=rule_scorer,
             semantic_scorer=semantic_scorer,
+            benchmark_scorer=benchmark_scorer,
             rule_weight=settings.hybrid.rule_weight,
             semantic_weight=settings.hybrid.semantic_weight,
             semantic_confidence_threshold=settings.hybrid.semantic_confidence_threshold,
@@ -233,6 +279,26 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
         return rule_scorer
 
 
+def _benchmark_catalog_reloader(
+    settings: Settings,
+    router: MultiModelRouter,
+    app_holder: dict[str, FastAPI],
+) -> Callable[[RefreshReport], None]:
+    """Reload scores atomically after a background catalog update."""
+
+    def reload_catalog(_report: RefreshReport) -> None:
+        registry = build_registry(
+            settings.models_file,
+            benchmark_catalog_path=settings.benchmarks.catalog_path,
+        )
+        router.replace_registry(registry)
+        app = app_holder.get("app")
+        if app is not None:
+            app.state.registry = registry
+
+    return reload_catalog
+
+
 def _ensure_runtime_logging(*, debug: bool) -> None:
     """Ensure LLMrouter logs are visible when loaded directly by Uvicorn."""
     logger = logging.getLogger("llmrouter")
@@ -245,12 +311,16 @@ def _ensure_runtime_logging(*, debug: bool) -> None:
     logger.addHandler(handler)
 
 
-def build_registry(models_file: str) -> ModelRegistry:
+def build_registry(
+    models_file: str,
+    *,
+    benchmark_catalog_path: str | None = None,
+) -> ModelRegistry:
     """Load the model registry, returning an empty registry when no file exists."""
     path = _ensure_models_file(Path(models_file))
     if not path.exists():
         return ModelRegistry()
-    return load_model_registry(path)
+    return load_model_registry(path, benchmark_catalog_path=benchmark_catalog_path)
 
 
 def _ensure_models_file(path: Path) -> Path:
@@ -270,6 +340,8 @@ def _priority_demoter(
     provider_cooldowns: ProviderCooldownStore | None = None,
     app_holder: dict[str, FastAPI] | None = None,
     proxy_holder: dict[str, ProviderProxy] | None = None,
+    *,
+    benchmark_catalog_path: str | None = None,
 ) -> Callable[[ModelInfo, ProviderError], None]:
     def demoter(model: ModelInfo, exc: ProviderError) -> None:
         if not _is_insufficient_balance_error(exc):
@@ -286,18 +358,17 @@ def _priority_demoter(
                 proxy.disable_provider(model.provider)
             demoted = demote_model_priority(models_file, model.name)
             if demoted:
-                registry = build_registry(models_file)
+                registry = build_registry(
+                    models_file,
+                    benchmark_catalog_path=benchmark_catalog_path,
+                )
                 router.replace_registry(registry)
                 app = app_holder.get("app") if app_holder is not None else None
                 if app is not None:
                     app.state.registry = registry
         logging.getLogger("llmrouter.runtime").warning(
             "%s provider '%s' for model '%s' after balance/quota error: %s",
-            (
-                "Put in quota cooldown"
-                if cooldown_entry is not None
-                else "Disabled"
-            ),
+            ("Put in quota cooldown" if cooldown_entry is not None else "Disabled"),
             model.provider.value,
             model.name,
             exc,

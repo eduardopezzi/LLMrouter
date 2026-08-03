@@ -4,7 +4,6 @@ import math
 
 import pytest
 
-from llmrouter.cli_panel import _extract_json_object
 from llmrouter.cli_panel import _extract_json_object as extract_json
 from llmrouter.core.benchmark_scorer import (
     BENCHMARK_WEIGHTS,
@@ -12,6 +11,7 @@ from llmrouter.core.benchmark_scorer import (
     _context_window_score,
     _cost_score,
     _lookup_benchmark_scores,
+    _normalize_benchmark_value,
     _provider_multiplier,
     _tier_score,
     rank_models,
@@ -24,11 +24,8 @@ def test_benchmark_weights_sum_to_one() -> None:
     assert math.isclose(sum(BENCHMARK_WEIGHTS.values()), 1.0)
 
 
-def test_lookup_benchmark_scores_matches_name_fragment() -> None:
-    scores = _lookup_benchmark_scores("ollama/deepseek-v4-pro:cloud")
-    assert scores is not None
-    assert "mmlu" in scores
-    assert 0 < scores["mmlu"] <= 1
+def test_lookup_benchmark_scores_is_empty_without_explicit_legacy_overrides() -> None:
+    assert _lookup_benchmark_scores("ollama/deepseek-v4-pro:cloud") is None
 
 
 def test_lookup_benchmark_scores_returns_none_for_unknown_model() -> None:
@@ -45,6 +42,18 @@ def test_benchmark_quality_score_ignores_missing_benchmarks() -> None:
 def test_benchmark_quality_score_returns_zero_when_empty() -> None:
     assert _benchmark_quality_score({}) == 0.0
     assert _benchmark_quality_score(None) == 0.0
+
+
+def test_normalize_benchmark_values_supports_percent_and_codeforces_elo() -> None:
+    assert _normalize_benchmark_value("MMLU-Pro", 84.2) == pytest.approx(0.842)
+    assert _normalize_benchmark_value("MMLU-Pro", 0.842) == pytest.approx(0.842)
+    assert _normalize_benchmark_value("Codeforces", 2816) == pytest.approx(0.63)
+
+
+def test_benchmark_quality_score_uses_dynamic_weights() -> None:
+    scores = {"MMLU-Pro": 90.0, "TerminalBench 2.0": 40.0}
+    weights = {"MMLU-Pro": 0.25, "TerminalBench 2.0": 0.75}
+    assert _benchmark_quality_score(scores, weights) == pytest.approx(0.525)
 
 
 def test_tier_score_normalizes_values() -> None:
@@ -82,6 +91,7 @@ def test_score_model_returns_breakdown() -> None:
         cost_per_1k_output=0.002,
         context_window=1_000_000,
         max_tokens=1_000_000,
+        benchmark_scores=(("MMLU-Pro", 90.0),),
     )
     score = score_model(model, strategy="balanced", provider_cost_order=["ollama"])
 
@@ -139,6 +149,6 @@ def test_rank_models_orders_by_strategy_score_descending() -> None:
 
 def test_extract_json_object_fenced_and_plain() -> None:
     assert extract_json('{"a":1}') == '{"a":1}'
-    assert extract_json("```json\n{\"a\":1}\n```") == '{"a":1}'
-    assert extract_json("x {\"a\":1} y") == '{"a":1}'
+    assert extract_json('```json\n{"a":1}\n```') == '{"a":1}'
+    assert extract_json('x {"a":1} y') == '{"a":1}'
     assert extract_json("no json") is None

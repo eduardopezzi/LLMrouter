@@ -83,15 +83,16 @@ class ContractRegistry:
                     "max_tokens": model.max_tokens,
                     "priority": model.priority,
                     "api_base": model.api_base,
+                    **(
+                        {"benchmark_scores": dict(model.benchmark_scores)}
+                        if model.benchmark_scores
+                        else {}
+                    ),
                 }
                 for model in sorted(self.registry.all(), key=lambda model: model.name)
             ],
             "routing_roles": sorted(
-                {
-                    capability
-                    for model in self.registry.all()
-                    for capability in model.capabilities
-                }
+                {capability for model in self.registry.all() for capability in model.capabilities}
             ),
         }
 
@@ -414,6 +415,9 @@ def _default_endpoints() -> tuple[dict[str, object], ...]:
                 "semantic_role": "str",
                 "semantic_confidence": "float",
                 "semantic_used": "bool",
+                "benchmark_top": "str",
+                "benchmark_affinities": "dict[str, float]",
+                "benchmark_used": "bool",
                 "signals": "object",
             },
         },

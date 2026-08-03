@@ -1,0 +1,18 @@
+# Only primary sources with a declared, stable table format belong here.
+# Add one entry per model card/official leaderboard. The weekly workflow refuses
+# to overwrite the approved catalog if any declared source no longer validates.
+sources:
+  - model: "ollama/kimi-k2.7-code:cloud"
+    source_type: "official_model_card"
+    url: "https://huggingface.co/moonshotai/Kimi-K2.7-Code/raw/main/README.md"
+    format: "html_table"
+    benchmark_column: "Benchmark"
+    model_column: "Kimi K2.7 Code"
+    methodology: "Kimi Code CLI with thinking; see the model card for per-benchmark details."
+    metrics:
+      "Kimi Code Bench v2": "Kimi Code Bench v2"
+      "Program Bench": "Program Bench"
+      "MLS Bench Lite": "MLS Bench Lite"
+      "Kimi Claw 24/7 Bench": "Kimi Claw 24/7 Bench"
+      "MCP Atlas": "MCP Atlas"
+      "MCP Mark Verified": "MCP Mark Verified"

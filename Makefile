@@ -9,7 +9,7 @@ CONTRACT ?= contracts/llmrouter.contract.json
 PREVIOUS_CONTRACT ?= contracts/previous.llmrouter.contract.json
 CONTRACTS_REPO ?= https://github.com/Vieli-Tech/phoenix_versions.git
 
-.PHONY: help install install-dev run run-reload run-debug panel panel-stats contracts-export contracts-check contracts-diff contracts-publish test lint format typecheck clean docker-build docker-run
+.PHONY: help install install-dev run run-reload run-debug panel panel-stats contracts-export contracts-check contracts-diff contracts-publish benchmarks-refresh benchmarks-check test lint format typecheck clean docker-build docker-run
 
 help: ## Mostra os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -46,6 +46,12 @@ contracts-diff: ## Mostra diferencas entre PREVIOUS_CONTRACT e CONTRACT
 
 contracts-publish: ## Publica contrato vigente no repo GitHub central
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main publish-contracts --repo $(CONTRACTS_REPO)
+
+benchmarks-refresh: ## Atualiza notas a partir das fontes oficiais declaradas
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main benchmarks-refresh
+
+benchmarks-check: ## Verifica atualizações de benchmarks sem alterar arquivos
+	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main benchmarks-refresh --check
 
 test: ## Executa os testes
 	pytest

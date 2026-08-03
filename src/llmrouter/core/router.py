@@ -19,10 +19,11 @@ import time
 from typing import Any, Protocol
 
 from llmrouter.config import RolloutConfig
+from llmrouter.core.benchmark_scorer import score_model
 from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.scorer import PromptScorer, ScoringResult
+from llmrouter.core.scorer import ScoringResult
 from llmrouter.core.types import (
     ChatRequest,
     ModelInfo,
@@ -71,8 +72,13 @@ async def _log_routing_metrics() -> None:
         _logger.info(
             "RoutingMetrics total=%d tiers=[T0=%.1f%% T1=%.1f%% T2=%.1f%% T3=%.1f%%] "
             "explicit=%.1f%% fallback_available=%.1f%%",
-            total, t0_pct, t1_pct, t2_pct, t3_pct,
-            explicit_pct, fallback_available_pct,
+            total,
+            t0_pct,
+            t1_pct,
+            t2_pct,
+            t3_pct,
+            explicit_pct,
+            fallback_available_pct,
         )
 
 
@@ -89,12 +95,19 @@ async def _increment_routing_metric(key: str, delta: int = 1) -> None:
     await _log_routing_metrics()
 
 
-
 class SelectionStrategy(Protocol):
     """Protocol for tier-internal model selection strategies."""
 
     def set_health_tracker(self, tracker: ModelHealthTracker | None) -> None:
         """Optionally wire a health tracker for adaptive routing."""
+        ...
+
+
+class PromptScoringStrategy(Protocol):
+    """Structural interface implemented by rule-based and hybrid scorers."""
+
+    def score(self, prompt: str) -> ScoringResult:
+        """Score one prompt and return routing signals."""
         ...
 
     def select(self, models: list[ModelInfo], constraints: RoutingConstraints) -> list[ModelInfo]:
@@ -310,7 +323,7 @@ class MultiModelRouter:
     def __init__(
         self,
         registry: ModelRegistry,
-        scorer: PromptScorer,
+        scorer: PromptScoringStrategy,
         strategy: RoutingStrategy = RoutingStrategy.COST,
         fallback_count: int = 2,
         provider_cost_order: list[str] | None = None,
@@ -318,16 +331,20 @@ class MultiModelRouter:
         rollout_config: RolloutConfig | None = None,
         provider_cooldowns: ProviderCooldownStore | None = None,
         client_provider_affinity: bool = True,
+        dynamic_benchmark_routing: bool = True,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
-        self._strategy = get_strategy(strategy, provider_cost_order)
+        self._routing_strategy = RoutingStrategy(strategy)
+        self._provider_cost_order = provider_cost_order or ["zai", "ollama"]
+        self._strategy = get_strategy(self._routing_strategy, self._provider_cost_order)
         self._fallback_count = fallback_count
         self._unavailable_providers: set[Provider] = set()
         self._health_tracker = health_tracker
         self._rollout_config = rollout_config
         self._provider_cooldowns = provider_cooldowns
         self._client_provider_affinity = client_provider_affinity
+        self._dynamic_benchmark_routing = dynamic_benchmark_routing
         if health_tracker is not None:
             self._strategy.set_health_tracker(health_tracker)
 
@@ -411,7 +428,8 @@ class MultiModelRouter:
                     key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0.0,
                     reverse=True,
                 )
-            ) or "none",
+            )
+            or "none",
         )
 
         # Get candidate models for the recommended tier
@@ -442,6 +460,7 @@ class MultiModelRouter:
 
         # Apply selection strategy
         ordered = _unique_models(self._strategy.select(candidates, constraints))
+        ordered = self._apply_dynamic_benchmark_ranking(ordered, scoring)
         ordered = self._apply_client_provider_affinity(ordered, request, constraints)
         primary = ordered[0]
         fallbacks = ordered[1 : 1 + self._fallback_count]
@@ -489,20 +508,14 @@ class MultiModelRouter:
             rollout_sampled=rollout_sampled,
         )
 
-    def _get_candidates(
-        self, tier: Tier, constraints: RoutingConstraints
-    ) -> list[ModelInfo]:
+    def _get_candidates(self, tier: Tier, constraints: RoutingConstraints) -> list[ModelInfo]:
         """Get candidate models for a tier, filtered by constraints."""
         # Start with models in the recommended tier
         candidates = self._available_models(self._registry.by_tier(tier))
 
         # If no models in tier, try adjacent tiers
         if not candidates:
-            fallback_tiers = [
-                candidate_tier
-                for candidate_tier in Tier
-                if candidate_tier != tier
-            ]
+            fallback_tiers = [candidate_tier for candidate_tier in Tier if candidate_tier != tier]
             fallback_tiers.sort(
                 key=lambda candidate_tier: (
                     candidate_tier.value < tier.value,
@@ -521,7 +534,8 @@ class MultiModelRouter:
             ]
             if not candidates:
                 candidates = [
-                    m for m in self._registry.all()
+                    m
+                    for m in self._registry.all()
                     if constraints.required_capabilities <= m.capabilities
                 ]
                 candidates = self._available_models(candidates)
@@ -539,6 +553,57 @@ class MultiModelRouter:
             all_models = [m for m in all_models if m.name != primary.name]
         ordered = _unique_models(self._strategy.select(all_models, constraints))
         return ordered[: self._fallback_count]
+
+    def _apply_dynamic_benchmark_ranking(
+        self,
+        ordered: list[ModelInfo],
+        scoring: ScoringResult,
+    ) -> list[ModelInfo]:
+        """Reorder candidates using prompt-specific benchmark affinity weights."""
+        if not self._dynamic_benchmark_routing or len(ordered) < 2:
+            return ordered
+        raw_weights = scoring.signals.get("benchmark_affinities")
+        if not isinstance(raw_weights, dict) or not raw_weights:
+            return ordered
+        weights = {
+            str(name): float(value)
+            for name, value in raw_weights.items()
+            if isinstance(name, str)
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value > 0
+        }
+        if not weights:
+            return ordered
+
+        scored = [
+            (
+                model,
+                score_model(
+                    model,
+                    strategy=self._routing_strategy.value,
+                    provider_cost_order=self._provider_cost_order,
+                    benchmark_weights=weights,
+                ),
+            )
+            for model in ordered
+        ]
+        if not any(item.details.get("benchmark_coverage", 0.0) > 0 for _, item in scored):
+            return ordered
+        base_index = {model.name: index for index, model in enumerate(ordered)}
+        scored.sort(
+            key=lambda pair: (
+                -pair[1].strategy_score,
+                base_index[pair[0].name],
+            )
+        )
+        reranked = [model for model, _ in scored]
+        _logger.debug(
+            "Dynamic benchmark routing weights=%s order=%s",
+            weights,
+            [model.name for model in reranked],
+        )
+        return reranked
 
     def _apply_client_provider_affinity(
         self,
@@ -672,9 +737,7 @@ class MultiModelRouter:
     @staticmethod
     def _build_reason(scoring: ScoringResult, model: ModelInfo) -> str:
         """Build a human-readable reason string."""
-        numeric_signals = {
-            k: v for k, v in scoring.signals.items() if isinstance(v, (int, float))
-        }
+        numeric_signals = {k: v for k, v in scoring.signals.items() if isinstance(v, (int, float))}
         top_signals = sorted(numeric_signals.items(), key=lambda x: x[1], reverse=True)[:2]
         signal_str = ", ".join(f"{name}={val:.2f}" for name, val in top_signals)
         semantic_role = scoring.signals.get("semantic_role")
@@ -683,9 +746,17 @@ class MultiModelRouter:
             if isinstance(semantic_role, str) and semantic_role != "none"
             else ""
         )
+        benchmark_top = scoring.signals.get("benchmark_top")
+        benchmark_part = (
+            f"benchmark={benchmark_top}, "
+            if isinstance(benchmark_top, str)
+            and benchmark_top not in {"none", "unknown", "unavailable"}
+            else ""
+        )
         return (
             f"Prompt scored {scoring.score:.2f} (tier {scoring.tier.name}), "
-            f"{role_part}signals: {signal_str}. Selected {model.name} via {model.provider.value}."
+            f"{role_part}{benchmark_part}signals: {signal_str}. "
+            f"Selected {model.name} via {model.provider.value}."
         )
 
 

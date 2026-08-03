@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from llmrouter.core.benchmark_affinity import BenchmarkAffinityScorer
 from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.types import Tier
 from llmrouter.logging_config import get_logger
@@ -174,6 +175,11 @@ class SemanticPromptScorer:
         self._embedding_cache_path = embedding_cache_path
         self._roles: list[RoleEmbedding] = []
         self._loaded = False
+
+    @property
+    def embedder(self) -> _LazyEmbedder:
+        """Share the lazily loaded model with other semantic classifiers."""
+        return self._embedder
 
     def _ensure_role_embeddings(self) -> bool:
         """Load or compute role embeddings. Returns True if ready."""
@@ -336,12 +342,14 @@ class HybridScorer:
         self,
         rule_scorer: PromptScorer | None = None,
         semantic_scorer: SemanticPromptScorer | None = None,
+        benchmark_scorer: BenchmarkAffinityScorer | None = None,
         rule_weight: float = 0.3,
         semantic_weight: float = 0.7,
         semantic_confidence_threshold: float = 0.35,
     ) -> None:
         self._rule_scorer = rule_scorer or PromptScorer()
         self._semantic_scorer = semantic_scorer or SemanticPromptScorer()
+        self._benchmark_scorer = benchmark_scorer
         total = rule_weight + semantic_weight
         self._rule_weight = rule_weight / total
         self._semantic_weight = semantic_weight / total
@@ -351,18 +359,29 @@ class HybridScorer:
         """Score the prompt using both rule-based and semantic signals."""
         rule_result = self._rule_scorer.score(prompt)
         semantic_result = self._semantic_scorer.score(prompt)
+        benchmark_result = (
+            self._benchmark_scorer.score(prompt)
+            if self._benchmark_scorer is not None
+            else ScoringResult(score=0.0, tier=Tier.T1, signals={})
+        )
 
-        semantic_confidence = semantic_result.signals.get("semantic_confidence", 0.0)
+        role_confidence = float(semantic_result.signals.get("semantic_confidence", 0.0))
+        benchmark_confidence = float(benchmark_result.signals.get("benchmark_confidence", 0.0))
+        semantic_confidence = max(role_confidence, benchmark_confidence)
         use_semantic = semantic_confidence >= self._semantic_threshold
 
         if use_semantic:
             blended_score = min(
                 1.0,
-                self._rule_weight * rule_result.score
-                + self._semantic_weight * semantic_confidence,
+                self._rule_weight * rule_result.score + self._semantic_weight * semantic_confidence,
             )
             # Choose the higher tier (more conservative) between rule and semantic.
-            final_tier = max(rule_result.tier, semantic_result.tier, key=lambda t: t.value)
+            final_tier = max(
+                rule_result.tier,
+                semantic_result.tier,
+                benchmark_result.tier,
+                key=lambda t: t.value,
+            )
         else:
             blended_score = rule_result.score
             final_tier = rule_result.tier
@@ -370,6 +389,7 @@ class HybridScorer:
         signals: dict[str, Any] = {
             **rule_result.signals,
             **semantic_result.signals,
+            **benchmark_result.signals,
             "blended_score": round(blended_score, 4),
             "rule_weight": round(self._rule_weight, 4),
             "semantic_weight": round(self._semantic_weight, 4),

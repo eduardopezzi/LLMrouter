@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from llmrouter.core.types import Tier
 
@@ -21,11 +22,28 @@ from llmrouter.core.types import Tier
 
 _COMPLEXITY_KEYWORDS = frozenset(
     [
-        "analyze", "architect", "compare", "complex", "comprehensive",
-        "debug", "design", "detailed", "diagnose", "evaluate",
-        "explain", "implement", "investigate", "optimize", "reason",
-        "refactor", "research", "review", "summarize", "synthesis",
-        "translate", "troubleshoot",
+        "analyze",
+        "architect",
+        "compare",
+        "complex",
+        "comprehensive",
+        "debug",
+        "design",
+        "detailed",
+        "diagnose",
+        "evaluate",
+        "explain",
+        "implement",
+        "investigate",
+        "optimize",
+        "reason",
+        "refactor",
+        "research",
+        "review",
+        "summarize",
+        "synthesis",
+        "translate",
+        "troubleshoot",
     ]
 )
 
@@ -53,11 +71,23 @@ _CODE_PATTERNS = [
 ]
 
 _MATH_PATTERNS = [
-    r"\bcalculate\b", r"\bsolve\b", r"\bequation\b", r"\bintegral\b",
-    r"\bderivative\b", r"\bmatrix\b", r"\bprobability\b", r"\btheorem\b",
-    r"\bproof\b", r"\balgorithm\b", r"\bcomple(x|city)\b",
-    r"\boptimi[sz]ation\b", r"\bstatisti(cs|cal)\b", r"\bregression\b",
-    r"\$\$.+?\$\$", r"\\[a-zA-Z]+\{", r"\b\d+\s*[+\-*/^]\s*\d+",
+    r"\bcalculate\b",
+    r"\bsolve\b",
+    r"\bequation\b",
+    r"\bintegral\b",
+    r"\bderivative\b",
+    r"\bmatrix\b",
+    r"\bprobability\b",
+    r"\btheorem\b",
+    r"\bproof\b",
+    r"\balgorithm\b",
+    r"\bcomple(x|city)\b",
+    r"\boptimi[sz]ation\b",
+    r"\bstatisti(cs|cal)\b",
+    r"\bregression\b",
+    r"\$\$.+?\$\$",
+    r"\\[a-zA-Z]+\{",
+    r"\b\d+\s*[+\-*/^]\s*\d+",
 ]
 
 
@@ -84,7 +114,7 @@ class ScoringResult:
 
     score: float
     tier: Tier
-    signals: dict[str, float]
+    signals: dict[str, Any]
 
 
 def _score_to_tier(score: float) -> Tier:
