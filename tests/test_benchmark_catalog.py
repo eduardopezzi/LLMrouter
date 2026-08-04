@@ -8,6 +8,7 @@ import pytest
 from llmrouter.benchmark_catalog import (
     BenchmarkRefreshError,
     load_catalog_scores,
+    load_catalog_source_urls,
     refresh_benchmark_catalog,
 )
 from llmrouter.core.registry import load_model_registry
@@ -76,6 +77,9 @@ def test_refresh_writes_provenance_and_is_idempotent(tmp_path) -> None:
     text = output.read_text()
     assert "official_model_card" in text
     assert "2026-08-03T10:00:00Z" in text
+    assert load_catalog_source_urls(output) == {
+        "ollama/example:cloud": ("https://example.test/model-card",)
+    }
 
     second = refresh_benchmark_catalog(
         sources,
@@ -124,12 +128,18 @@ def test_registry_merges_refreshed_scores_over_manual_values(tmp_path) -> None:
     models.write_text(
         "models:\n  - name: ollama/example:cloud\n    provider: ollama\n"
         "    tier: 2\n    benchmark_scores:\n      LiveCodeBench: 10\n"
+        "    benchmark_sources:\n      - https://example.test/approved\n"
     )
     catalog.write_text(
         "schema_version: 1\nmodels:\n  ollama/example:cloud:\n    benchmark_scores:\n"
         "      LiveCodeBench:\n        value: 71.5\n"
+        "        source_url: https://example.test/validated\n"
     )
 
     registry = load_model_registry(models, benchmark_catalog_path=catalog)
 
     assert dict(registry.models[0].benchmark_scores) == {"LiveCodeBench": 71.5}
+    assert registry.models[0].benchmark_sources == (
+        "https://example.test/approved",
+        "https://example.test/validated",
+    )

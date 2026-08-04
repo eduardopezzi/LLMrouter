@@ -231,6 +231,8 @@ class BenchmarksConfig(BaseModel):
     research_enabled: bool = True
     research_timeout_seconds: float = Field(default=120.0, gt=0)
     research_proposals_path: str = "data/benchmark_research_proposals.json"
+    research_internet_search_enabled: bool = True
+    research_internet_search_max_results: int = Field(default=5, ge=1, le=10)
 
 
 class HybridScorerConfig(BaseModel):

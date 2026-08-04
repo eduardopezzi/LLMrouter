@@ -71,9 +71,16 @@ metodologia; as URLs, tabelas e colunas aceitas ficam em
 `data/benchmark_sources.yaml`. Cadastre somente fontes oficiais/model cards e
 nunca faça scraping genérico de páginas de terceiros.
 
+Cada modelo expõe também `benchmark_sources`, uma lista de URLs HTTPS de
+referência. Ela pode ser declarada manualmente no `config/models.yaml` e é
+complementada automaticamente, em memória, pelas URLs cujas tabelas passaram
+na atualização do catálogo. Esses links facilitam novas pesquisas e auditoria,
+mas não influenciam o roteamento sem uma nota validada.
+
 ```bash
 make benchmarks-refresh # baixa, valida e atualiza o catálogo local
 make benchmarks-check   # verifica se há mudança sem gravar arquivos
+make benchmarks-research # pesquisa na web e gera propostas para revisão humana
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
 ```
 
@@ -91,10 +98,21 @@ memória, sem reinício. Para persistir atualizações em Docker, monte `data/`
 como volume.
 
 No mesmo ciclo, o LLM configurado em `evaluator.ollama` avalia os extratos das
-fontes e grava sugestões em `data/benchmark_research_proposals.json`. Modelos
-com capacidade de navegação podem também sugerir novas fontes e modelos; essas
-sugestões **nunca** alteram automaticamente as fontes, notas ou catálogo. A
-revisão humana continua obrigatória antes de promover uma proposta.
+fontes e grava sugestões em `data/benchmark_research_proposals.json`. Para cada
+modelo configurado que ainda não tenha notas, o LLMrouter também faz uma busca
+web de descoberta e entrega os resultados ao LLM para avaliação. Um alias cloud
+é convertido em um nome pesquisável: por exemplo,
+`ollama/deepseek-v4-pro:cloud` gera a consulta `deepseek v4 pro benchmark
+results`. A busca e o LLM apenas criam propostas; eles não podem atribuir notas
+nem aprovar equivalência entre variantes. Agregadores como LangDB servem para
+descoberta, enquanto a promoção exige uma fonte oficial, identidade exata do
+modelo e revisão humana.
+
+Controle essa descoberta com
+`LLMROUTER_BENCHMARKS__RESEARCH_INTERNET_SEARCH_ENABLED` e limite os resultados
+por modelo com `LLMROUTER_BENCHMARKS__RESEARCH_INTERNET_SEARCH_MAX_RESULTS`
+(padrão: 5). Essas sugestões **nunca** alteram automaticamente as fontes, notas
+ou catálogo.
 
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 

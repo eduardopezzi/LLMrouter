@@ -169,6 +169,31 @@ def load_catalog_scores(path: str | Path) -> dict[str, dict[str, float]]:
     return result
 
 
+def load_catalog_source_urls(path: str | Path) -> dict[str, tuple[str, ...]]:
+    """Load provenance URLs from validated score records, grouped by model."""
+    catalog_path = Path(path)
+    if not catalog_path.exists():
+        return {}
+    models = _load_yaml(catalog_path).get("models", {})
+    if not isinstance(models, dict):
+        return {}
+    result: dict[str, tuple[str, ...]] = {}
+    for model, entry in models.items():
+        scores = entry.get("benchmark_scores", {}) if isinstance(entry, dict) else {}
+        if not isinstance(model, str) or not isinstance(scores, dict):
+            continue
+        urls = {
+            details.get("source_url")
+            for details in scores.values()
+            if isinstance(details, dict)
+            and isinstance(details.get("source_url"), str)
+            and details["source_url"].startswith("https://")
+        }
+        if urls:
+            result[model] = tuple(sorted(urls))
+    return result
+
+
 def _load_sources(path: Path) -> list[dict[str, Any]]:
     raw = _load_yaml(path).get("sources", [])
     if not isinstance(raw, list) or not raw:

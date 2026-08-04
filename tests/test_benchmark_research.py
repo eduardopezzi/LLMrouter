@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 
-from llmrouter.benchmark_research import BenchmarkResearcher, BenchmarkResearchReport
+from llmrouter.benchmark_research import (
+    BenchmarkResearcher,
+    BenchmarkResearchReport,
+    _canonical_model_name,
+)
 from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
 
 
@@ -90,6 +94,51 @@ def test_scheduler_runs_research_after_a_refresh(monkeypatch, tmp_path) -> None:
     asyncio.run(scheduler.refresh_once())
 
     assert calls == [("sources.yaml", "catalog.yaml")]
+
+
+def test_researcher_searches_uncovered_cloud_models_with_canonical_name(tmp_path) -> None:
+    sources = tmp_path / "sources.yaml"
+    catalog = tmp_path / "catalog.yaml"
+    models = tmp_path / "models.yaml"
+    proposals = tmp_path / "proposals.json"
+    sources.write_text("sources: []\n")
+    catalog.write_text("schema_version: 1\nmodels: {}\n")
+    models.write_text("models:\n  - name: ollama/deepseek-v4-pro:cloud\n")
+    researcher = _FakeResearcher(
+        base_url="http://localhost:11434",
+        model="research-model",
+        proposal_path=str(proposals),
+        models_path=str(models),
+    )
+    queries: list[str] = []
+
+    async def search(query: str) -> list[dict[str, str]]:
+        queries.append(query)
+        return [
+            {
+                "url": "https://langdb.ai/app/models/deepseek-chat/",
+                "title": "x",
+                "snippet": "y",
+            }
+        ]
+
+    asyncio.run(
+        researcher.research(
+            sources,
+            catalog,
+            fetch_source=lambda _url: _async_value(""),
+            search_web=search,
+        )
+    )
+
+    saved = json.loads(proposals.read_text())
+    assert queries == ["deepseek v4 pro benchmark results"]
+    assert saved["uncovered_models_checked"] == 1
+
+
+def test_canonical_model_name_removes_cloud_provider_syntax() -> None:
+    assert _canonical_model_name("ollama/deepseek-v4-pro:cloud") == "deepseek v4 pro"
+    assert _canonical_model_name("ollama/deepseek-v4-flash:0731-cloud") == "deepseek v4 flash"
 
 
 async def _async_value(value: str) -> str:

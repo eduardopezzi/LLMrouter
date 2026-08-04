@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-from llmrouter.benchmark_catalog import load_catalog_scores
+from llmrouter.benchmark_catalog import load_catalog_scores, load_catalog_source_urls
 from llmrouter.core.types import ModelInfo, Provider, Tier
 
 
@@ -56,7 +56,10 @@ def load_model_registry(
     if not isinstance(raw_models, list):
         raise ValueError("models file must contain a top-level 'models' list")
     refreshed_scores = load_catalog_scores(benchmark_catalog_path) if benchmark_catalog_path else {}
-    models = [_model_from_mapping(item, refreshed_scores) for item in raw_models]
+    refreshed_sources = (
+        load_catalog_source_urls(benchmark_catalog_path) if benchmark_catalog_path else {}
+    )
+    models = [_model_from_mapping(item, refreshed_scores, refreshed_sources) for item in raw_models]
     return ModelRegistry(models=tuple(sorted(models, key=lambda model: model.priority)))
 
 
@@ -73,6 +76,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _model_from_mapping(
     item: object,
     refreshed_scores: dict[str, dict[str, float]] | None = None,
+    refreshed_sources: dict[str, tuple[str, ...]] | None = None,
 ) -> ModelInfo:
     if not isinstance(item, dict):
         raise ValueError("each model entry must be a mapping")
@@ -89,6 +93,8 @@ def _model_from_mapping(
 
     configured_scores = dict(_benchmark_scores(item.get("benchmark_scores", {})))
     configured_scores.update((refreshed_scores or {}).get(name, {}))
+    benchmark_sources = set(_url_list(item.get("benchmark_sources", [])))
+    benchmark_sources.update((refreshed_sources or {}).get(name, ()))
     return ModelInfo(
         name=name,
         provider=provider,
@@ -103,6 +109,7 @@ def _model_from_mapping(
         description=_optional_str(item.get("description")) or "",
         rollout_percentage=rollout_percentage,
         benchmark_scores=tuple(sorted(configured_scores.items())),
+        benchmark_sources=tuple(sorted(benchmark_sources)),
     )
 
 
@@ -149,6 +156,13 @@ def _string_set(value: object) -> frozenset[str]:
     if not isinstance(value, list):
         return frozenset()
     return frozenset(str(item) for item in value if isinstance(item, str))
+
+
+def _url_list(value: object) -> tuple[str, ...]:
+    """Parse optional, review-approved HTTPS benchmark links from model YAML."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(sorted({item for item in value if isinstance(item, str) and item.startswith("https://")}))
 
 
 def _benchmark_scores(value: object) -> tuple[tuple[str, float], ...]:

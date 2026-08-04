@@ -220,6 +220,16 @@ class TestArgParsing:
         assert args.command == "benchmarks-refresh"
         assert args.check is True
 
+    def test_parse_args_benchmarks_research(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["llmrouter", "benchmarks-research", "--no-internet-search"],
+        ):
+            args = _parse_args()
+        assert args.command == "benchmarks-research"
+        assert args.no_internet_search is True
+
     def test_parse_args_server_options(self) -> None:
         with patch.object(
             sys,

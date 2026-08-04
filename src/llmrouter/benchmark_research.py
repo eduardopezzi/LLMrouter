@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 import httpx
 import yaml
@@ -40,14 +41,20 @@ class BenchmarkResearcher:
         base_url: str,
         model: str,
         proposal_path: str,
+        models_path: str | None = None,
         api_key: str | None = None,
         timeout: float = 120.0,
+        internet_search_enabled: bool = True,
+        internet_search_max_results: int = 5,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.proposal_path = Path(proposal_path)
+        self.models_path = Path(models_path) if models_path else None
         self.api_key = api_key
         self.timeout = timeout
+        self.internet_search_enabled = internet_search_enabled
+        self.internet_search_max_results = internet_search_max_results
 
     async def research(
         self,
@@ -55,17 +62,26 @@ class BenchmarkResearcher:
         catalog_path: str | Path,
         *,
         fetch_source: Callable[[str], Awaitable[str]] | None = None,
+        search_web: Callable[[str], Awaitable[list[dict[str, str]]]] | None = None,
     ) -> BenchmarkResearchReport:
         """Evaluate declared sources and persist pending, non-authoritative proposals."""
         sources = _load_yaml(Path(sources_path))
         catalog = _load_yaml(Path(catalog_path))
         raw_sources = sources.get("sources", [])
         source_excerpts = await _source_excerpts(raw_sources, fetch_source or self._fetch_source)
+        uncovered_models = _uncovered_models(self.models_path, catalog)
+        web_evidence = await _internet_evidence(
+            uncovered_models,
+            search_web or self._search_web,
+            enabled=self.internet_search_enabled,
+        )
         response = await self._ask_llm(
             _research_prompt(
                 source_definitions=raw_sources,
                 source_excerpts=source_excerpts,
                 catalog=catalog,
+                uncovered_models=uncovered_models,
+                web_evidence=web_evidence,
             )
         )
         proposal = _validated_proposal(response)
@@ -76,6 +92,8 @@ class BenchmarkResearcher:
                 "generated_at": _timestamp(),
                 "research_model": self.model,
                 "source_excerpts_available": len(source_excerpts),
+                "uncovered_models_checked": len(uncovered_models),
+                "internet_search_enabled": self.internet_search_enabled,
                 "notice": (
                     "Suggestions are non-authoritative. Review official URLs, methodology, "
                     "and table mappings before adding a source or model to active catalogs."
@@ -101,6 +119,35 @@ class BenchmarkResearcher:
             )
             response.raise_for_status()
             return response.text
+
+    async def _search_web(self, query: str) -> list[dict[str, str]]:
+        """Return compact search evidence; the LLM still must verify identity.
+
+        This is deliberately a discovery mechanism. Search hits are never
+        converted into scores or active sources by this module.
+        """
+        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        document = await self._fetch_source(url)
+        results: list[dict[str, str]] = []
+        for href, title, snippet in re.findall(
+            r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
+            r'class="result__snippet"[^>]*>(.*?)</(?:a|div)>',
+            document,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            clean_url = _search_result_url(href)
+            if not clean_url:
+                continue
+            results.append(
+                {
+                    "url": clean_url,
+                    "title": _plain_html(title)[:300],
+                    "snippet": _plain_html(snippet)[:800],
+                }
+            )
+            if len(results) >= self.internet_search_max_results:
+                break
+        return results
 
     async def _ask_llm(self, prompt: str) -> dict[str, Any]:
         payload = {
@@ -154,15 +201,25 @@ def _research_prompt(
     source_definitions: object,
     source_excerpts: list[dict[str, str]],
     catalog: dict[str, Any],
+    uncovered_models: list[dict[str, str]],
+    web_evidence: list[dict[str, Any]],
 ) -> str:
     return (
         """Review benchmark evidence for an LLM router.
 
 The active score catalog is authoritative only after deterministic extraction
 from a manually approved official source. Your output is a human-review queue,
-not an update. If you have web-search tools, you may discover candidates; if
-you do not, only assess the provided excerpts and leave unverified proposals
-empty. Never provide a benchmark score.
+not an update. Internet search results below are discovery evidence only. For
+each uncovered model, assess whether a result identifies the exact model,
+variant, size, and mode. Cloud-provider aliases must be searched using the
+canonical name shown in the uncovered-model list: for example,
+`ollama/deepseek-v4-pro:cloud` becomes `deepseek v4 pro`.
+
+Never provide a benchmark score. Never treat a similar family, another size,
+or another mode as an exact match. Propose an official model card or an
+official benchmark page only when the evidence is sufficient; otherwise state
+why the model remains unresolved. LangDB and other aggregators may be cited as
+discovery evidence, but are not by themselves an approved score source.
 
 Return one JSON object with exactly these list keys:
 {
@@ -178,7 +235,84 @@ Active source definitions:
         + json.dumps(source_excerpts, ensure_ascii=False)
         + "\n\nActive score catalog:\n"
         + json.dumps(catalog, ensure_ascii=False)
+        + "\n\nUncovered configured models and canonical web queries:\n"
+        + json.dumps(uncovered_models, ensure_ascii=False)
+        + "\n\nInternet search evidence for uncovered models:\n"
+        + json.dumps(web_evidence, ensure_ascii=False)
     )
+
+
+async def _internet_evidence(
+    uncovered_models: list[dict[str, str]],
+    search_web: Callable[[str], Awaitable[list[dict[str, str]]]],
+    *,
+    enabled: bool,
+) -> list[dict[str, Any]]:
+    if not enabled:
+        return []
+    evidence: list[dict[str, Any]] = []
+    for item in uncovered_models:
+        query = f'{item["canonical_name"]} benchmark results'
+        try:
+            results = await search_web(query)
+        except (httpx.HTTPError, OSError, ValueError):
+            results = []
+        evidence.append(
+            {
+                "model": item["model"],
+                "canonical_name": item["canonical_name"],
+                "query": query,
+                "results": results[:10],
+            }
+        )
+    return evidence
+
+
+def _uncovered_models(models_path: Path | None, catalog: dict[str, Any]) -> list[dict[str, str]]:
+    """Find configured models with no score record and create safe web queries."""
+    if models_path is None:
+        return []
+    configured = _load_yaml(models_path).get("models", [])
+    scored = catalog.get("models", {})
+    if not isinstance(configured, list) or not isinstance(scored, dict):
+        return []
+    missing: list[dict[str, str]] = []
+    for entry in configured:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name or _has_scores(scored.get(name)):
+            continue
+        missing.append({"model": name, "canonical_name": _canonical_model_name(name)})
+    return missing
+
+
+def _has_scores(entry: object) -> bool:
+    return isinstance(entry, dict) and isinstance(entry.get("benchmark_scores"), dict) and bool(
+        entry["benchmark_scores"]
+    )
+
+
+def _canonical_model_name(name: str) -> str:
+    """Convert a provider alias into a human-searchable model name."""
+    bare = name.split("/", 1)[-1].strip()
+    bare = re.sub(r":(?:[^:]*-)?cloud$", "", bare, flags=re.IGNORECASE)
+    bare = re.sub(r":", " ", bare)
+    return re.sub(r"[-_]+", " ", bare).strip()
+
+
+def _plain_html(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value)).strip()
+
+
+def _search_result_url(value: str) -> str | None:
+    """Unwrap DuckDuckGo redirect URLs and accept HTTPS evidence only."""
+    match = re.search(r"uddg=([^&]+)", value)
+    url = re.sub(r"\+", " ", match.group(1)) if match else value
+    # DDG's redirect values are percent encoded; using it without decoding is
+    # not useful, while non-HTTPS pages must never be proposed as sources.
+    from urllib.parse import unquote
+
+    url = unquote(url)
+    return url if url.startswith("https://") else None
 
 
 def _validated_proposal(value: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:

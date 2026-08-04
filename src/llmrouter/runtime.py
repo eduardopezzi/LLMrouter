@@ -149,6 +149,13 @@ def build_app(settings: Settings | None = None) -> FastAPI:
                     model=resolved_settings.evaluator.ollama.model,
                     timeout=resolved_settings.benchmarks.research_timeout_seconds,
                     proposal_path=resolved_settings.benchmarks.research_proposals_path,
+                    models_path=resolved_settings.models_file,
+                    internet_search_enabled=(
+                        resolved_settings.benchmarks.research_internet_search_enabled
+                    ),
+                    internet_search_max_results=(
+                        resolved_settings.benchmarks.research_internet_search_max_results
+                    ),
                 )
                 if resolved_settings.benchmarks.research_enabled
                 else None

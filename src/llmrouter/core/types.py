@@ -88,6 +88,9 @@ class ModelInfo:
         benchmark_scores: Raw public benchmark measurements as ``(name, value)``
             pairs. Percentages may use 0–100; normalized values may use 0–1;
             Codeforces may use its native rating scale.
+        benchmark_sources: Validated benchmark URLs associated with this model.
+            They are informational provenance, never routing signals by
+            themselves.
     """
 
     name: str
@@ -103,6 +106,7 @@ class ModelInfo:
     description: str = ""
     rollout_percentage: float = 100.0
     benchmark_scores: tuple[tuple[str, float], ...] = ()
+    benchmark_sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate rollout_percentage range."""

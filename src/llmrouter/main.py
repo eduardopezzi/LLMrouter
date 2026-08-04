@@ -12,6 +12,7 @@ from typing import Any
 import uvicorn
 
 from llmrouter.benchmark_catalog import BenchmarkRefreshError, refresh_benchmark_catalog
+from llmrouter.benchmark_research import BenchmarkResearcher
 from llmrouter.cli_panel import (
     promote_model_priority,
     render_benchmark_leaderboards,
@@ -35,6 +36,7 @@ from llmrouter.cross_repository import (
 )
 from llmrouter.logging_config import setup_logging
 from llmrouter.runtime import _build_scorer, build_app, build_registry
+from llmrouter.utils import resolve_api_key
 
 
 class _LazyASGIApp:
@@ -294,6 +296,16 @@ def _parse_args() -> argparse.Namespace:
         help="Per-source network timeout in seconds.",
     )
 
+    research_parser = subparsers.add_parser(
+        "benchmarks-research",
+        help="Research web evidence for configured models without benchmark scores.",
+    )
+    research_parser.add_argument(
+        "--no-internet-search",
+        action="store_true",
+        help="Assess configured sources only; do not search the web for uncovered models.",
+    )
+
     parser.add_argument(
         "--debug",
         "-d",
@@ -499,6 +511,37 @@ def main() -> None:
         )
         if args.check and report.changed:
             sys.exit(1)
+        return
+
+    if args.command == "benchmarks-research":
+        researcher = BenchmarkResearcher(
+            base_url=settings.evaluator.ollama.base_url,
+            api_key=resolve_api_key(settings.evaluator.ollama, "OLLAMA_API_KEY"),
+            model=settings.evaluator.ollama.model,
+            timeout=settings.benchmarks.research_timeout_seconds,
+            proposal_path=settings.benchmarks.research_proposals_path,
+            models_path=settings.models_file,
+            internet_search_enabled=(
+                settings.benchmarks.research_internet_search_enabled
+                and not args.no_internet_search
+            ),
+            internet_search_max_results=settings.benchmarks.research_internet_search_max_results,
+        )
+        try:
+            report = asyncio.run(
+                researcher.research(
+                    settings.benchmarks.sources_path,
+                    settings.benchmarks.catalog_path,
+                )
+            )
+        except Exception as exc:
+            print(f"Benchmark research failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print(
+            "Benchmark research proposals written: "
+            f"{report.source_proposals} source(s), {report.model_proposals} model(s) "
+            f"({report.output_path})"
+        )
         return
 
     # Configure logging based on --debug flag
