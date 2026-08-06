@@ -400,10 +400,15 @@ def _priority_demoter(
                 app = app_holder.get("app") if app_holder is not None else None
                 if app is not None:
                     app.state.registry = registry
+        if cooldown_entry is not None:
+            target_kind = "model" if cooldown_entry.model_name is not None else "provider"
+            target_name = cooldown_entry.model_name or model.provider.value
+            action = f"Put {target_kind} '{target_name}' in quota cooldown"
+        else:
+            action = f"Disabled provider '{model.provider.value}'"
         logging.getLogger("llmrouter.runtime").warning(
-            "%s provider '%s' for model '%s' after balance/quota error: %s",
-            ("Put in quota cooldown" if cooldown_entry is not None else "Disabled"),
-            model.provider.value,
+            "%s after balance/quota error from model '%s': %s",
+            action,
             model.name,
             exc,
         )
