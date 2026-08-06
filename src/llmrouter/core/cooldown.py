@@ -129,10 +129,17 @@ class ProviderCooldownStore:
             return self._model_until[model.name]
 
     def record_quota_error(self, model: ModelInfo, exc: ProviderError) -> CooldownEntry | None:
-        """Record provider cooldown when an error looks like quota exhaustion."""
+        """Record a model or provider cooldown for quota exhaustion.
+
+        HTTP 402 is tied to the selected paid model and must not suppress other
+        models exposed by the same provider. Rate limits (HTTP 429) generally
+        apply to the provider account, so they retain provider-wide cooldown.
+        """
         if not is_quota_exhaustion_error(exc):
             return None
         reset_at = quota_reset_timestamp(str(exc), default_seconds=self._default_seconds)
+        if exc.status_code == 402:
+            return self.put_model(model, until=reset_at, reason=str(exc)[:300])
         return self.put_provider(model.provider, until=reset_at, reason=str(exc)[:300])
 
     def active_entries(self, *, now: float | None = None) -> list[CooldownEntry]:
@@ -153,7 +160,9 @@ class ProviderCooldownStore:
 
 def is_quota_exhaustion_error(exc: ProviderError) -> bool:
     """Return True for provider quota/balance/rate-limit exhaustion."""
-    if exc.status_code not in {402, 429}:
+    if exc.status_code == 402:
+        return True
+    if exc.status_code != 429:
         return False
     message = str(exc).lower()
     indicators = (
