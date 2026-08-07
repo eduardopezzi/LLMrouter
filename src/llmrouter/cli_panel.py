@@ -528,23 +528,20 @@ def run_interactive_panel(
     env_path: str | Path = ".env",
     health_tracker: ModelHealthTracker | None = None,
 ) -> None:
-    """Run an interactive terminal panel."""
+    """Run an interactive terminal panel with grouped submenus.
+
+    The previous flat 12-option list is reorganised into three context-aware
+    submenus -- Routing, Models, and Logs & Stats -- reducing the top-level
+    surface to 4 entries plus exit.
+    """
     while True:
         print()
         print(render_panel_summary(settings, registry))
         print()
-        print("1. Set routing strategy")
-        print("2. Set fallback count")
-        print("3. Set provider cost order")
-        print("4. Show current settings")
-        print("5. View logs")
-        print("6. Toggle debug mode")
-        print("7. Show model priorities")
-        print("8. Promote model priority")
-        print("9. Refresh stats")
-        print("10. Show model health")
-        print("11. Set model rollout percentage")
-        print("12. Show top 3 models per benchmark")
+        print("1. Routing ............ strategy, fallback, cost order, rollout")
+        print("2. Models ............. priorities, promote, health, benchmarks")
+        print("3. Logs & Stats ....... recent logs, refresh, debug mode")
+        print("4. Show full settings . dump all configuration values")
         print("0. Exit")
         try:
             choice = input("Select an option: ").strip()
@@ -552,44 +549,150 @@ def run_interactive_panel(
             return
 
         if choice == "1":
-            _prompt_routing_strategy(env_path, settings)
-            settings = _reload(settings)
+            settings, registry = _routing_submenu(
+                settings, registry, env_path=env_path
+            )
         elif choice == "2":
-            _prompt_fallback_count(env_path, settings)
-            settings = _reload(settings)
+            registry = _models_submenu(
+                settings, registry, health_tracker=health_tracker
+            )
         elif choice == "3":
-            _prompt_provider_cost_order(env_path, settings, registry)
-            settings = _reload(settings)
+            settings = _logs_submenu(settings, registry, env_path=env_path)
         elif choice == "4":
             print()
             print(render_current_settings(settings, registry))
             _pause_for_enter()
-        elif choice == "5":
-            _prompt_view_logs(settings)
-        elif choice == "6":
-            _prompt_toggle_debug(env_path, settings)
-            settings = _reload(settings)
-        elif choice == "7":
-            print()
-            print(render_model_priorities(registry, limit=10))
-            _pause_for_enter()
-        elif choice == "8":
-            registry = _prompt_model_priority_panel(settings, registry)
-        elif choice == "10":
-            print()
-            print(render_model_health(health_tracker))
-            _pause_for_enter()
-        elif choice == "11":
-            _prompt_rollout_percentage(settings.models_file, registry)
-            registry = _reload_registry(settings.models_file)
-        elif choice == "12":
-            print()
-            print(render_benchmark_leaderboards(registry))
-            _pause_for_enter()
-        elif choice in {"9", ""}:
+        elif choice in {"", "r"}:
             continue
         elif choice == "0":
             return
+        else:
+            print("Invalid option")
+
+
+# ---------------------------------------------------------------------------
+# Submenus
+# ---------------------------------------------------------------------------
+
+_ROUTING_BANNER = "=== Routing ==="
+_MODELS_BANNER = "=== Models ==="
+_LOGS_BANNER = "=== Logs & Stats ==="
+
+
+def _routing_submenu(
+    settings: Settings,
+    registry: ModelRegistry,
+    *,
+    env_path: str | Path,
+) -> tuple[Settings, ModelRegistry]:
+    """Submenu for strategy, fallback count, cost order and rollout %."""
+    while True:
+        routing = routing_panel_config(settings)
+        print()
+        print(_ROUTING_BANNER)
+        print(f"  a) Strategy ........... {routing.strategy}")
+        print(f"  b) Fallback count ..... {routing.fallback_count}")
+        print(f"  c) Provider cost order  {', '.join(routing.provider_cost_order)}")
+        print("  d) Rollout % .......... per model")
+        print()
+        print("  0. Back")
+        try:
+            choice = input("Select an option: ").strip().lower()
+        except EOFError:
+            return settings, registry
+
+        if choice in {"a", "1"}:
+            _prompt_routing_strategy(env_path, settings)
+            settings = _reload(settings)
+        elif choice in {"b", "2"}:
+            _prompt_fallback_count(env_path, settings)
+            settings = _reload(settings)
+        elif choice in {"c", "3"}:
+            _prompt_provider_cost_order(env_path, settings, registry)
+            settings = _reload(settings)
+        elif choice in {"d", "4"}:
+            _prompt_rollout_percentage(settings.models_file, registry)
+            registry = _reload_registry(settings.models_file)
+        elif choice in {"0", ""}:
+            return settings, registry
+        else:
+            print("Invalid option")
+
+
+def _models_submenu(
+    settings: Settings,
+    registry: ModelRegistry,
+    *,
+    health_tracker: ModelHealthTracker | None,
+) -> ModelRegistry:
+    """Submenu for priorities, promotion, health and benchmark leaders."""
+    catalog = catalog_stats(registry)
+    while True:
+        print()
+        print(_MODELS_BANNER)
+        print(f"  ({catalog['models']} models in catalog)")
+        print("  a) Show priorities ..... rank + weights")
+        print("  b) Promote model ....... promote / reset / LLM reorder")
+        print("  c) Health .............. per-model metrics")
+        print("  d) Top 3 per benchmark . leaderboard")
+        print()
+        print("  0. Back")
+        try:
+            choice = input("Select an option: ").strip().lower()
+        except EOFError:
+            return registry
+
+        if choice in {"a", "1"}:
+            print()
+            print(render_model_priorities(registry, limit=10))
+            _pause_for_enter()
+        elif choice in {"b", "2"}:
+            registry = _prompt_model_priority_panel(settings, registry)
+        elif choice in {"c", "3"}:
+            print()
+            print(render_model_health(health_tracker))
+            _pause_for_enter()
+        elif choice in {"d", "4"}:
+            print()
+            print(render_benchmark_leaderboards(registry))
+            _pause_for_enter()
+        elif choice in {"0", ""}:
+            return registry
+        else:
+            print("Invalid option")
+
+
+def _logs_submenu(
+    settings: Settings,
+    registry: ModelRegistry,
+    *,
+    env_path: str | Path,
+) -> Settings:
+    """Submenu for logs, stats refresh and debug toggle."""
+    while True:
+        print()
+        print(_LOGS_BANNER)
+        print("  a) View recent logs")
+        print("  b) Refresh stats")
+        print(f"  c) Debug mode .......... {'ON' if settings.debug else 'OFF'}")
+        print()
+        print("  0. Back")
+        try:
+            choice = input("Select an option: ").strip().lower()
+        except EOFError:
+            return settings
+
+        if choice in {"a", "1"}:
+            _prompt_view_logs(settings)
+        elif choice in {"b", "2"}:
+            print()
+            print(render_panel_summary(_reload(settings), registry))
+            _pause_for_enter()
+        elif choice in {"c", "3"}:
+            _prompt_toggle_debug(env_path, settings)
+            settings = _reload(settings)
+        elif choice in {"0", ""}:
+            return settings
         else:
             print("Invalid option")
 
