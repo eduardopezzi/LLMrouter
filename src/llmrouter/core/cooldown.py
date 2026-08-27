@@ -254,95 +254,8 @@ class ProviderCooldownStore:
         """Backward-compatible quota-only entry point."""
         if not is_quota_exhaustion_error(exc):
             return None
-        return self.record_error(model, exc, now=now)
-
-    def claim_due_probes(
-        self,
-        models: list[ModelInfo],
-        *,
-        now: float | None = None,
-    ) -> tuple[ModelInfo, ...]:
-        """Atomically claim one representative model for every due cooldown."""
-        current = time.time() if now is None else now
-        by_name = {model.name: model for model in models}
-        claimed: list[ModelInfo] = []
-        with self._lock:
-            entries = [
-                *self._provider_until.values(),
-                *self._cloud_until.values(),
-                *self._model_until.values(),
-            ]
-            for entry in entries:
-                if entry.permanent or entry.until > current:
-                    continue
-                model = self._probe_model(entry, models, by_name)
-                if model is None or model.name in self._probe_in_flight:
-                    continue
-                self._probe_in_flight[model.name] = entry
-                claimed.append(model)
-        return tuple(claimed)
-
-    def probe_succeeded(self, model: ModelInfo) -> CooldownEntry | None:
-        """Close a half-open cooldown after a successful background canary."""
-        with self._lock:
-            entry = self._probe_in_flight.pop(model.name, None)
-            if entry is not None:
-                self._remove_entry(entry)
-            return entry
-
-    def probe_failed(
-        self,
-        model: ModelInfo,
-        exc: ProviderError,
-        *,
-        now: float | None = None,
-    ) -> CooldownEntry | None:
-        """Reopen a failed half-open cooldown using the longer retry interval."""
-        current = time.time() if now is None else now
-        with self._lock:
-            claimed = self._probe_in_flight.pop(model.name, None)
-            if claimed is None:
-                return None
-            if is_permanent_model_error(exc):
-                self._remove_entry(claimed)
-                entry = CooldownEntry(
-                    provider=model.provider,
-                    model_name=model.name,
-                    until=float("inf"),
-                    reason=str(exc)[:300],
-                    scope=CooldownScope.MODEL,
-                    failures=claimed.failures + 1,
-                    permanent=True,
-                )
-                self._set_entry(entry)
-                return entry
-            if is_model_unavailable_error(exc) and claimed.scope != CooldownScope.MODEL:
-                self._remove_entry(claimed)
-                entry = CooldownEntry(
-                    provider=model.provider,
-                    model_name=model.name,
-                    until=current + self._probe_retry_seconds,
-                    reason=str(exc)[:300],
-                    scope=CooldownScope.MODEL,
-                    failures=claimed.failures + 1,
-                )
-                self._set_entry(entry)
-                return entry
-            entry = CooldownEntry(
-                provider=claimed.provider,
-                model_name=claimed.model_name,
-                until=current + self._probe_retry_seconds,
-                reason=str(exc)[:300],
-                scope=claimed.scope,
-                failures=claimed.failures + 1,
-            )
-            self._set_entry(entry)
-            return entry
-
-    def is_model_retired(self, model_name: str) -> bool:
-        """Return whether an upstream response permanently retired a model."""
-        entry = self.model_cooldown(model_name)
-        return bool(entry and entry.permanent)
+        reset_at = quota_reset_timestamp(str(exc), default_seconds=self._default_seconds)
+        return self.put_provider(model.provider, until=reset_at, reason=str(exc)[:300])
 
     def active_entries(self, *, now: float | None = None) -> list[CooldownEntry]:
         """Return blocking cooldown entries, including those waiting for a probe."""
@@ -422,7 +335,9 @@ def is_model_unavailable_error(exc: ProviderError) -> bool:
 
 def is_quota_exhaustion_error(exc: ProviderError) -> bool:
     """Return True for provider quota/balance/rate-limit exhaustion."""
-    if exc.status_code not in {402, 429}:
+    if exc.status_code == 402:
+        return True
+    if exc.status_code != 429:
         return False
     message = str(exc).lower()
     indicators = (

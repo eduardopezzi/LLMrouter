@@ -27,6 +27,7 @@ _logger = get_logger("llmrouter.proxy")
 _FallbackMetrics: dict[str, int] = {
     "total_requests": 0,
     "fallback_attempted": 0,
+    "fallback_attempted": 0,
     "fallback_used": 0,
     "failed_requests": 0,
     "stream_requests": 0,
@@ -308,8 +309,7 @@ class ProviderProxy:
         Yields parsed SSE chunk dictionaries in OpenAI format. On retryable errors
         from the primary model, falls back to the next model in the decision chain.
         """
-        self._schedule_probes(decision.probe_models)
-        request_started = time.perf_counter()
+        started = time.perf_counter()
         attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
         fallback_attempted = False
@@ -520,11 +520,10 @@ class ProviderProxy:
             entry = self._provider_cooldowns.record_error(model, exc)
             if entry is not None:
                 _logger.warning(
-                    "Recorded %s cooldown for provider '%s', model '%s' (%s): %s",
-                    entry.scope.value,
+                    "Provider '%s' put in quota cooldown for %.0fs after model '%s': %s",
                     model.provider.value,
+                    entry.seconds_remaining,
                     model.name,
-                    "permanent" if entry.permanent else f"{entry.seconds_remaining:.0f}s",
                     exc,
                 )
         except Exception as cooldown_exc:  # pragma: no cover - defensive logging
