@@ -81,6 +81,7 @@ mas não influenciam o roteamento sem uma nota validada.
 make benchmarks-refresh # baixa, valida e atualiza o catálogo local
 make benchmarks-check   # verifica se há mudança sem gravar arquivos
 make benchmarks-research # pesquisa na web e gera propostas para revisão humana
+llmrouter catalog-sync # inventaria modelos locais do Ollama e gera propostas
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
 ```
 
@@ -119,6 +120,12 @@ Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 ```bash
 ollama pull exemplo:latest
 ```
+
+`llmrouter catalog-sync` consulta somente `/api/tags` do Ollama e grava
+`data/model_catalog_proposals.json`. Ele sugere a inclusão de modelos locais
+descobertos com rollout inicial `0` e pede verificação para modelos locais
+configurados que não aparecem mais. Modelos Cloud não são tratados como locais;
+o comando nunca altera `config/models.yaml`.
 
 Valide o YAML e o catálogo sem iniciar o servidor:
 
@@ -517,6 +524,49 @@ O painel grava essas preferencias no `.env`:
 LLMROUTER_ROUTING__STRATEGY=cost
 LLMROUTER_ROUTING__FALLBACK_COUNT=3
 LLMROUTER_ROUTING__PROVIDER_COST_ORDER=["nvidia", "zai", "ollama"]
+```
+
+### Prioridade por horário de preço do DeepSeek
+
+Em rotas `auto`, o DeepSeek é mantido como fallback, mas passa para depois dos
+outros provedores durante o horário de pico em Pequim. A faixa padrão considera
+`00:30–08:30` como off-peak nos dias úteis. Desde `2026-08-23`, sábado e domingo
+são off-peak durante o dia inteiro. Escolhas explícitas de modelo não são
+alteradas.
+
+Todos os valores podem ser sobrescritos no `.env`:
+
+```env
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__ENABLED=true
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__TIMEZONE=Asia/Shanghai
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__OFF_PEAK_START=00:30
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__OFF_PEAK_END=08:30
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__WEEKEND_OFF_PEAK_FROM=2026-08-23
+```
+
+### Cooldown por provedor, nuvem e modelo
+
+Falhas de saldo, créditos ou limite de tokens usam o escopo da conta que
+realmente foi afetada:
+
+| Origem da falha | Escopo bloqueado |
+| --- | --- |
+| API direta (DeepSeek, Z.AI, OpenAI ou Gemini) | Todos os modelos daquele provider |
+| Modelo `ollama/*:cloud` | Todos os modelos Ollama Cloud; modelos Ollama locais continuam disponíveis |
+| Modelo Ollama local | Somente aquele modelo local |
+| Modelo ausente (`404`) | Somente o modelo, temporariamente |
+| Modelo retirado (`410` ou resposta explícita de retirada) | Somente o modelo, removido do roteamento até reiniciar o processo |
+
+O primeiro cooldown dura 10 minutos. Depois desse prazo, a primeira requisição
+continua sendo respondida por um modelo alternativo e dispara, em paralelo, um
+prompt canário curto para o escopo bloqueado. Se o canário funcionar, o modelo
+preferencial volta na próxima requisição. Se falhar, o novo cooldown dura 60
+minutos. Somente um canário por escopo pode ficar em andamento.
+
+```env
+LLMROUTER_ROUTING__QUOTA_COOLDOWN_SECONDS=600
+LLMROUTER_ROUTING__QUOTA_PROBE_RETRY_SECONDS=3600
+LLMROUTER_ROUTING__QUOTA_PROBE_MAX_TOKENS=32
 ```
 
 ## Local Server

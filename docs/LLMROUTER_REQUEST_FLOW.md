@@ -205,7 +205,7 @@ tier do prompt
   -> ranking por benchmarks, se houver afinidade e cobertura
   -> afinidade com intenção/tarefa
   -> afinidade de provider por cliente
-  -> primeiro = primary; próximos N = fallbacks
+  -> primeiro = primary; próximos N = fallbacks com diversidade de provider
 ```
 
 ### 1. Elegibilidade: quem pode concorrer
@@ -288,10 +288,25 @@ que já estão na lista. Essa afinidade distribui clientes de forma estável, ma
 não cria candidatos nem ultrapassa indisponibilidade, cooldown ou capacidades
 obrigatórias.
 
-O primeiro modelo da lista final é o primary. Os próximos
-`routing.fallback_count` modelos formam a cadeia de fallback. O proxy somente
-os chama quando o primary falha com erro recuperável ou está indisponível no
+O primeiro modelo da lista final é o primary. A cadeia de fallback usa até
+`routing.fallback_count` modelos e primeiro escolhe o candidato mais bem
+classificado de cada provider ainda não representado. Se ainda houver vagas,
+completa a cadeia na ordem original. Assim, um limite de conta não consome toda
+a cadeia com modelos hospedados pelo mesmo provider. O proxy somente chama os
+fallbacks quando o primary falha com erro recuperável ou está indisponível no
 momento da tentativa.
+
+Erros de quota, saldo ou limite de sessão (`402`/`429`) usam o escopo da conta:
+APIs diretas bloqueiam o provider inteiro; Ollama Cloud bloqueia todos os
+modelos `ollama/*:cloud`, mas não os locais; uma falha de Ollama local bloqueia
+somente aquele modelo. Erros de catálogo bloqueiam apenas o modelo e respostas
+de retirada permanente (`410`) o removem do roteamento durante o processo.
+
+O cooldown inicial é de 10 minutos. Quando vence, a primeira requisição ainda é
+servida pelo fallback e, em paralelo, executa um canário curto no escopo
+bloqueado. Um sucesso restaura o preferencial para a próxima requisição; uma
+nova falha reabre o cooldown por 60 minutos. O claim do canário é atômico para
+evitar testes duplicados em requisições concorrentes.
 
 ## Observações importantes
 

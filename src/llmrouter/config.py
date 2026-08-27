@@ -6,6 +6,7 @@ All settings are type-safe and validated at startup.
 
 from __future__ import annotations
 
+from datetime import date, time
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -66,6 +67,16 @@ class ProvidersConfig(BaseModel):
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
+class DeepSeekPricingConfig(BaseModel):
+    """DeepSeek peak/off-peak billing schedule in Beijing time."""
+
+    enabled: bool = True
+    timezone: str = "Asia/Shanghai"
+    off_peak_start: time = time(hour=0, minute=30)
+    off_peak_end: time = time(hour=8, minute=30)
+    weekend_off_peak_from: date = date(2026, 8, 23)
+
+
 class RoutingConfig(BaseModel):
     """Routing engine configuration."""
 
@@ -83,9 +94,22 @@ class RoutingConfig(BaseModel):
         ),
     )
     quota_cooldown_seconds: float = Field(
-        default=5 * 60 * 60,
-        description="Fallback provider cooldown duration when a quota reset time is not reported.",
+        default=10 * 60,
+        gt=0,
+        description="Initial cooldown before a background half-open provider/model probe.",
     )
+    quota_probe_retry_seconds: float = Field(
+        default=60 * 60,
+        gt=0,
+        description="Cooldown after a failed half-open probe.",
+    )
+    quota_probe_max_tokens: int = Field(
+        default=32,
+        ge=1,
+        le=128,
+        description="Maximum output tokens used by the background cooldown probe.",
+    )
+    deepseek_pricing: DeepSeekPricingConfig = Field(default_factory=DeepSeekPricingConfig)
     max_cost_per_request: float | None = None
     dynamic_benchmark_routing: bool = Field(
         default=True,
@@ -233,6 +257,7 @@ class BenchmarksConfig(BaseModel):
     research_proposals_path: str = "data/benchmark_research_proposals.json"
     research_internet_search_enabled: bool = True
     research_internet_search_max_results: int = Field(default=5, ge=1, le=10)
+    model_catalog_proposals_path: str = "data/model_catalog_proposals.json"
 
 
 class HybridScorerConfig(BaseModel):

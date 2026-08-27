@@ -9,6 +9,7 @@ import logging
 import sys
 from typing import Any
 
+import httpx
 import uvicorn
 
 from llmrouter.benchmark_catalog import BenchmarkRefreshError, refresh_benchmark_catalog
@@ -35,6 +36,12 @@ from llmrouter.cross_repository import (
     resolve_project_contract_path,
 )
 from llmrouter.logging_config import setup_logging
+from llmrouter.model_catalog import (
+    configured_models,
+    fetch_ollama_local_inventory,
+    reconcile_ollama_local_models,
+    write_catalog_proposals,
+)
 from llmrouter.runtime import _build_scorer, build_app, build_registry
 from llmrouter.utils import resolve_api_key
 
@@ -306,6 +313,22 @@ def _parse_args() -> argparse.Namespace:
         help="Assess configured sources only; do not search the web for uncovered models.",
     )
 
+    catalog_sync_parser = subparsers.add_parser(
+        "catalog-sync",
+        help="Discover local Ollama model changes and write review-only proposals.",
+    )
+    catalog_sync_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Proposal JSON path (default: from config).",
+    )
+    catalog_sync_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Do not write; return status 1 when proposals are found.",
+    )
+
     parser.add_argument(
         "--debug",
         "-d",
@@ -541,6 +564,35 @@ def main() -> None:
             "Benchmark research proposals written: "
             f"{report.source_proposals} source(s), {report.model_proposals} model(s) "
             f"({report.output_path})"
+        )
+        return
+
+    if args.command == "catalog-sync":
+        models = configured_models(settings.models_file)
+        base_url = settings.providers.ollama.base_url or "http://localhost:11434"
+        try:
+            inventory = fetch_ollama_local_inventory(base_url)
+        except httpx.HTTPError as exc:
+            print(f"Ollama inventory failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        proposals = reconcile_ollama_local_models(models, inventory)
+        if args.check:
+            print(
+                f"Catalog inventory: {len(inventory)} local model(s), "
+                f"{len(proposals)} proposal(s)"
+            )
+            if proposals:
+                sys.exit(1)
+            return
+        report = write_catalog_proposals(
+            args.output or settings.benchmarks.model_catalog_proposals_path,
+            configured_models=len(models),
+            inventory=inventory,
+            proposals=proposals,
+        )
+        print(
+            f"Catalog proposals written: {len(report.proposals)} proposal(s) "
+            f"({report.output_path}); active catalog unchanged"
         )
         return
 

@@ -22,6 +22,7 @@ from llmrouter.config import RolloutConfig
 from llmrouter.core.benchmark_scorer import score_model
 from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
+from llmrouter.core.peak_pricing import PeakPricingPriorityPolicy
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.scorer import ScoringResult
 from llmrouter.core.types import (
@@ -333,6 +334,7 @@ class MultiModelRouter:
         client_provider_affinity: bool = True,
         dynamic_benchmark_routing: bool = True,
         intent_routing: bool = True,
+        peak_pricing_policy: PeakPricingPriorityPolicy | None = None,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
@@ -347,6 +349,7 @@ class MultiModelRouter:
         self._client_provider_affinity = client_provider_affinity
         self._dynamic_benchmark_routing = dynamic_benchmark_routing
         self._intent_routing = intent_routing
+        self._peak_pricing_policy = peak_pricing_policy
         if health_tracker is not None:
             self._strategy.set_health_tracker(health_tracker)
 
@@ -397,6 +400,7 @@ class MultiModelRouter:
             primary = self._registry.get(request.model)
             assert primary is not None
             fallbacks = self._build_fallbacks(primary, constraints)
+            probe_models = self._claim_due_probe_models()
             _route_elapsed = (time.monotonic() - _route_start) * 1000
             _logger.debug(
                 "Explicit model selection: %s | fallbacks=%s (decision=%.1fms)",
@@ -412,6 +416,7 @@ class MultiModelRouter:
                 score=0.0,
                 tier=primary.tier,
                 reason=f"Explicit model selection: {request.model}",
+                probe_models=probe_models,
             )
 
         # Score the prompt
@@ -466,8 +471,13 @@ class MultiModelRouter:
         ordered = self._apply_dynamic_benchmark_ranking(ordered, scoring)
         ordered = self._apply_inferred_task_affinity(ordered, scoring)
         ordered = self._apply_client_provider_affinity(ordered, request, constraints)
+        ordered = self._apply_peak_pricing_priority(ordered)
         primary = ordered[0]
-        fallbacks = ordered[1 : 1 + self._fallback_count]
+        fallbacks = _provider_diverse_fallbacks(
+            primary,
+            ordered[1:],
+            self._fallback_count,
+        )
 
         # Debug: log final selection
         _logger.debug(
@@ -510,7 +520,14 @@ class MultiModelRouter:
             tier=scoring.tier,
             reason=self._build_reason(scoring, primary),
             rollout_sampled=rollout_sampled,
+            probe_models=self._claim_due_probe_models(),
         )
+
+    def _claim_due_probe_models(self) -> tuple[ModelInfo, ...]:
+        """Claim half-open canaries that the proxy should run in background."""
+        if self._provider_cooldowns is None:
+            return ()
+        return self._provider_cooldowns.claim_due_probes(self._registry.all())
 
     def _get_candidates(self, tier: Tier, constraints: RoutingConstraints) -> list[ModelInfo]:
         """Get candidate models for a tier, filtered by constraints."""
@@ -551,12 +568,12 @@ class MultiModelRouter:
         primary: ModelInfo,
         constraints: RoutingConstraints,
     ) -> list[ModelInfo]:
-        """Build fallback chain excluding the primary model."""
+        """Build a provider-diverse fallback chain excluding the primary model."""
         all_models = self._available_models(self._registry.all())
         if primary in all_models:
             all_models = [m for m in all_models if m.name != primary.name]
         ordered = _unique_models(self._strategy.select(all_models, constraints))
-        return ordered[: self._fallback_count]
+        return _provider_diverse_fallbacks(primary, ordered, self._fallback_count)
 
     def _augment_inferred_task_candidates(
         self,
@@ -673,6 +690,19 @@ class MultiModelRouter:
                 client,
             )
         return [*preferred_models, *other_models]
+
+    def _apply_peak_pricing_priority(self, ordered: list[ModelInfo]) -> list[ModelInfo]:
+        """Demote peak-priced providers while retaining them as fallbacks."""
+        if not ordered or self._peak_pricing_policy is None:
+            return ordered
+        reprioritized = self._peak_pricing_policy.prioritize(ordered)
+        if reprioritized != ordered:
+            _logger.debug(
+                "Peak pricing priority changed model order: %s -> %s",
+                [model.name for model in ordered],
+                [model.name for model in reprioritized],
+            )
+        return reprioritized
 
     @staticmethod
     def _client_affinity_provider(
@@ -833,6 +863,49 @@ def _unique_models(models: list[ModelInfo]) -> list[ModelInfo]:
         unique.append(model)
         seen.add(model.name)
     return unique
+
+
+def _provider_diverse_fallbacks(
+    primary: ModelInfo,
+    candidates: list[ModelInfo],
+    limit: int,
+) -> list[ModelInfo]:
+    """Prefer fallbacks from providers not already present in the chain.
+
+    Candidate quality order is retained within each pass. Once every available
+    provider is represented, remaining slots are filled from the original order.
+    This prevents an account-wide outage from consuming a short fallback chain
+    with several models hosted by the same provider.
+    """
+    if limit <= 0:
+        return []
+
+    candidates = [
+        model
+        for model in _unique_models(candidates)
+        if model.name != primary.name
+    ]
+    selected: list[ModelInfo] = []
+    selected_names: set[str] = set()
+    represented_providers = {primary.provider}
+
+    for model in candidates:
+        if model.provider in represented_providers:
+            continue
+        selected.append(model)
+        selected_names.add(model.name)
+        represented_providers.add(model.provider)
+        if len(selected) == limit:
+            return selected
+
+    for model in candidates:
+        if model.name in selected_names:
+            continue
+        selected.append(model)
+        if len(selected) == limit:
+            break
+
+    return selected
 
 
 def _inferred_task_type(scoring: ScoringResult) -> str | None:

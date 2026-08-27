@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -116,7 +116,10 @@ async def test_chat_completion_uses_exact_response_cache(tmp_path) -> None:
 async def test_chat_completion_fallback_on_error() -> None:
     primary = _model("primary", Provider.OPENAI)
     fallback = _model("fallback", Provider.OLLAMA)
-    provider1 = StubProvider("openai", error=ProviderError("fail", status_code=500, provider="openai"))
+    provider1 = StubProvider(
+        "openai",
+        error=ProviderError("fail", status_code=500, provider="openai"),
+    )
     provider2 = StubProvider("ollama")
     proxy = ProviderProxy(
         {Provider.OPENAI: provider1, Provider.OLLAMA: provider2},
@@ -238,7 +241,10 @@ async def test_stream_completion_fallback_on_error() -> None:
     proxy = ProviderProxy(
         {
             Provider.OPENAI: StubProvider("openai", error=ProviderError("fail", 500, "openai")),
-            Provider.OLLAMA: StubProvider("ollama", chunks=[{"choices": [{"delta": {"content": "ok"}}]}]),
+            Provider.OLLAMA: StubProvider(
+                "ollama",
+                chunks=[{"choices": [{"delta": {"content": "ok"}}]}],
+            ),
         },
     )
     chunks = []
@@ -246,6 +252,36 @@ async def test_stream_completion_fallback_on_error() -> None:
         chunks.append(chunk)
     assert len(chunks) == 1
     assert chunks[0]["choices"][0]["delta"]["content"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_metrics_collects_successful_streaming_fallback() -> None:
+    primary = _model("p", Provider.OPENAI)
+    fallback = _model("fb", Provider.OLLAMA)
+    metrics = MetricsCollector()
+    proxy = ProviderProxy(
+        {
+            Provider.OPENAI: StubProvider(
+                "openai",
+                error=ProviderError("fail", 500, "openai"),
+            ),
+            Provider.OLLAMA: StubProvider(
+                "ollama",
+                chunks=[{"choices": [{"delta": {"content": "ok"}}]}],
+            ),
+        },
+        metrics_collector=metrics,
+    )
+
+    async for _ in proxy.stream_chat_completion(_request(), _decision(primary, [fallback])):
+        pass
+
+    snapshot = await metrics.snapshot()
+    assert snapshot.total_requests == 1
+    assert snapshot.stream_requests == 1
+    assert snapshot.fallback_used == 1
+    assert snapshot.stream_fallback_used == 1
+    assert snapshot.failed_requests == 0
 
 
 @pytest.mark.asyncio
@@ -287,7 +323,12 @@ async def test_stream_completion_provider_not_configured() -> None:
     primary = _model("p", Provider.GEMINI)
     fallback = _model("fb", Provider.OLLAMA)
     proxy = ProviderProxy(
-        {Provider.OLLAMA: StubProvider("ollama", chunks=[{"choices": [{"delta": {"content": "ok"}}]}])},
+        {
+            Provider.OLLAMA: StubProvider(
+                "ollama",
+                chunks=[{"choices": [{"delta": {"content": "ok"}}]}],
+            )
+        },
     )
     chunks = []
     async for chunk in proxy.stream_chat_completion(_request(), _decision(primary, [fallback])):
@@ -310,8 +351,14 @@ async def test_stream_completion_disabled_provider() -> None:
     fallback = _model("fb", Provider.OLLAMA)
     proxy = ProviderProxy(
         {
-            Provider.OPENAI: StubProvider("openai", chunks=[{"choices": [{"delta": {"content": "x"}}]}]),
-            Provider.OLLAMA: StubProvider("ollama", chunks=[{"choices": [{"delta": {"content": "y"}}]}]),
+            Provider.OPENAI: StubProvider(
+                "openai",
+                chunks=[{"choices": [{"delta": {"content": "x"}}]}],
+            ),
+            Provider.OLLAMA: StubProvider(
+                "ollama",
+                chunks=[{"choices": [{"delta": {"content": "y"}}]}],
+            ),
         },
     )
     proxy.disable_provider(Provider.OPENAI)
@@ -420,7 +467,11 @@ async def test_stream_completion_no_streaming_support() -> None:
             return ChatResponse(id="id", model=model, choices=[{"message": {"content": "x"}}],
                                 usage=Usage(), finish_reason=FinishReason.STOP)
 
-        async def stream_completion(self, request: ChatRequest, model: str) -> AsyncIterator[dict[str, object]]:
+        async def stream_completion(
+            self,
+            request: ChatRequest,
+            model: str,
+        ) -> AsyncIterator[dict[str, object]]:
             yield {}
 
     primary = _model("p", Provider.GEMINI)
@@ -428,7 +479,10 @@ async def test_stream_completion_no_streaming_support() -> None:
     proxy = ProviderProxy(
         {
             Provider.GEMINI: NoStreamProvider(),
-            Provider.OLLAMA: StubProvider("ollama", chunks=[{"choices": [{"delta": {"content": "ok"}}]}]),
+            Provider.OLLAMA: StubProvider(
+                "ollama",
+                chunks=[{"choices": [{"delta": {"content": "ok"}}]}],
+            ),
         },
     )
     chunks = []

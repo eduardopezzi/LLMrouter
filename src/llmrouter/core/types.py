@@ -245,6 +245,8 @@ class RoutingDecision:
         rollout_sampled: ``"model_name:percentage"`` when the primary was selected
             via rollout filtering (i.e. had ``rollout_percentage < 100``).
             ``None`` when no rollout filtering was applied.
+        probe_models: Half-open cooldown models to canary in the background while
+            this request is served by an available alternative.
     """
 
     primary: ModelInfo
@@ -253,3 +255,4 @@ class RoutingDecision:
     tier: Tier
     reason: str
     rollout_sampled: str | None = None
+    probe_models: tuple[ModelInfo, ...] = ()

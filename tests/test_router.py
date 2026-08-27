@@ -189,6 +189,57 @@ async def test_router_deduplicates_fallback_models_by_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_prefers_provider_diversity_in_fallback_chain() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="ollama/primary",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                priority=1,
+            ),
+            ModelInfo(
+                name="ollama/secondary",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                priority=2,
+            ),
+            ModelInfo(
+                name="zhipu/fallback",
+                provider=Provider.ZAI,
+                tier=Tier.T3,
+                priority=3,
+            ),
+            ModelInfo(
+                name="deepseek/fallback",
+                provider=Provider.DEEPSEEK,
+                tier=Tier.T3,
+                priority=4,
+            ),
+        )
+    )
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        RoutingStrategy.QUALITY,
+        fallback_count=2,
+        client_provider_affinity=False,
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this architecture")],
+    )
+
+    decision = await router.route(request)
+
+    assert decision.primary.name == "ollama/primary"
+    assert [model.name for model in decision.fallbacks] == [
+        "zhipu/fallback",
+        "deepseek/fallback",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_router_skips_unavailable_provider_for_auto_routes() -> None:
     registry = ModelRegistry(
         models=(

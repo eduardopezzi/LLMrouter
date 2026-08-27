@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -17,7 +18,11 @@ from llmrouter.cli_panel import demote_model_priority
 from llmrouter.config import ProviderConfig, Settings, get_settings
 from llmrouter.core.benchmark_affinity import BenchmarkAffinityScorer
 from llmrouter.core.cache import CacheManager, SQLiteCacheBackend
-from llmrouter.core.cooldown import ProviderCooldownStore, is_quota_exhaustion_error
+from llmrouter.core.cooldown import (
+    ProviderCooldownStore,
+    is_model_unavailable_error,
+    is_quota_exhaustion_error,
+)
 from llmrouter.core.health import (
     HealthBackend,
     HealthWeights,
@@ -25,6 +30,10 @@ from llmrouter.core.health import (
     ModelHealthTracker,
     ReviewQualitySource,
     SQLiteHealthStore,
+)
+from llmrouter.core.peak_pricing import (
+    PeakPricingPriorityPolicy,
+    ProviderPricingRule,
 )
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry, load_model_registry
@@ -69,7 +78,8 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         _build_health_tracker(resolved_settings) if resolved_settings.health.enabled else None
     )
     provider_cooldowns = ProviderCooldownStore(
-        default_seconds=resolved_settings.routing.quota_cooldown_seconds
+        default_seconds=resolved_settings.routing.quota_cooldown_seconds,
+        probe_retry_seconds=resolved_settings.routing.quota_probe_retry_seconds,
     )
     router = MultiModelRouter(
         registry=registry,
@@ -83,6 +93,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         client_provider_affinity=resolved_settings.routing.client_provider_affinity,
         dynamic_benchmark_routing=resolved_settings.routing.dynamic_benchmark_routing,
         intent_routing=resolved_settings.routing.intent_routing,
+        peak_pricing_policy=_build_peak_pricing_policy(resolved_settings),
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
@@ -104,6 +115,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         provider_cooldowns=provider_cooldowns,
         metrics_collector=metrics_collector,
         cache_manager=cache_manager,
+        probe_max_tokens=resolved_settings.routing.quota_probe_max_tokens,
     )
     proxy_holder["proxy"] = proxy
     collector = (
@@ -199,6 +211,23 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     )
     app_holder["app"] = app
     return app
+
+
+def _build_peak_pricing_policy(settings: Settings) -> PeakPricingPriorityPolicy | None:
+    """Build the configured DeepSeek weekday peak-pricing priority policy."""
+    pricing = settings.routing.deepseek_pricing
+    if not pricing.enabled:
+        return None
+    rule = ProviderPricingRule(
+        provider=Provider.DEEPSEEK,
+        timezone_name=pricing.timezone,
+        off_peak_start=pricing.off_peak_start,
+        off_peak_end=pricing.off_peak_end,
+        weekend_off_peak_from=pricing.weekend_off_peak_from,
+    )
+    # Resolve the timezone during startup so a bad setting fails immediately.
+    rule.is_peak(datetime.now(timezone.utc))  # noqa: UP017 - Python 3.10 support.
+    return PeakPricingPriorityPolicy([rule])
 
 
 def _resolve_precog_api_key(settings: Settings) -> str | None:
@@ -378,13 +407,13 @@ def _priority_demoter(
     benchmark_catalog_path: str | None = None,
 ) -> Callable[[ModelInfo, ProviderError], None]:
     def demoter(model: ModelInfo, exc: ProviderError) -> None:
-        if not _is_insufficient_balance_error(exc):
+        if not (_is_insufficient_balance_error(exc) or is_model_unavailable_error(exc)):
             return
-        cooldown_entry = (
-            provider_cooldowns.record_quota_error(model, exc)
-            if provider_cooldowns is not None
-            else None
-        )
+        cooldown_entry = None
+        if provider_cooldowns is not None:
+            cooldown_entry = provider_cooldowns.cooldown_for_model(model)
+            if cooldown_entry is None:
+                cooldown_entry = provider_cooldowns.record_error(model, exc)
         if cooldown_entry is None:
             router.mark_provider_unavailable(model.provider)
             proxy = proxy_holder.get("proxy") if proxy_holder is not None else None
@@ -401,8 +430,12 @@ def _priority_demoter(
                 if app is not None:
                     app.state.registry = registry
         logging.getLogger("llmrouter.runtime").warning(
-            "%s provider '%s' for model '%s' after balance/quota error: %s",
-            ("Put in quota cooldown" if cooldown_entry is not None else "Disabled"),
+            "%s provider '%s' for model '%s' after upstream error: %s",
+            (
+                f"Recorded {cooldown_entry.scope.value} cooldown"
+                if cooldown_entry is not None
+                else "Disabled"
+            ),
             model.provider.value,
             model.name,
             exc,

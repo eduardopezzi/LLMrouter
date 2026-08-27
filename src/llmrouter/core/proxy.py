@@ -11,7 +11,14 @@ from llmrouter.core.cache import CacheManager
 from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.stats import MetricsCollector
-from llmrouter.core.types import ChatRequest, ChatResponse, Provider, RoutingDecision
+from llmrouter.core.types import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    ModelInfo,
+    Provider,
+    RoutingDecision,
+)
 from llmrouter.logging_config import get_logger
 from llmrouter.providers.base import BaseProvider, ProviderError
 
@@ -19,9 +26,11 @@ _logger = get_logger("llmrouter.proxy")
 
 _FallbackMetrics: dict[str, int] = {
     "total_requests": 0,
+    "fallback_attempted": 0,
     "fallback_used": 0,
     "failed_requests": 0,
     "stream_requests": 0,
+    "stream_fallback_attempted": 0,
     "stream_fallback_used": 0,
 }
 _FallbackMetrics_lock: asyncio.Lock | None = None
@@ -39,18 +48,23 @@ def _get_fallback_metrics_lock() -> asyncio.Lock:
 async def _record_fallback_metric(
     *,
     fallback_used: bool,
+    fallback_attempted: bool = False,
     failed: bool = False,
     stream: bool = False,
 ) -> None:
     global _last_fallback_metrics_log
     async with _get_fallback_metrics_lock():
         _FallbackMetrics["total_requests"] += 1
+        if fallback_attempted:
+            _FallbackMetrics["fallback_attempted"] += 1
         if fallback_used:
             _FallbackMetrics["fallback_used"] += 1
         if failed:
             _FallbackMetrics["failed_requests"] += 1
         if stream:
             _FallbackMetrics["stream_requests"] += 1
+            if fallback_attempted:
+                _FallbackMetrics["stream_fallback_attempted"] += 1
             if fallback_used:
                 _FallbackMetrics["stream_fallback_used"] += 1
 
@@ -62,8 +76,14 @@ async def _record_fallback_metric(
         if total <= 0:
             return
         fallback_rate = _FallbackMetrics["fallback_used"] / total * 100.0
+        fallback_attempt_rate = _FallbackMetrics["fallback_attempted"] / total * 100.0
         failed_rate = _FallbackMetrics["failed_requests"] / total * 100.0
         stream_total = _FallbackMetrics["stream_requests"]
+        stream_fallback_attempt_rate = (
+            _FallbackMetrics["stream_fallback_attempted"] / stream_total * 100.0
+            if stream_total
+            else 0.0
+        )
         stream_fallback_rate = (
             _FallbackMetrics["stream_fallback_used"] / stream_total * 100.0
             if stream_total
@@ -71,12 +91,15 @@ async def _record_fallback_metric(
         )
 
     _logger.info(
-        "ProviderFallbackMetrics total=%d fallback_used=%.1f%% failed=%.1f%% "
-        "stream_total=%d stream_fallback_used=%.1f%%",
+        "ProviderFallbackMetrics total=%d fallback_attempted=%.1f%% "
+        "fallback_used=%.1f%% failed=%.1f%% stream_total=%d "
+        "stream_fallback_attempted=%.1f%% stream_fallback_used=%.1f%%",
         total,
+        fallback_attempt_rate,
         fallback_rate,
         failed_rate,
         stream_total,
+        stream_fallback_attempt_rate,
         stream_fallback_rate,
     )
 
@@ -93,6 +116,7 @@ class ProviderProxy:
         provider_cooldowns: ProviderCooldownStore | None = None,
         metrics_collector: MetricsCollector | None = None,
         cache_manager: CacheManager | None = None,
+        probe_max_tokens: int = 32,
     ) -> None:
         self._providers = providers
         self._on_provider_error = on_provider_error
@@ -101,6 +125,8 @@ class ProviderProxy:
         self._provider_cooldowns = provider_cooldowns
         self._metrics_collector = metrics_collector
         self._cache_manager = cache_manager
+        self._probe_max_tokens = probe_max_tokens
+        self._probe_tasks: dict[str, asyncio.Task[None]] = {}
 
     @property
     def providers(self) -> frozenset[Provider]:
@@ -129,9 +155,11 @@ class ProviderProxy:
         decision: RoutingDecision,
     ) -> ChatResponse:
         """Call the primary model and configured fallbacks."""
+        self._schedule_probes(decision.probe_models)
         started = time.perf_counter()
         attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
+        fallback_attempted = False
 
         cached = await self._cached_response(request, decision)
         if cached is not None:
@@ -149,14 +177,15 @@ class ProviderProxy:
             cooldown = self._cooldown_for_model(model)
             if cooldown is not None:
                 _logger.warning(
-                    "Provider '%s' in cooldown for model '%s' for %.0fs",
-                    model.provider.value,
+                    "Model '%s' blocked by %s cooldown for provider '%s' (%s)",
                     model.name,
-                    cooldown.seconds_remaining,
+                    cooldown.scope.value,
+                    model.provider.value,
+                    "permanent" if cooldown.permanent else f"{cooldown.seconds_remaining:.0f}s",
                 )
                 last_error = ProviderError(
-                    f"Provider {model.provider.value} is in quota cooldown",
-                    status_code=429,
+                    f"Model {model.name} is blocked by {cooldown.scope.value} cooldown",
+                    status_code=410 if cooldown.permanent else 429,
                     provider=model.provider.value,
                 )
                 continue
@@ -186,6 +215,7 @@ class ProviderProxy:
                 continue
 
             try:
+                fallback_attempted = fallback_attempted or i > 0
                 _logger.debug(
                     "Trying provider '%s' (%s) [%d/%d]",
                     model.provider.value,
@@ -197,7 +227,10 @@ class ProviderProxy:
                 if i == 0:
                     await self._store_cached_response(request, model, response)
                 await self._record_success(model, response)
-                await _record_fallback_metric(fallback_used=i > 0)
+                await _record_fallback_metric(
+                    fallback_used=i > 0,
+                    fallback_attempted=fallback_attempted,
+                )
                 await self._record_request_metrics(
                     decision,
                     started=started,
@@ -223,7 +256,11 @@ class ProviderProxy:
                 last_error = exc
 
         if last_error is not None:
-            await _record_fallback_metric(fallback_used=False, failed=True)
+            await _record_fallback_metric(
+                fallback_used=False,
+                fallback_attempted=fallback_attempted,
+                failed=True,
+            )
             await self._record_request_metrics(decision, started=started, failed=True)
             raise last_error
         await _record_fallback_metric(fallback_used=False, failed=True)
@@ -271,17 +308,19 @@ class ProviderProxy:
         Yields parsed SSE chunk dictionaries in OpenAI format. On retryable errors
         from the primary model, falls back to the next model in the decision chain.
         """
-        started = time.perf_counter()
+        self._schedule_probes(decision.probe_models)
+        request_started = time.perf_counter()
         attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
+        fallback_attempted = False
 
         for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
             cooldown = self._cooldown_for_model(model)
             if cooldown is not None:
                 last_error = ProviderError(
-                    f"Provider {model.provider.value} is in quota cooldown",
-                    status_code=429,
+                    f"Model {model.name} is blocked by {cooldown.scope.value} cooldown",
+                    status_code=410 if cooldown.permanent else 429,
                     provider=model.provider.value,
                 )
                 continue
@@ -317,15 +356,20 @@ class ProviderProxy:
                     i + 1,
                     len(attempts),
                 )
-                started = time.perf_counter()
+                fallback_attempted = fallback_attempted or i > 0
+                attempt_started = time.perf_counter()
                 async for chunk in provider.stream_completion(request, model.provider_model_name):
                     yield chunk
-                elapsed_ms = (time.perf_counter() - started) * 1000
+                elapsed_ms = (time.perf_counter() - attempt_started) * 1000
                 await self._record_stream_success(model, elapsed_ms)
-                await _record_fallback_metric(fallback_used=i > 0, stream=True)
+                await _record_fallback_metric(
+                    fallback_used=i > 0,
+                    fallback_attempted=fallback_attempted,
+                    stream=True,
+                )
                 await self._record_request_metrics(
                     decision,
-                    started=started,
+                    started=request_started,
                     fallback_used=i > 0,
                     stream=True,
                 )
@@ -350,17 +394,103 @@ class ProviderProxy:
                 continue
 
         if last_error is not None:
-            await _record_fallback_metric(fallback_used=False, failed=True, stream=True)
-            await self._record_request_metrics(decision, started=started, failed=True, stream=True)
+            await _record_fallback_metric(
+                fallback_used=False,
+                fallback_attempted=fallback_attempted,
+                failed=True,
+                stream=True,
+            )
+            await self._record_request_metrics(
+                decision,
+                started=request_started,
+                failed=True,
+                stream=True,
+            )
             raise last_error
         await _record_fallback_metric(fallback_used=False, failed=True, stream=True)
-        await self._record_request_metrics(decision, started=started, failed=True, stream=True)
+        await self._record_request_metrics(
+            decision,
+            started=request_started,
+            failed=True,
+            stream=True,
+        )
         raise ProviderError("No provider attempts were available for streaming", status_code=503)
 
     async def close(self) -> None:
         """Close all provider clients."""
+        probe_tasks = list(self._probe_tasks.values())
+        for task in probe_tasks:
+            task.cancel()
+        if probe_tasks:
+            await asyncio.gather(*probe_tasks, return_exceptions=True)
         for provider in self._providers.values():
             await provider.close()
+
+    async def wait_for_probes(self) -> None:
+        """Wait until all currently scheduled half-open probes complete."""
+        while self._probe_tasks:
+            await asyncio.gather(*list(self._probe_tasks.values()), return_exceptions=True)
+
+    def _schedule_probes(self, models: tuple[ModelInfo, ...]) -> None:
+        for model in models:
+            if model.name in self._probe_tasks:
+                continue
+            task = asyncio.create_task(self._probe_model(model))
+            self._probe_tasks[model.name] = task
+            task.add_done_callback(self._probe_finished)
+
+    def _probe_finished(self, completed: asyncio.Future[None]) -> None:
+        for model_name, task in tuple(self._probe_tasks.items()):
+            if task is completed:
+                self._probe_tasks.pop(model_name, None)
+                return
+
+    async def _probe_model(self, model: ModelInfo) -> None:
+        if self._provider_cooldowns is None:
+            return
+        provider = self._providers.get(model.provider)
+        if provider is None or model.provider in self._disabled_providers:
+            exc = ProviderError(
+                f"Provider {model.provider.value} is unavailable for cooldown probe",
+                status_code=503,
+                provider=model.provider.value,
+            )
+            self._provider_cooldowns.probe_failed(model, exc)
+            return
+
+        request = ChatRequest(
+            model=model.name,
+            messages=[ChatMessage(role="user", content="Reply only: OK")],
+            temperature=0.0,
+            max_tokens=self._probe_max_tokens,
+        )
+        try:
+            await provider.chat_completion(request, model.provider_model_name)
+        except ProviderError as exc:
+            entry = self._provider_cooldowns.probe_failed(model, exc)
+            if entry is not None:
+                _logger.warning(
+                    "Cooldown probe failed for '%s'; %s scope remains blocked for %.0fs: %s",
+                    model.name,
+                    entry.scope.value,
+                    entry.seconds_remaining,
+                    exc,
+                )
+        except Exception as exc:  # pragma: no cover - provider contract is ProviderError
+            provider_exc = ProviderError(
+                f"Cooldown probe failed: {exc}",
+                status_code=503,
+                provider=model.provider.value,
+            )
+            self._provider_cooldowns.probe_failed(model, provider_exc)
+        else:
+            entry = self._provider_cooldowns.probe_succeeded(model)
+            if entry is not None:
+                _logger.info(
+                    "Cooldown probe succeeded for '%s'; restored %s scope for next request",
+                    model.name,
+                    entry.scope.value,
+                )
 
     def _handle_provider_error(self, model: Any, exc: ProviderError) -> None:
         if self._on_provider_error is None:
@@ -378,11 +508,7 @@ class ProviderProxy:
         if self._provider_cooldowns is None:
             return None
         try:
-            if not self._provider_cooldowns.is_model_available(model):
-                return (
-                    self._provider_cooldowns.model_cooldown(model.name)
-                    or self._provider_cooldowns.provider_cooldown(model.provider)
-                )
+            return self._provider_cooldowns.cooldown_for_model(model)
         except Exception as exc:  # pragma: no cover - defensive logging
             _logger.warning("Provider cooldown check failed for '%s': %s", model.name, exc)
         return None
@@ -391,13 +517,14 @@ class ProviderProxy:
         if self._provider_cooldowns is None:
             return
         try:
-            entry = self._provider_cooldowns.record_quota_error(model, exc)
+            entry = self._provider_cooldowns.record_error(model, exc)
             if entry is not None:
                 _logger.warning(
-                    "Provider '%s' put in quota cooldown for %.0fs after model '%s': %s",
+                    "Recorded %s cooldown for provider '%s', model '%s' (%s): %s",
+                    entry.scope.value,
                     model.provider.value,
-                    entry.seconds_remaining,
                     model.name,
+                    "permanent" if entry.permanent else f"{entry.seconds_remaining:.0f}s",
                     exc,
                 )
         except Exception as cooldown_exc:  # pragma: no cover - defensive logging
