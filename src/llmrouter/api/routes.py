@@ -1009,7 +1009,7 @@ def _resolve_prompt_directives(
             _logger.debug("Prompt directive model fuzzy matched: %s -> %s", model, model_match)
             resolved["model"] = model_match
     if project := resolved.get("project"):
-        project_match = _closest_word(project, project_candidates)
+        project_match = _closest_word(project, project_candidates, cutoff=0.6)
         if project_match and project_match != project:
             _logger.debug(
                 "Prompt directive project fuzzy matched: %s -> %s",
@@ -1030,14 +1030,14 @@ def _closest_model_name(term: str, registry: ModelRegistry) -> str | None:
     return choices.get(matched or "")
 
 
-def _closest_word(term: str, words: list[str]) -> str | None:
+def _closest_word(term: str, words: list[str], *, cutoff: float = 0.0) -> str | None:
     unique_words = [word for word in dict.fromkeys(words) if word]
     if not term or not unique_words:
         return None
     exact = {word.casefold(): word for word in unique_words}
     if term.casefold() in exact:
         return exact[term.casefold()]
-    result = difflib.get_close_matches(term, unique_words, n=1, cutoff=0.0)
+    result = difflib.get_close_matches(term, unique_words, n=1, cutoff=cutoff)
     return result[0] if result else None
 
 

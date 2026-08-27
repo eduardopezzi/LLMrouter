@@ -369,7 +369,7 @@ class ProviderProxy:
                 )
                 await self._record_request_metrics(
                     decision,
-                    started=request_started,
+                    started=started,
                     fallback_used=i > 0,
                     stream=True,
                 )
@@ -402,7 +402,7 @@ class ProviderProxy:
             )
             await self._record_request_metrics(
                 decision,
-                started=request_started,
+                started=started,
                 failed=True,
                 stream=True,
             )
@@ -410,7 +410,7 @@ class ProviderProxy:
         await _record_fallback_metric(fallback_used=False, failed=True, stream=True)
         await self._record_request_metrics(
             decision,
-            started=request_started,
+            started=started,
             failed=True,
             stream=True,
         )
