@@ -25,7 +25,7 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["architecture", "review", "refactoring", "fix", "migration", "test_generation"]
-    priority: 1
+    priority: 8
     description: "Kimi K3 (2.8T) — Modelo multimodal agêntico nativo com 1M de contexto. Flagship para arquitetura, revisão profunda, refatoração de bases extensas, correções complexas, migrações e geração de testes em longas sessões de engenharia."
     max_tokens: 128000
     context_window: 1000000
@@ -38,7 +38,7 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "test_generation", "documentation", "summarization", "refactoring"]
-    priority: 2
+    priority: 9
     description: "MiniMax-M3 — 1M+ contexto, excelente para tarefas de contexto longo como documentação, revisão abrangente e refatoração de bases extensas."
     max_tokens: 393216
     context_window: 1048576
@@ -51,7 +51,7 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "migration"]
-    priority: 3
+    priority: 11
     description: "Kimi-K2.7-Code — Tech Lead sênior focado em correções profundas e migrações complexas de ecossistema."
     max_tokens: 128000
     context_window: 262144
@@ -64,7 +64,7 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["architecture", "review", "security_audit", "fix"]
-    priority: 4
+    priority: 6
     description: "DeepSeek-V4-Pro — Raciocínio lógico (MoE/MLA) impecável para auditoria de segurança e System Design."
     max_tokens: 393216
     context_window: 1000000
@@ -77,7 +77,7 @@ models:
     tier: 2
     api_base: "http://localhost:11434"
     roles: ["test_generation", "summarization", "refactoring"]
-    priority: 5
+    priority: 3
     description: "DeepSeek V4 Flash — MoE eficiente com contexto longo, rapido para testes, resumos e refatoracoes pontuais."
     max_tokens: 393216
     context_window: 1000000
@@ -90,7 +90,7 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["test_generation", "refactoring"]
-    priority: 6
+    priority: 10
     description: "Qwen 3 Coder 480B — Engenheiro especialista em grandes refatorações e suítes completas de testes."
     max_tokens: 65536
     context_window: 262144
@@ -111,12 +111,25 @@ models:
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
 
+  - name: "ollama/glm-5.3-flash:cloud"
+    provider: "ollama"
+    tier: 3
+    api_base: "http://localhost:11434"
+    roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
+    priority: 1
+    description: "GLM-5.3 Flash — 1M de contexto, multimodal e otimizado para coding/agentes com custo-benefício superior ao GLM-5.2."
+    max_tokens: 131072
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+
   - name: "ollama/north-mini-code-1.0:cloud"
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
     roles: ["fix", "refactoring"]
-    priority: 8
+    priority: 15
     description: "Cohere North Mini Code (30B) — Especialista ultrarrápido em automações agênticas locais e patches diretos."
     max_tokens: 128000
     context_window: 499712
@@ -129,7 +142,7 @@ models:
     tier: 2
     api_base: "http://localhost:11434"
     roles: ["test_generation", "documentation"]
-    priority: 9
+    priority: 17
     description: "Qwen 3.6 (27B) — Escrita ágil e precisa de documentações técnicas de arquivos múltiplos."
     max_tokens: 128000
     context_window: 262144
@@ -142,7 +155,7 @@ models:
     tier: 2
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "refactoring"]
-    priority: 10
+    priority: 16
     description: "Gemma 4 (31B) — Modelo de nuvem nativo do Ollama com excelente capacidade de agenciamento de código."
     max_tokens: 262144
     context_window: 262144
@@ -155,7 +168,7 @@ models:
     tier: 1
     api_base: "http://localhost:11434"
     roles: ["summarization", "documentation"]
-    priority: 11
+    priority: 18
     description: "Qwen 2.5 Coder 3B — Extremamente rápido e leve para resumos de commits e geração de Docstrings simples."
     max_tokens: 8192
     context_window: 32768
@@ -168,7 +181,7 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["review", "fix"]
-    priority: 12
+    priority: 13
     description: "DeepSeek V3.2 — MoE cloud com thinking e tools, raciocinio avancado para review e correcoes."
     max_tokens: 128000
     context_window: 163840
@@ -181,7 +194,7 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["test_generation", "summarization"]
-    priority: 13
+    priority: 14
     description: "DeepSeek V3.1 — MoE cloud com thinking e tools, versatil para geracao de testes e resumos."
     max_tokens: 128000
     context_window: 163840
@@ -192,29 +205,29 @@ models:
   # ==================================================================
   # DeepSeek — Provedor OpenAI-compatible
   # ==================================================================
-  - name: "deepseek/deepseek-chat"
+  - name: "deepseek/deepseek-v4-flash"
     provider: "deepseek"
     tier: 3
     roles: ["review", "fix", "refactoring", "test_generation", "documentation", "summarization"]
-    priority: 14
-    description: "DeepSeek V3 — modelo flagship com 671B parâmetros MoE, excelente custo-benefício"
-    max_tokens: 393216
+    priority: 2
+    description: "DeepSeek V4 Flash — modelo direto rápido e econômico para tarefas gerais e agentes."
+    max_tokens: 384000
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 0.27
-    completion_cost_per_1m_tokens: 1.10
-    cached_prompt_cost_per_1m_tokens: 0.07
+    prompt_cost_per_1m_tokens: 0.14
+    completion_cost_per_1m_tokens: 0.28
+    cached_prompt_cost_per_1m_tokens: 0.0028
 
-  - name: "deepseek/deepseek-reasoner"
+  - name: "deepseek/deepseek-v4-pro"
     provider: "deepseek"
     tier: 3
     roles: ["architecture", "review", "security_audit", "fix"]
-    priority: 15
-    description: "DeepSeek R1 — reasoning model com chain-of-thought, ideal para tarefas complexas"
-    max_tokens: 65536
+    priority: 5
+    description: "DeepSeek V4 Pro — modelo direto para arquitetura, segurança e tarefas complexas."
+    max_tokens: 384000
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 0.55
-    completion_cost_per_1m_tokens: 2.19
-    cached_prompt_cost_per_1m_tokens: 0.14
+    prompt_cost_per_1m_tokens: 0.435
+    completion_cost_per_1m_tokens: 0.87
+    cached_prompt_cost_per_1m_tokens: 0.003625
 
   # ==================================================================
   # Z AI (Zhipu) — Provedor de fallback
@@ -223,7 +236,7 @@ models:
     provider: "zai"
     tier: 3
     roles: ["review", "fix", "test_generation", "refactoring", "migration"]
-    priority: 1
+    priority: 4
     description: "GLM-5.2 via Z AI — Nova geração com alta densidade por token para reestruturação ativa de código."
     max_tokens: 131072
     context_window: 1000000
@@ -235,7 +248,7 @@ models:
     provider: "zai"
     tier: 3
     roles: ["review", "fix", "test_generation", "summarization", "documentation"]
-    priority: 16
+    priority: 12
     description: "GLM-5.1 via Z AI — Fallback estável generalista para cobertura completa das tarefas."
     max_tokens: 131072
     context_window: 200000

@@ -1,4 +1,4 @@
-generated_at: '2026-08-03T19:24:43Z'
+generated_at: '2026-08-27T13:16:00Z'
 models:
   ollama/deepseek-v4-pro:cloud:
     benchmark_scores:
@@ -169,6 +169,120 @@ models:
         source_type: benchmark_leaderboard
         source_url: https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md
         value: 48.2
+  ollama/glm-5.3-flash:cloud:
+    benchmark_scores:
+      Agents Last Exam:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 26.3
+      AutomationBench v1.0.6:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 48.8
+      BabyVision:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 53.4
+      CharXiv Reasoning with Tools:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 89.4
+      Chartography with Tools:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 78.0
+      DeepSWE v1.1:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 63.4
+      GDPval-AA v2:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 1773.0
+      HLE with Tools:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 55.3
+      MMVU:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 80.5
+      MVBench:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 77.8
+      NL2Repo:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 56.3
+      OfficeQA Pro:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 62.4
+      TerminalBench 2.1:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 84.3
+      Toolathlon Verified:
+        collected_at: '2026-08-27T13:15:59Z'
+        methodology: Official Ollama model card, published 2026-08-26; Z.ai benchmark
+          table with documented evaluation settings.
+        published_at: null
+        source_type: official_model_card
+        source_url: https://ollama.com/library/glm-5.3-flash
+        value: 78.4
   ollama/kimi-k2.7-code:cloud:
     benchmark_scores:
       Kimi Claw 24/7 Bench:

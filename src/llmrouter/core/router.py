@@ -467,7 +467,11 @@ class MultiModelRouter:
         ordered = self._apply_inferred_task_affinity(ordered, scoring)
         ordered = self._apply_client_provider_affinity(ordered, request, constraints)
         primary = ordered[0]
-        fallbacks = ordered[1 : 1 + self._fallback_count]
+        fallbacks = _provider_diverse_fallbacks(
+            primary,
+            ordered[1:],
+            self._fallback_count,
+        )
 
         # Debug: log final selection
         _logger.debug(
@@ -551,12 +555,12 @@ class MultiModelRouter:
         primary: ModelInfo,
         constraints: RoutingConstraints,
     ) -> list[ModelInfo]:
-        """Build fallback chain excluding the primary model."""
+        """Build a provider-diverse fallback chain excluding the primary model."""
         all_models = self._available_models(self._registry.all())
         if primary in all_models:
             all_models = [m for m in all_models if m.name != primary.name]
         ordered = _unique_models(self._strategy.select(all_models, constraints))
-        return ordered[: self._fallback_count]
+        return _provider_diverse_fallbacks(primary, ordered, self._fallback_count)
 
     def _augment_inferred_task_candidates(
         self,
@@ -833,6 +837,49 @@ def _unique_models(models: list[ModelInfo]) -> list[ModelInfo]:
         unique.append(model)
         seen.add(model.name)
     return unique
+
+
+def _provider_diverse_fallbacks(
+    primary: ModelInfo,
+    candidates: list[ModelInfo],
+    limit: int,
+) -> list[ModelInfo]:
+    """Prefer fallbacks from providers not already present in the chain.
+
+    Candidate quality order is retained within each pass. Once every available
+    provider is represented, remaining slots are filled from the original order.
+    This prevents an account-wide outage from consuming a short fallback chain
+    with several models hosted by the same provider.
+    """
+    if limit <= 0:
+        return []
+
+    candidates = [
+        model
+        for model in _unique_models(candidates)
+        if model.name != primary.name
+    ]
+    selected: list[ModelInfo] = []
+    selected_names: set[str] = set()
+    represented_providers = {primary.provider}
+
+    for model in candidates:
+        if model.provider in represented_providers:
+            continue
+        selected.append(model)
+        selected_names.add(model.name)
+        represented_providers.add(model.provider)
+        if len(selected) == limit:
+            return selected
+
+    for model in candidates:
+        if model.name in selected_names:
+            continue
+        selected.append(model)
+        if len(selected) == limit:
+            break
+
+    return selected
 
 
 def _inferred_task_type(scoring: ScoringResult) -> str | None:

@@ -19,9 +19,11 @@ _logger = get_logger("llmrouter.proxy")
 
 _FallbackMetrics: dict[str, int] = {
     "total_requests": 0,
+    "fallback_attempted": 0,
     "fallback_used": 0,
     "failed_requests": 0,
     "stream_requests": 0,
+    "stream_fallback_attempted": 0,
     "stream_fallback_used": 0,
 }
 _FallbackMetrics_lock: asyncio.Lock | None = None
@@ -39,18 +41,23 @@ def _get_fallback_metrics_lock() -> asyncio.Lock:
 async def _record_fallback_metric(
     *,
     fallback_used: bool,
+    fallback_attempted: bool = False,
     failed: bool = False,
     stream: bool = False,
 ) -> None:
     global _last_fallback_metrics_log
     async with _get_fallback_metrics_lock():
         _FallbackMetrics["total_requests"] += 1
+        if fallback_attempted:
+            _FallbackMetrics["fallback_attempted"] += 1
         if fallback_used:
             _FallbackMetrics["fallback_used"] += 1
         if failed:
             _FallbackMetrics["failed_requests"] += 1
         if stream:
             _FallbackMetrics["stream_requests"] += 1
+            if fallback_attempted:
+                _FallbackMetrics["stream_fallback_attempted"] += 1
             if fallback_used:
                 _FallbackMetrics["stream_fallback_used"] += 1
 
@@ -62,8 +69,14 @@ async def _record_fallback_metric(
         if total <= 0:
             return
         fallback_rate = _FallbackMetrics["fallback_used"] / total * 100.0
+        fallback_attempt_rate = _FallbackMetrics["fallback_attempted"] / total * 100.0
         failed_rate = _FallbackMetrics["failed_requests"] / total * 100.0
         stream_total = _FallbackMetrics["stream_requests"]
+        stream_fallback_attempt_rate = (
+            _FallbackMetrics["stream_fallback_attempted"] / stream_total * 100.0
+            if stream_total
+            else 0.0
+        )
         stream_fallback_rate = (
             _FallbackMetrics["stream_fallback_used"] / stream_total * 100.0
             if stream_total
@@ -71,12 +84,15 @@ async def _record_fallback_metric(
         )
 
     _logger.info(
-        "ProviderFallbackMetrics total=%d fallback_used=%.1f%% failed=%.1f%% "
-        "stream_total=%d stream_fallback_used=%.1f%%",
+        "ProviderFallbackMetrics total=%d fallback_attempted=%.1f%% "
+        "fallback_used=%.1f%% failed=%.1f%% stream_total=%d "
+        "stream_fallback_attempted=%.1f%% stream_fallback_used=%.1f%%",
         total,
+        fallback_attempt_rate,
         fallback_rate,
         failed_rate,
         stream_total,
+        stream_fallback_attempt_rate,
         stream_fallback_rate,
     )
 
@@ -132,6 +148,7 @@ class ProviderProxy:
         started = time.perf_counter()
         attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
+        fallback_attempted = False
 
         cached = await self._cached_response(request, decision)
         if cached is not None:
@@ -186,6 +203,7 @@ class ProviderProxy:
                 continue
 
             try:
+                fallback_attempted = fallback_attempted or i > 0
                 _logger.debug(
                     "Trying provider '%s' (%s) [%d/%d]",
                     model.provider.value,
@@ -197,7 +215,10 @@ class ProviderProxy:
                 if i == 0:
                     await self._store_cached_response(request, model, response)
                 await self._record_success(model, response)
-                await _record_fallback_metric(fallback_used=i > 0)
+                await _record_fallback_metric(
+                    fallback_used=i > 0,
+                    fallback_attempted=fallback_attempted,
+                )
                 await self._record_request_metrics(
                     decision,
                     started=started,
@@ -223,7 +244,11 @@ class ProviderProxy:
                 last_error = exc
 
         if last_error is not None:
-            await _record_fallback_metric(fallback_used=False, failed=True)
+            await _record_fallback_metric(
+                fallback_used=False,
+                fallback_attempted=fallback_attempted,
+                failed=True,
+            )
             await self._record_request_metrics(decision, started=started, failed=True)
             raise last_error
         await _record_fallback_metric(fallback_used=False, failed=True)
@@ -271,9 +296,10 @@ class ProviderProxy:
         Yields parsed SSE chunk dictionaries in OpenAI format. On retryable errors
         from the primary model, falls back to the next model in the decision chain.
         """
-        started = time.perf_counter()
+        request_started = time.perf_counter()
         attempts = _unique_attempts([decision.primary, *decision.fallbacks])
         last_error: ProviderError | None = None
+        fallback_attempted = False
 
         for i, model in enumerate(attempts):
             provider = self._providers.get(model.provider)
@@ -317,15 +343,20 @@ class ProviderProxy:
                     i + 1,
                     len(attempts),
                 )
-                started = time.perf_counter()
+                fallback_attempted = fallback_attempted or i > 0
+                attempt_started = time.perf_counter()
                 async for chunk in provider.stream_completion(request, model.provider_model_name):
                     yield chunk
-                elapsed_ms = (time.perf_counter() - started) * 1000
+                elapsed_ms = (time.perf_counter() - attempt_started) * 1000
                 await self._record_stream_success(model, elapsed_ms)
-                await _record_fallback_metric(fallback_used=i > 0, stream=True)
+                await _record_fallback_metric(
+                    fallback_used=i > 0,
+                    fallback_attempted=fallback_attempted,
+                    stream=True,
+                )
                 await self._record_request_metrics(
                     decision,
-                    started=started,
+                    started=request_started,
                     fallback_used=i > 0,
                     stream=True,
                 )
@@ -350,11 +381,26 @@ class ProviderProxy:
                 continue
 
         if last_error is not None:
-            await _record_fallback_metric(fallback_used=False, failed=True, stream=True)
-            await self._record_request_metrics(decision, started=started, failed=True, stream=True)
+            await _record_fallback_metric(
+                fallback_used=False,
+                fallback_attempted=fallback_attempted,
+                failed=True,
+                stream=True,
+            )
+            await self._record_request_metrics(
+                decision,
+                started=request_started,
+                failed=True,
+                stream=True,
+            )
             raise last_error
         await _record_fallback_metric(fallback_used=False, failed=True, stream=True)
-        await self._record_request_metrics(decision, started=started, failed=True, stream=True)
+        await self._record_request_metrics(
+            decision,
+            started=request_started,
+            failed=True,
+            stream=True,
+        )
         raise ProviderError("No provider attempts were available for streaming", status_code=503)
 
     async def close(self) -> None:

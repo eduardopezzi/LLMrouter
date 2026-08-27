@@ -166,7 +166,9 @@ def is_quota_exhaustion_error(exc: ProviderError) -> bool:
         return False
     message = str(exc).lower()
     indicators = (
+        "usage limit",
         "usage limit reached",
+        "session limit",
         "rate limit",
         "quota",
         "quota exceeded",
