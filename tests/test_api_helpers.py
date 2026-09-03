@@ -32,6 +32,7 @@ from llmrouter.api.routes import (
     _estimate_cost,
     _task_role,
     _precog_project,
+    _precog_repository,
     _rag_metadata,
     _memory_payload,
     _prompt_hash,
@@ -499,6 +500,22 @@ def test_precog_project_default() -> None:
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert _precog_project(payload, "default") == "default"
+
+
+def test_precog_repository_requires_canonical_proxy_identity() -> None:
+    """Only the trusted proxy identity becomes PRecog repository provenance."""
+    trusted = ChatCompletionPayload.model_validate({
+        "messages": [{"role": "user", "content": "hi"}],
+        "extra": {"_llmrouter_trusted_repository": "Vieli-Tech/PRecog"},
+        "llmrouter": {"project": "Vieli-Tech/Other"},
+    })
+    untrusted = ChatCompletionPayload.model_validate({
+        "messages": [{"role": "user", "content": "hi"}],
+        "llmrouter": {"project": "Vieli-Tech/PRecog"},
+    })
+
+    assert _precog_repository(trusted) == "Vieli-Tech/PRecog"
+    assert _precog_repository(untrusted) == ""
 
 
 def test_rag_metadata_not_used() -> None:

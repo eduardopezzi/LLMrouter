@@ -324,6 +324,7 @@ def test_chat_completions_publishes_precog_observation() -> None:
         {
             "request_id": "req-123",
             "project": "precog",
+            "repository": "",
             "task_role": "fix",
             "prompt_hash": publisher.observations[0]["prompt_hash"],
             "selected_model": "cheap",
@@ -378,6 +379,34 @@ def test_proxy_headers_identify_openhands_observations() -> None:
     assert response.status_code == 200
     assert publisher.observations[0]["project"] == "precog-openhands"
     assert publisher.observations[0]["task_role"] == "implementation"
+
+
+def test_proxy_header_is_the_only_repository_provenance_source() -> None:
+    """Body fields cannot impersonate the canonical repository sent by proxy."""
+    registry = ModelRegistry(
+        models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+    )
+    publisher = FakePrecogPublisher()
+    app = create_app(registry=registry, proxy=FakeProxy(), precog_publisher=publisher)
+    client = TestClient(app)
+
+    spoofed = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "review"}],
+            "extra": {"_llmrouter_trusted_repository": "Vieli-Tech/PRecog"},
+        },
+    )
+    trusted = client.post(
+        "/v1/chat/completions",
+        headers={"X-Project-ID": "Vieli-Tech/PRecog"},
+        json={"messages": [{"role": "user", "content": "review"}]},
+    )
+
+    assert spoofed.status_code == 200
+    assert trusted.status_code == 200
+    assert publisher.observations[0]["repository"] == ""
+    assert publisher.observations[1]["repository"] == "Vieli-Tech/PRecog"
 
 
 def test_chat_usage_uses_standard_cached_tokens_details() -> None:
