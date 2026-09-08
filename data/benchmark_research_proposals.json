@@ -4,9 +4,9 @@
   "model_proposals": [],
   "schema_version": 1,
   "status": "pending_human_review",
-  "generated_at": "2026-08-26T06:05:58Z",
+  "generated_at": "2026-09-08T18:48:32Z",
   "research_model": "qwen2.5-coder:3b",
-  "source_excerpts_available": 7,
+  "source_excerpts_available": 8,
   "uncovered_models_checked": 10,
   "internet_search_enabled": true,
   "notice": "Suggestions are non-authoritative. Review official URLs, methodology, and table mappings before adding a source or model to active catalogs."
