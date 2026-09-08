@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from llmrouter.cli_panel import (
     FALLBACK_COUNT_ENV,
@@ -21,11 +22,13 @@ from llmrouter.cli_panel import (
     render_current_settings,
     render_model_priorities,
     render_panel_summary,
+    render_usage_report,
     reset_model_priorities_to_catalog_order,
     set_fallback_count,
     set_model_priority_order,
     set_provider_cost_order,
     set_routing_strategy,
+    usage_report,
 )
 from llmrouter.config import Settings
 from llmrouter.core.registry import ModelRegistry
@@ -367,6 +370,79 @@ def test_observation_stats_reads_sqlite_database(tmp_path) -> None:
     assert stats["top_models"] == [
         {"model": "deepseek/reviewer", "requests": 1, "avg_latency_ms": 25.0}
     ]
+
+
+def test_usage_report_aggregates_models_strategy_tiers_and_rag(tmp_path) -> None:
+    db_path = tmp_path / "llmrouter.db"
+    now = datetime.now(timezone.utc)  # noqa: UP017 (Python 3.10 test environment)
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """CREATE TABLE observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt TEXT NOT NULL, chosen_model TEXT NOT NULL, response TEXT NOT NULL,
+                latency_ms REAL NOT NULL, cost_usd REAL NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                scorer_score REAL, scorer_tier INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        recent = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        old = (now - timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = [
+            (
+                "a", "m1", 100, 0.01, 10, 5, 1,
+                '{"routing_strategy":"balanced","rag_used":"true",'
+                '"rag_collection":"docs","rag_context_tokens":"40",'
+                '"memory_used":"true"}', recent,
+            ),
+            (
+                "b", "m1", 200, 0.02, 20, 10, 2,
+                '{"routing_strategy":"balanced","rag_used":"false",'
+                '"memory_used":"false"}', recent,
+            ),
+            ("c", "m2", 300, 0.03, 30, 15, 3, '{}', old),
+        ]
+        db.executemany(
+            """INSERT INTO observations
+            (prompt, chosen_model, response, latency_ms, cost_usd, prompt_tokens,
+             completion_tokens, scorer_tier, metadata_json, created_at)
+            VALUES (?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        db.commit()
+
+    report = usage_report(db_path, hours=6, now=now)
+
+    assert report["requests"] == 2
+    assert report["total_cost_usd"] == 0.03
+    assert report["avg_latency_ms"] == 150.0
+    assert report["strategies"] == {"balanced": 2}
+    assert report["tiers"] == {"T1": 1, "T2": 1}
+    assert report["rag"] == {
+        "requests": 1,
+        "usage_rate_pct": 50.0,
+        "context_tokens": 40,
+        "collections": {"docs": 1},
+    }
+    assert report["memory"] == {"requests": 1, "usage_rate_pct": 50.0}
+    assert report["models"] == [
+        {
+            "model": "m1",
+            "requests": 2,
+            "avg_latency_ms": 150.0,
+            "cost_usd": 0.03,
+            "avg_score": 0.0,
+        }
+    ]
+
+
+def test_usage_report_handles_missing_database_and_renders_empty_models(tmp_path) -> None:
+    report = usage_report(tmp_path / "missing.db")
+    assert report["requests"] == 0
+    rendered = render_usage_report(tmp_path / "missing.db")
+    assert "last 6h" in rendered
+    assert "- none" in rendered
 
 
 def test_render_current_settings_shows_all_sections(tmp_path) -> None:

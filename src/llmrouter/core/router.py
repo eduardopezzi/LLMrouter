@@ -24,7 +24,7 @@ from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.peak_pricing import PeakPricingPriorityPolicy
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.scorer import ScoringResult
+from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.types import (
     ChatRequest,
     ModelInfo,
@@ -37,6 +37,7 @@ from llmrouter.core.types import (
 from llmrouter.logging_config import get_logger
 
 _logger = get_logger("llmrouter.router")
+_SCORING_TIMEOUT_ERRORS = tuple({TimeoutError, asyncio.TimeoutError})
 
 # Per-process counters for routing metrics
 _RoutingMetrics: dict[str, int] = {
@@ -335,6 +336,9 @@ class MultiModelRouter:
         dynamic_benchmark_routing: bool = True,
         intent_routing: bool = True,
         peak_pricing_policy: PeakPricingPriorityPolicy | None = None,
+        routing_context_chars: int = 12_000,
+        scoring_timeout_ms: int = 750,
+        fallback_scorer: PromptScoringStrategy | None = None,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
@@ -350,12 +354,24 @@ class MultiModelRouter:
         self._dynamic_benchmark_routing = dynamic_benchmark_routing
         self._intent_routing = intent_routing
         self._peak_pricing_policy = peak_pricing_policy
+        if routing_context_chars <= 0:
+            raise ValueError("routing_context_chars must be positive")
+        self._routing_context_chars = routing_context_chars
+        if scoring_timeout_ms < 1:
+            raise ValueError("scoring_timeout_ms must be positive")
+        self._scoring_timeout_seconds = scoring_timeout_ms / 1000
+        self._fallback_scorer = fallback_scorer or PromptScorer()
         if health_tracker is not None:
             self._strategy.set_health_tracker(health_tracker)
 
     def set_rollout_config(self, config: RolloutConfig | None) -> None:
         """Inject canary/blue-green rollout configuration."""
         self._rollout_config = config
+
+    @property
+    def routing_strategy(self) -> RoutingStrategy:
+        """Return the strategy currently used to order eligible models."""
+        return self._routing_strategy
 
     def set_provider_cooldowns(self, cooldowns: ProviderCooldownStore | None) -> None:
         """Inject provider/model cooldown memory."""
@@ -420,8 +436,18 @@ class MultiModelRouter:
             )
 
         # Score the prompt
-        prompt_text = request.prompt_text
-        scoring = self._scorer.score(prompt_text)
+        prompt_text = request.routing_prompt_text(self._routing_context_chars)
+        try:
+            scoring = await asyncio.wait_for(
+                asyncio.to_thread(self._scorer.score, prompt_text),
+                timeout=self._scoring_timeout_seconds,
+            )
+        except _SCORING_TIMEOUT_ERRORS:
+            _logger.warning(
+                "Routing scorer timed out after %.0fms; using rule fallback",
+                self._scoring_timeout_seconds * 1000,
+            )
+            scoring = self._fallback_scorer.score(prompt_text)
 
         # Debug: log scoring details
         _logger.debug(
@@ -914,6 +940,8 @@ def _inferred_task_type(scoring: ScoringResult) -> str | None:
         return task_type
     semantic_role = scoring.signals.get("semantic_role")
     semantic_confidence = scoring.signals.get("semantic_confidence", 0.0)
+    if scoring.signals.get("semantic_reliable") is False:
+        return None
     if (
         isinstance(semantic_role, str)
         and semantic_role not in {"none", "unknown"}

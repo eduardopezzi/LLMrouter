@@ -124,3 +124,21 @@ def test_hybrid_memory_store_falls_back_to_sqlite_on_precog_failure(
     assert recorded is True
     assert len(entries) == 1
     assert entries[0].response == "SQLite stores interactions when PRecog rejects the request."
+
+
+def test_precog_auth_failure_opens_circuit(monkeypatch) -> None:
+    calls = 0
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    store = PrecogMemoryStore(
+        PrecogMemoryConfig(enabled=True, api_key="bad-secret", auth_failure_cooldown_seconds=60)
+    )
+
+    assert store.retrieve(project="p", query="first") == []
+    assert store.retrieve(project="p", query="second") == []
+    assert calls == 1

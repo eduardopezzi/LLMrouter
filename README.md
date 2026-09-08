@@ -504,6 +504,12 @@ Tambem existe um painel CLI para configurar a priorizacao e ver estatisticas:
 make panel
 ```
 
+No menu `Logs & Stats` selecione `Usage report` para consultar as ultimas 6
+horas, incluindo requisicoes por modelo, estrategia/tier de roteamento,
+latencia, tokens, custo e uso de RAG/memoria. O relatorio usa as observacoes
+persistidas em `data/llmrouter.db`; registros antigos sem esses metadados sao
+exibidos como `unknown`.
+
 Ver somente o resumo atual:
 
 ```bash

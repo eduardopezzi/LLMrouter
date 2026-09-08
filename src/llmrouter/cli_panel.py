@@ -12,6 +12,7 @@ import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from llmrouter.config import Settings
@@ -477,6 +478,191 @@ def observation_stats(db_path: str | Path) -> dict[str, object]:
     }
 
 
+def usage_report(
+    db_path: str | Path,
+    *,
+    hours: int = 6,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Aggregate model usage and routing telemetry for the recent time window.
+
+    The report intentionally reads the persisted observation store instead of
+    process-local counters, so it remains useful after a service restart.
+    Older observations without the newer metadata are grouped under
+    ``unknown`` rather than being discarded.
+    """
+    if hours <= 0:
+        raise ValueError("hours must be positive")
+    path = Path(db_path)
+    empty = {
+        "database": str(path),
+        "window_hours": hours,
+        "requests": 0,
+        "total_cost_usd": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "avg_latency_ms": 0.0,
+        "models": [],
+        "strategies": {},
+        "tiers": {},
+        "rag": {
+            "requests": 0,
+            "usage_rate_pct": 0.0,
+            "context_tokens": 0,
+            "collections": {},
+        },
+        "memory": {"requests": 0, "usage_rate_pct": 0.0},
+    }
+    if not path.exists():
+        return empty
+
+    reference = now or datetime.now(timezone.utc)  # noqa: UP017 (Python 3.10 support)
+    cutoff = (reference - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with sqlite3.connect(path) as db:
+            if not _table_exists(db, "observations"):
+                return empty
+            rows = db.execute(
+                """
+                SELECT chosen_model, latency_ms, cost_usd, prompt_tokens,
+                       completion_tokens, scorer_score, scorer_tier, metadata_json
+                FROM observations
+                WHERE created_at >= ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+    except sqlite3.Error:
+        logger.exception("Unable to read usage report database: %s", path)
+        return empty
+
+    model_data: dict[str, dict[str, float | int]] = {}
+    strategies: Counter[str] = Counter()
+    tiers: Counter[str] = Counter()
+    rag_requests = 0
+    rag_context_tokens = 0
+    rag_collections: Counter[str] = Counter()
+    memory_requests = 0
+    total_cost = 0.0
+    prompt_tokens = 0
+    completion_tokens = 0
+    latency_total = 0.0
+
+    for row in rows:
+        model = str(row[0])
+        latency = float(row[1] or 0.0)
+        cost = float(row[2] or 0.0)
+        prompt_count = int(row[3] or 0)
+        completion_count = int(row[4] or 0)
+        metadata = _usage_metadata(row[7])
+        model_row = model_data.setdefault(
+            model,
+            {
+                "requests": 0,
+                "avg_latency_ms": 0.0,
+                "cost_usd": 0.0,
+                "avg_score": 0.0,
+            },
+        )
+        model_row["requests"] = int(model_row["requests"]) + 1
+        model_row["avg_latency_ms"] = float(model_row["avg_latency_ms"]) + latency
+        model_row["cost_usd"] = float(model_row["cost_usd"]) + cost
+        score = row[5]
+        if score is not None:
+            model_row["avg_score"] = float(model_row["avg_score"]) + float(score)
+        strategy = str(metadata.get("routing_strategy") or "unknown")
+        strategies[strategy] += 1
+        tier = row[6]
+        tiers[f"T{tier}" if tier is not None else "unknown"] += 1
+        if _metadata_bool(metadata, "rag_used"):
+            rag_requests += 1
+            rag_context_tokens += _metadata_int(metadata, "rag_context_tokens")
+            collection = str(metadata.get("rag_collection") or "unknown")
+            rag_collections[collection] += 1
+        if _metadata_bool(metadata, "memory_used") or bool(metadata.get("memory_ids")):
+            memory_requests += 1
+        total_cost += cost
+        prompt_tokens += prompt_count
+        completion_tokens += completion_count
+        latency_total += latency
+
+    request_count = len(rows)
+    for row in model_data.values():
+        row["avg_latency_ms"] = round(
+            float(row["avg_latency_ms"]) / max(int(row["requests"]), 1),
+            2,
+        )
+        row["cost_usd"] = round(float(row["cost_usd"]), 6)
+        row["avg_score"] = round(float(row["avg_score"]) / max(int(row["requests"]), 1), 4)
+
+    return {
+        "database": str(path),
+        "window_hours": hours,
+        "since": cutoff,
+        "requests": request_count,
+        "total_cost_usd": round(total_cost, 6),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "avg_latency_ms": round(latency_total / max(request_count, 1), 2),
+        "models": [
+            {"model": model, **model_data[model]}
+            for model in sorted(
+                model_data,
+                key=lambda name: (-int(model_data[name]["requests"]), name),
+            )
+        ],
+        "strategies": dict(sorted(strategies.items())),
+        "tiers": dict(sorted(tiers.items())),
+        "rag": {
+            "requests": rag_requests,
+            "usage_rate_pct": round(rag_requests / max(request_count, 1) * 100, 2),
+            "context_tokens": rag_context_tokens,
+            "collections": dict(sorted(rag_collections.items())),
+        },
+        "memory": {
+            "requests": memory_requests,
+            "usage_rate_pct": round(memory_requests / max(request_count, 1) * 100, 2),
+        },
+    }
+
+
+def render_usage_report(db_path: str | Path, *, hours: int = 6) -> str:
+    """Render the recent usage report for the interactive panel."""
+    report = usage_report(db_path, hours=hours)
+    lines = [
+        f"LLMrouter usage report (last {hours}h)",
+        f"  database: {report['database']}",
+        f"  requests: {report['requests']}",
+        f"  avg_latency_ms: {report['avg_latency_ms']}",
+        f"  total_cost_usd: {report['total_cost_usd']}",
+        f"  tokens: {report['prompt_tokens']} prompt, {report['completion_tokens']} completion",
+        "  strategies: " + _format_mapping(report["strategies"]),
+        "  tiers: " + _format_mapping(report["tiers"]),
+        "  models:",
+    ]
+    models = report["models"]
+    if isinstance(models, list) and models:
+        for item in models:
+            lines.append(
+                f"    - {item['model']}: requests={item['requests']} "
+                f"avg={item['avg_latency_ms']}ms score={item['avg_score']:.4f} "
+                f"cost=${item['cost_usd']:.6f}"
+            )
+    else:
+        lines.append("    - none")
+    rag = report["rag"]
+    memory = report["memory"]
+    lines.extend(
+        [
+            f"  RAG: {rag['requests']} requests ({rag['usage_rate_pct']:.2f}%), "
+            f"context_tokens={rag['context_tokens']}, "
+            f"collections={_format_mapping(rag['collections'])}",
+            f"  memory: {memory['requests']} requests ({memory['usage_rate_pct']:.2f}%)",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def render_panel_summary(settings: Settings, registry: ModelRegistry) -> str:
     """Render current routing configuration and stats."""
     routing = routing_panel_config(settings)
@@ -540,7 +726,7 @@ def run_interactive_panel(
         print()
         print("1. Routing ............ strategy, fallback, cost order, rollout")
         print("2. Models ............. priorities, promote, health, benchmarks")
-        print("3. Logs & Stats ....... recent logs, refresh, debug mode")
+        print("3. Logs & Stats ....... logs, 6h usage report, refresh, debug")
         print("4. Show full settings . dump all configuration values")
         print("0. Exit")
         try:
@@ -668,13 +854,14 @@ def _logs_submenu(
     *,
     env_path: str | Path,
 ) -> Settings:
-    """Submenu for logs, stats refresh and debug toggle."""
+    """Submenu for logs, usage report, stats refresh and debug toggle."""
     while True:
         print()
         print(_LOGS_BANNER)
         print("  a) View recent logs")
         print("  b) Refresh stats")
         print(f"  c) Debug mode .......... {'ON' if settings.debug else 'OFF'}")
+        print("  d) Usage report ......... last 6 hours")
         print()
         print("  0. Back")
         try:
@@ -691,6 +878,10 @@ def _logs_submenu(
         elif choice in {"c", "3"}:
             _prompt_toggle_debug(env_path, settings)
             settings = _reload(settings)
+        elif choice in {"d", "4"}:
+            print()
+            print(render_usage_report(settings.evaluator.db_path, hours=6))
+            _pause_for_enter()
         elif choice in {"0", ""}:
             return settings
         else:
@@ -1532,6 +1723,28 @@ def _prompt_rollout_percentage(models_file: str | Path, registry: ModelRegistry)
         print(f"Set rollout_percentage={pct:g} for {model_name} in {models_file}")
     except Exception as exc:
         print(f"Error: {exc}")
+
+
+def _usage_metadata(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _metadata_bool(metadata: dict[str, object], key: str) -> bool:
+    value = metadata.get(key)
+    return value is True or str(value).strip().lower() in {"1", "true", "yes", "sim"}
+
+
+def _metadata_int(metadata: dict[str, object], key: str) -> int:
+    try:
+        return max(int(float(str(metadata.get(key, 0)))), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _format_mapping(value: object) -> str:

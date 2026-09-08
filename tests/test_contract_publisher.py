@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
+import httpx
 
 from llmrouter.contract_publisher import (
     ContractPublisher,
@@ -175,6 +176,26 @@ async def test_precog_send_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_precog_auth_failure_suppresses_retries() -> None:
+    publisher = PrecogPublisher(
+        base_url="http://localhost:8888", api_key="key", auth_failure_cooldown_seconds=60
+    )
+    response = httpx.Response(401, request=httpx.Request("POST", "http://localhost:8888/test"))
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client_class.return_value = mock_client
+
+        await publisher._send("POST", "/test", {"request_id": "auth-1"})
+        await publisher._send("POST", "/test", {"request_id": "auth-2"})
+
+        assert mock_client.request.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_precog_update_observation() -> None:
     publisher = PrecogPublisher(base_url="http://localhost:8888", api_key="key")
 
@@ -239,6 +260,41 @@ def test_chat_request_prompt_text_multiple_messages() -> None:
     text = req.prompt_text
     assert "system prompt" in text
     assert "user message" in text
+
+
+def test_chat_request_routing_prompt_keeps_recent_intent_and_bounds_history() -> None:
+    req = ChatRequest(
+        model=None,
+        messages=[
+            ChatMessage(role="system", content="system policy"),
+            ChatMessage(role="user", content="old security audit and source code"),
+            ChatMessage(role="assistant", content="old answer"),
+            ChatMessage(role="user", content="Resuma esta frase."),
+        ],
+    )
+
+    text = req.routing_prompt_text(max_chars=80)
+
+    assert len(text) <= 80
+    assert "Resuma esta frase." in text
+    assert "old security audit" not in text
+
+
+def test_chat_request_routing_prompt_handles_system_only_and_rejects_invalid_limit() -> None:
+    req = ChatRequest(model=None, messages=[ChatMessage(role="system", content="policy")])
+
+    assert req.routing_prompt_text(max_chars=20) == "policy"
+    with pytest.raises(ValueError, match="max_chars"):
+        req.routing_prompt_text(max_chars=0)
+
+
+def test_chat_request_routing_prompt_covers_truncation_edges() -> None:
+    req = ChatRequest(model=None, messages=[])
+
+    assert req.routing_prompt_text(max_chars=12) == ""
+    assert req._bounded_text("abcdefghij", 4) == "abcd"
+    assert req._bounded_text("a" * 100, 40).startswith("a")
+    assert req._message_text(ChatMessage(role="user", content=42)) == ""  # type: ignore[arg-type]
 
 
 def test_model_info_cost_ratio() -> None:

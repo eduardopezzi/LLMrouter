@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from threading import Event
 
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.router import MultiModelRouter
-from llmrouter.core.scorer import PromptScorer
+from llmrouter.core.router import MultiModelRouter, _inferred_task_type
+from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, Tier
 
 
@@ -33,6 +34,88 @@ def test_multiple_requested_actions_raise_complexity() -> None:
 
     assert result.tier == Tier.T3
     assert result.signals["complexity_floor"] >= 0.67
+
+
+def test_long_transcript_without_complex_intent_does_not_force_t3() -> None:
+    result = PromptScorer().score("contexto antigo " * 2_000 + "resuma esta frase")
+
+    assert result.tier == Tier.T2
+    assert result.signals["complexity_floor"] == pytest.approx(0.36)
+
+
+def test_unreliable_semantic_role_does_not_select_specialist() -> None:
+    result = ScoringResult(
+        score=0.54,
+        tier=Tier.T1,
+        signals={
+            "task_type": "general",
+            "semantic_role": "review",
+            "semantic_confidence": 0.54,
+            "semantic_reliable": False,
+        },
+    )
+
+    assert _inferred_task_type(result) is None
+
+
+@pytest.mark.asyncio
+async def test_router_scores_only_bounded_current_context() -> None:
+    captured: list[str] = []
+
+    class CaptureScorer:
+        def score(self, prompt: str) -> ScoringResult:
+            captured.append(prompt)
+            return ScoringResult(score=0.1, tier=Tier.T1, signals={})
+
+    registry = ModelRegistry(
+        models=(ModelInfo(name="light", provider=Provider.OLLAMA, tier=Tier.T1),)
+    )
+    router = MultiModelRouter(
+        registry,
+        CaptureScorer(),  # type: ignore[arg-type]
+        routing_context_chars=64,
+    )
+    await router.route(
+        ChatRequest(
+            model=None,
+            messages=[
+                ChatMessage(role="user", content="old " * 100),
+                ChatMessage(role="user", content="latest task"),
+            ],
+        )
+    )
+
+    assert len(captured) == 1
+    assert len(captured[0]) <= 64
+    assert "latest task" in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_router_falls_back_when_scorer_misses_deadline() -> None:
+    started = Event()
+    release = Event()
+
+    class BlockingScorer:
+        def score(self, _prompt: str) -> ScoringResult:
+            started.set()
+            release.wait(timeout=1)
+            return ScoringResult(score=1.0, tier=Tier.T3, signals={})
+
+    registry = ModelRegistry(
+        models=(ModelInfo(name="light", provider=Provider.OLLAMA, tier=Tier.T1),)
+    )
+    router = MultiModelRouter(
+        registry,
+        BlockingScorer(),  # type: ignore[arg-type]
+        scoring_timeout_ms=50,
+    )
+    decision = await router.route(
+        ChatRequest(model=None, messages=[ChatMessage(role="user", content="say hello")])
+    )
+    release.set()
+
+    assert started.is_set()
+    assert decision.tier == Tier.T1
 
 
 @pytest.mark.asyncio

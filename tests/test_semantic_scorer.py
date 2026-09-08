@@ -9,7 +9,7 @@ import pytest
 from llmrouter.config import Settings
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter
-from llmrouter.core.scorer import PromptScorer
+from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.semantic_scorer import (
     DEFAULT_MODEL_NAME,
     HybridScorer,
@@ -230,6 +230,88 @@ def test_hybrid_scorer_ignores_semantic_when_confidence_low(tmp_path: Path) -> N
 
     assert result.signals["semantic_used"] is False
     assert result.tier == rule.score("hello world generic text").tier
+
+
+def test_hybrid_scorer_does_not_promote_ambiguous_semantic_t3() -> None:
+    class FixedScorer:
+        def __init__(self, result: ScoringResult) -> None:
+            self.result = result
+
+        def score(self, _prompt: str) -> ScoringResult:
+            return self.result
+
+    rule = FixedScorer(ScoringResult(score=0.1, tier=Tier.T1, signals={}))
+    semantic = FixedScorer(
+        ScoringResult(
+            score=0.54,
+            tier=Tier.T3,
+            signals={"semantic_confidence": 0.54, "semantic_margin": 0.01},
+        )
+    )
+    benchmark = FixedScorer(ScoringResult(score=0.54, tier=Tier.T3, signals={}))
+
+    result = HybridScorer(
+        rule_scorer=rule,
+        semantic_scorer=semantic,
+        benchmark_scorer=benchmark,
+    ).score("short prompt")
+
+    assert result.tier == Tier.T1
+    assert result.signals["semantic_reliable"] is False
+
+
+def test_hybrid_scorer_promotes_high_confidence_semantic_t3() -> None:
+    class FixedScorer:
+        def __init__(self, result: ScoringResult) -> None:
+            self.result = result
+
+        def score(self, _prompt: str) -> ScoringResult:
+            return self.result
+
+    result = HybridScorer(
+        rule_scorer=FixedScorer(ScoringResult(score=0.1, tier=Tier.T1, signals={})),
+        semantic_scorer=FixedScorer(
+            ScoringResult(
+                score=0.8,
+                tier=Tier.T3,
+                signals={"semantic_confidence": 0.8, "semantic_margin": 0.5},
+            )
+        ),
+    ).score("architecture")
+
+    assert result.tier == Tier.T3
+    assert result.signals["semantic_reliable"] is True
+
+
+def test_hybrid_scorer_requires_benchmark_confidence_and_margin_independently() -> None:
+    class FixedScorer:
+        def __init__(self, result: ScoringResult) -> None:
+            self.result = result
+
+        def score(self, _prompt: str) -> ScoringResult:
+            return self.result
+
+    result = HybridScorer(
+        rule_scorer=FixedScorer(ScoringResult(score=0.1, tier=Tier.T1, signals={})),
+        semantic_scorer=FixedScorer(
+            ScoringResult(
+                score=0.8,
+                tier=Tier.T1,
+                signals={"semantic_confidence": 0.8, "semantic_margin": 0.5},
+            )
+        ),
+        benchmark_scorer=FixedScorer(
+            ScoringResult(
+                score=0.54,
+                tier=Tier.T3,
+                signals={"benchmark_confidence": 0.54, "benchmark_margin": 0.01},
+            )
+        ),
+    ).score("architecture")
+
+    assert result.tier == Tier.T1
+    assert result.signals["semantic_role_reliable"] is True
+    assert result.signals["benchmark_reliable"] is False
 
 
 def test_role_from_signals_extracts_role() -> None:

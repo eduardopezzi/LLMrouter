@@ -378,7 +378,7 @@ def create_app(
         started = time.perf_counter()
         request_id = _request_id(request)
         constraints = _routing_constraints(payload, prompt_directives)
-        decision = await app.state.router.route(chat_request, constraints)
+        decision = await app.state.router.route(original_chat_request, constraints)
 
         # Debug: log routing decision
         _logger.debug(
@@ -435,6 +435,7 @@ def create_app(
             scorer_tier=decision.tier.value,
             request_id=request_id,
             payload=payload,
+            routing_strategy=app.state.router.routing_strategy.value,
             precog_publisher=app.state.precog_publisher,
             precog_project=app.state.precog_project,
             memory_entries=memory_entries,
@@ -571,7 +572,7 @@ async def _stream_response(
     original_chat_request = original_chat_request or chat_request
     prompt_directives = _chat_request_directives(original_chat_request)
     constraints = _routing_constraints(payload, prompt_directives)
-    decision = await app_router.route(chat_request, constraints)
+    decision = await app_router.route(original_chat_request, constraints)
     selected_model = decision.primary
     started = time.perf_counter()
     request_id = _request_id(request)
@@ -645,6 +646,7 @@ async def _stream_response(
                     scorer_tier=decision.tier.value,
                     request_id=request_id,
                     payload=payload,
+                    routing_strategy=app_router.routing_strategy.value,
                     precog_publisher=precog_publisher,
                     precog_project=precog_project,
                     memory_entries=memory_entries,
@@ -1138,8 +1140,9 @@ def _retrieve_memory(
             "Memory retrieval skipped: project=%s reason=memory_disabled via payload", project
         )
         return []
-    query_len = len(chat_request.prompt_text)
-    entries = memory_store.retrieve(project=project, query=chat_request.prompt_text)
+    query = chat_request.routing_prompt_text(max_chars=memory_store.config.query_max_chars)
+    query_len = len(query)
+    entries = memory_store.retrieve(project=project, query=query)
     if entries:
         _logger.debug(
             "Memory retrieval: project=%s query_len=%d hits=%d ids=%s scores=%s",
@@ -1280,6 +1283,7 @@ def _record_observation(
     scorer_tier: int,
     request_id: str | None,
     payload: ChatCompletionPayload,
+    routing_strategy: str = "unknown",
     precog_publisher: Any | None = None,
     precog_project: str = "llmrouter",
     memory_entries: list[MemoryEntry] | None = None,
@@ -1291,7 +1295,15 @@ def _record_observation(
     metadata = {
         "provider": selected_model.provider.value,
         "provider_model": selected_model.provider_model_name,
+        "routing_strategy": routing_strategy,
+        "scorer_tier": str(scorer_tier),
+        "rag_used": str(_rag_metadata(payload)["used"]).lower(),
+        "memory_used": str(bool(memory_entries)).lower(),
     }
+    rag = _rag_metadata(payload)
+    metadata["rag_collection"] = str(rag["collection"] or "")
+    metadata["rag_top_k"] = str(rag["top_k"])
+    metadata["rag_context_tokens"] = str(rag["context_tokens"])
     if request_id:
         metadata["request_id"] = request_id
     if memory_entries:

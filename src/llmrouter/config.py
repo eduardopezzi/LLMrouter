@@ -124,6 +124,18 @@ class RoutingConfig(BaseModel):
     )
     simple_prompt_threshold: float = Field(default=0.33, ge=0.0, le=1.0)
     complex_prompt_threshold: float = Field(default=0.66, ge=0.0, le=1.0)
+    routing_context_chars: int = Field(
+        default=12_000,
+        ge=1_024,
+        le=32_000,
+        description="Maximum current-intent context sent to the routing scorer.",
+    )
+    scoring_timeout_ms: int = Field(
+        default=750,
+        ge=50,
+        le=5_000,
+        description="Deadline for semantic/benchmark scoring before rule fallback.",
+    )
     scorer_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "length": 0.15,
@@ -192,6 +204,7 @@ class PrecogConfig(BaseModel):
     api_key: str | None = None
     project: str = "llmrouter"
     timeout: float = 3.0
+    auth_failure_cooldown_seconds: float = Field(default=60.0, gt=0)
 
 
 class MemoryConfig(BaseModel):
@@ -204,6 +217,13 @@ class MemoryConfig(BaseModel):
     top_k: int = 4
     min_score: float = 0.12
     max_context_chars: int = 2400
+    query_max_chars: int = Field(
+        default=6_000,
+        ge=512,
+        le=20_000,
+        description="Maximum current-intent text sent to the memory backend.",
+    )
+    auth_failure_cooldown_seconds: float = Field(default=60.0, gt=0)
     min_prompt_chars: int = 80
     min_response_chars: int = 40
     query_path: str = "/internal/rag/query"
@@ -266,6 +286,8 @@ class HybridScorerConfig(BaseModel):
     rule_weight: float = 0.30
     semantic_weight: float = 0.70
     semantic_confidence_threshold: float = 0.35
+    semantic_min_confidence: float = Field(default=0.50, ge=0.0, le=1.0)
+    semantic_margin_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
 class RolloutConfig(BaseModel):

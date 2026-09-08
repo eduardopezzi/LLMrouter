@@ -149,6 +149,9 @@ def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
     assert observation.chosen_model == "cheap"
     assert observation.cost_usd == 0.002
     assert observation.metadata["provider"] == "openai"
+    assert observation.metadata["routing_strategy"] == "cost"
+    assert observation.metadata["rag_used"] == "false"
+    assert observation.metadata["memory_used"] == "false"
     assert 'POST /v1/chat/completions HTTP/1.1" 200 OK' in caplog.text
     assert "selected_model=cheap" in caplog.text
     assert "provider_model=cheap" in caplog.text
@@ -783,6 +786,17 @@ def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
     assert first.status_code == 200
     assert first.json()["llmrouter"]["memory"]["used"] is False
 
+    original_scorer = app.state.router._scorer
+
+    class SpyScorer:
+        last_prompt = ""
+
+        def score(self, prompt: str) -> ScoringResult:
+            self.last_prompt = prompt
+            return original_scorer.score(prompt)
+
+    app.state.router._scorer = SpyScorer()
+
     second = client.post(
         "/v1/chat/completions",
         json={
@@ -798,6 +812,7 @@ def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
 
     assert second.status_code == 200
     assert second.json()["llmrouter"]["memory"]["used"] is True
+    assert "Relevant project memory" not in app.state.router._scorer.last_prompt
     assert proxy.last_request is not None
     assert proxy.last_request.messages[0].role == "system"
     assert "Relevant project memory" in str(proxy.last_request.messages[0].content)

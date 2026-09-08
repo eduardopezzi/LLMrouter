@@ -94,6 +94,13 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         dynamic_benchmark_routing=resolved_settings.routing.dynamic_benchmark_routing,
         intent_routing=resolved_settings.routing.intent_routing,
         peak_pricing_policy=_build_peak_pricing_policy(resolved_settings),
+        routing_context_chars=resolved_settings.routing.routing_context_chars,
+        scoring_timeout_ms=resolved_settings.routing.scoring_timeout_ms,
+        fallback_scorer=PromptScorer(
+            _scorer_weights(resolved_settings.routing.scorer_weights),
+            simple_threshold=resolved_settings.routing.simple_prompt_threshold,
+            complex_threshold=resolved_settings.routing.complex_prompt_threshold,
+        ),
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
@@ -182,6 +189,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
             base_url=resolved_settings.precog.base_url,
             api_key=precog_api_key,
             timeout=resolved_settings.precog.timeout,
+            auth_failure_cooldown_seconds=resolved_settings.precog.auth_failure_cooldown_seconds,
         )
         if resolved_settings.precog.enabled
         else None
@@ -249,6 +257,8 @@ def _precog_memory_config(
         top_k=settings.memory.top_k,
         min_score=settings.memory.min_score,
         max_context_chars=settings.memory.max_context_chars,
+        query_max_chars=settings.memory.query_max_chars,
+        auth_failure_cooldown_seconds=settings.memory.auth_failure_cooldown_seconds,
         query_path=settings.memory.query_path,
         record_path=settings.memory.record_path,
     )
@@ -263,6 +273,8 @@ def _local_memory_config(settings: Settings) -> MemoryConfig:
         top_k=settings.memory.top_k,
         min_score=settings.memory.min_score,
         max_context_chars=settings.memory.max_context_chars,
+        query_max_chars=settings.memory.query_max_chars,
+        auth_failure_cooldown_seconds=settings.memory.auth_failure_cooldown_seconds,
         min_prompt_chars=settings.memory.min_prompt_chars,
         min_response_chars=settings.memory.min_response_chars,
     )
@@ -331,6 +343,8 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
             rule_weight=settings.hybrid.rule_weight,
             semantic_weight=settings.hybrid.semantic_weight,
             semantic_confidence_threshold=settings.hybrid.semantic_confidence_threshold,
+            semantic_min_confidence=settings.hybrid.semantic_min_confidence,
+            semantic_margin_threshold=settings.hybrid.semantic_margin_threshold,
         )
     except Exception:
         if not settings.semantic.fallback_to_rule_based:
@@ -429,12 +443,6 @@ def _priority_demoter(
                 app = app_holder.get("app") if app_holder is not None else None
                 if app is not None:
                     app.state.registry = registry
-        if cooldown_entry is not None:
-            target_kind = "model" if cooldown_entry.model_name is not None else "provider"
-            target_name = cooldown_entry.model_name or model.provider.value
-            action = f"Put {target_kind} '{target_name}' in quota cooldown"
-        else:
-            action = f"Disabled provider '{model.provider.value}'"
         logging.getLogger("llmrouter.runtime").warning(
             "%s provider '%s' for model '%s' after upstream error: %s",
             (

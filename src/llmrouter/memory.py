@@ -31,6 +31,8 @@ class MemoryConfig:
     top_k: int = 4
     min_score: float = 0.12
     max_context_chars: int = 2400
+    query_max_chars: int = 6000
+    auth_failure_cooldown_seconds: float = 60.0
     min_prompt_chars: int = 80
     min_response_chars: int = 40
 
@@ -47,6 +49,8 @@ class PrecogMemoryConfig:
     top_k: int = 4
     min_score: float = 0.12
     max_context_chars: int = 2400
+    query_max_chars: int = 6000
+    auth_failure_cooldown_seconds: float = 60.0
     query_path: str = "/internal/rag/query"
     record_path: str = "/internal/llmrouter/observations"
 
@@ -220,13 +224,14 @@ class PrecogMemoryStore:
     def __init__(self, config: PrecogMemoryConfig, *, raise_on_error: bool = False) -> None:
         self._config = config
         self._raise_on_error = raise_on_error
+        self._auth_blocked_until = 0.0
 
     @property
     def config(self) -> PrecogMemoryConfig:
         return self._config
 
     def retrieve(self, *, project: str, query: str) -> list[MemoryEntry]:
-        if not self._config.enabled or not query.strip():
+        if not self._config.enabled or not query.strip() or self._auth_blocked():
             return []
         payload = {
             "project": project,
@@ -245,6 +250,13 @@ class PrecogMemoryStore:
             )
             response.raise_for_status()
             body = response.json()
+            self._auth_blocked_until = 0.0
+        except httpx.HTTPStatusError as exc:
+            self._record_auth_failure(exc)
+            _logger.warning("PRecog memory retrieval failed project=%s: %s", project, exc)
+            if self._raise_on_error:
+                raise
+            return []
         except Exception as exc:
             _logger.warning("PRecog memory retrieval failed project=%s: %s", project, exc)
             if self._raise_on_error:
@@ -270,7 +282,7 @@ class PrecogMemoryStore:
         response: str,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        if not self._config.enabled:
+        if not self._config.enabled or self._auth_blocked():
             return False
         prompt = prompt.strip()
         response = response.strip()
@@ -294,6 +306,13 @@ class PrecogMemoryStore:
                 timeout=self._config.timeout,
             )
             response_obj.raise_for_status()
+            self._auth_blocked_until = 0.0
+        except httpx.HTTPStatusError as exc:
+            self._record_auth_failure(exc)
+            _logger.warning("PRecog memory record failed project=%s: %s", project, exc)
+            if self._raise_on_error:
+                raise
+            return False
         except Exception as exc:
             _logger.warning("PRecog memory record failed project=%s: %s", project, exc)
             if self._raise_on_error:
@@ -306,6 +325,14 @@ class PrecogMemoryStore:
         if self._config.api_key:
             headers["Authorization"] = f"Bearer {self._config.api_key}"
         return headers
+
+    def _auth_blocked(self) -> bool:
+        return self._auth_blocked_until > time.monotonic()
+
+    def _record_auth_failure(self, exc: httpx.HTTPStatusError) -> None:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code in {401, 403}:
+            self._auth_blocked_until = time.monotonic() + self._config.auth_failure_cooldown_seconds
 
 
 class HybridMemoryStore:

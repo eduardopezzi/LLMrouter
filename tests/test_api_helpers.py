@@ -292,6 +292,26 @@ def test_retrieve_memory_no_store() -> None:
     assert _retrieve_memory(None, project="p", chat_request=req, payload=payload) == []
 
 
+def test_retrieve_memory_uses_bounded_routing_query() -> None:
+    config = MemoryConfig(enabled=True, query_max_chars=40)
+    store = SQLiteMemoryStore(config)
+    captured: dict[str, str] = {}
+
+    def retrieve(*, project: str, query: str) -> list[MemoryEntry]:
+        captured.update(project=project, query=query)
+        return []
+
+    store.retrieve = retrieve  # type: ignore[method-assign]
+    payload = ChatCompletionPayload.model_validate({
+        "messages": [{"role": "user", "content": "x" * 200}],
+    })
+    req = _to_chat_request(payload)
+
+    assert _retrieve_memory(store, project="p", chat_request=req, payload=payload) == []
+    assert captured["project"] == "p"
+    assert len(captured["query"]) <= 40
+
+
 def test_with_memory_context_no_store() -> None:
     req = ChatRequest(model=None, messages=[ChatMessage(role="user", content="hi")])
     assert _with_memory_context(req, [], memory_store=None) is req

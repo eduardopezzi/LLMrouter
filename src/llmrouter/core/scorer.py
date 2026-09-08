@@ -329,9 +329,9 @@ class PromptScorer:
     ) -> float:
         floor = _TASK_COMPLEXITY_FLOORS.get(task_type, 0.0)
         prompt_length = len(prompt)
-        if prompt_length >= 12_000:
-            floor = max(floor, 0.67)
-        elif prompt_length >= 4_000:
+        # Length alone is not task complexity: long transcripts are common and
+        # must not force the most expensive tier. Keep only a moderate floor.
+        if prompt_length >= 4_000:
             floor = max(floor, 0.36)
         action_count = len({match.group(0).lower() for match in _ACTION_RE.finditer(prompt)})
         if action_count >= 3:

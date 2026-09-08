@@ -104,6 +104,8 @@ class BenchmarkAffinityScorer:
 
         ranked = sorted(per_benchmark.items(), key=lambda item: item[1][0], reverse=True)
         top_name, (top_similarity, top_tier) = ranked[0]
+        second_similarity = ranked[1][1][0] if len(ranked) > 1 else 0.0
+        benchmark_margin = round(top_similarity - second_similarity, 4)
         eligible = [
             (name, similarity)
             for name, (similarity, _) in ranked[: self._top_k]
@@ -116,6 +118,7 @@ class BenchmarkAffinityScorer:
                 signals={
                     "benchmark_top": top_name,
                     "benchmark_confidence": round(top_similarity, 4),
+                    "benchmark_margin": benchmark_margin,
                     "benchmark_affinities": {},
                     "benchmark_used": False,
                 },
@@ -136,6 +139,7 @@ class BenchmarkAffinityScorer:
             signals={
                 "benchmark_top": top_name,
                 "benchmark_confidence": round(top_similarity, 4),
+                "benchmark_margin": benchmark_margin,
                 "benchmark_affinities": weights,
                 "benchmark_similarities": {
                     name: round(similarity, 4) for name, similarity in eligible
