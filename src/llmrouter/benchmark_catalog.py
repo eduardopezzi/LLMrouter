@@ -323,7 +323,9 @@ def _find_column(headers: list[str], name: str, *, required: bool = True) -> int
 
 
 def _parse_score(value: str) -> float:
-    match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*%?\s*", value)
+    # Official Markdown model cards often bold the best value in a row.
+    normalized = re.sub(r"\*\*|__|`", "", value)
+    match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*%?\s*", normalized)
     if not match:
         raise BenchmarkRefreshError(f"invalid benchmark score '{value}'")
     score = float(match.group(1))

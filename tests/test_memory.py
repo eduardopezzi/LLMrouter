@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 import httpx
 
-from llmrouter.memory import HybridMemoryStore, MemoryConfig, PrecogMemoryConfig, PrecogMemoryStore
+from llmrouter.memory import (
+    HybridMemoryStore,
+    MemoryConfig,
+    PrecogMemoryConfig,
+    PrecogMemoryStore,
+    SQLiteMemoryStore,
+)
 
 
 def test_precog_memory_store_retrieves_entries(monkeypatch) -> None:
@@ -55,6 +62,72 @@ def test_precog_memory_store_retrieves_entries(monkeypatch) -> None:
     assert entries[0].score == 0.91
 
 
+def test_precog_memory_store_sends_repository_when_provided(monkeypatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        seen["json"] = kwargs["json"]
+        return httpx.Response(200, json={"memories": []}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    store = PrecogMemoryStore(PrecogMemoryConfig(enabled=True))
+
+    assert store.retrieve(
+        project="Vieli-Tech",
+        repository="Vieli-Tech/PRecog",
+        query="known query",
+    ) == []
+    assert seen["json"]["repository"] == "Vieli-Tech/PRecog"
+
+
+def test_precog_memory_store_omits_repository_for_project_scope(monkeypatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        seen["json"] = kwargs["json"]
+        return httpx.Response(200, json={"memories": []}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    store = PrecogMemoryStore(PrecogMemoryConfig(enabled=True))
+
+    store.retrieve(project="shared", query="project query")
+
+    assert "repository" not in seen["json"]
+
+
+def test_sqlite_memory_store_migrates_legacy_schema(tmp_path) -> None:
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE memories ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, "
+            "prompt TEXT NOT NULL, response TEXT NOT NULL, "
+            "metadata_json TEXT NOT NULL DEFAULT '{}', token_json TEXT NOT NULL DEFAULT '{}', "
+            "created_at INTEGER NOT NULL)"
+        )
+        db.commit()
+
+    store = SQLiteMemoryStore(
+        MemoryConfig(
+            enabled=True,
+            db_path=str(db_path),
+            min_prompt_chars=1,
+            min_response_chars=1,
+        )
+    )
+    assert store.record_interaction(
+        project="legacy",
+        repository="owner/repo",
+        prompt="Legacy schema migration works.",
+        response="Repository-aware memory is preserved.",
+    ) is True
+    assert store.retrieve(
+        project="legacy",
+        repository="owner/repo",
+        query="repository-aware memory",
+    )
+
+
 def test_precog_memory_store_records_interaction(monkeypatch) -> None:
     seen: dict[str, Any] = {}
 
@@ -88,6 +161,25 @@ def test_precog_memory_store_records_interaction(monkeypatch) -> None:
     assert seen["json"]["source"] == "llmrouter"
     assert seen["json"]["prompt"] == "Remember the API contract."
     assert seen["json"]["response"] == "The API contract uses /internal/rag/query."
+
+
+def test_precog_memory_store_records_repository_when_provided(monkeypatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        seen["json"] = kwargs["json"]
+        return httpx.Response(202, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    store = PrecogMemoryStore(PrecogMemoryConfig(enabled=True))
+
+    assert store.record_interaction(
+        project="Vieli-Tech",
+        repository="Vieli-Tech/PRecog",
+        prompt="Remember this repository decision.",
+        response="The repository uses scoped retrieval.",
+    ) is True
+    assert seen["json"]["repository"] == "Vieli-Tech/PRecog"
 
 
 def test_hybrid_memory_store_falls_back_to_sqlite_on_precog_failure(

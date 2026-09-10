@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from llmrouter.core.types import ChatRequest, ChatMessage, Provider, Tier, ModelInfo
+from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, Tier
 from llmrouter.cross_repository import (
     BreakingChangeDetector,
     ContractChange,
@@ -80,6 +80,30 @@ def test_zai_provider_init() -> None:
 def test_zai_provider_default_base_url() -> None:
     provider = ZaiProvider()
     assert provider._base_url == "https://api.z.ai/api/paas/v4"
+
+
+def test_zai_glm53_models_enable_required_reasoning_defaults() -> None:
+    provider = ZaiProvider(api_key="zai-key")
+    request = ChatRequest(model=None, messages=[ChatMessage(role="user", content="hi")])
+
+    payload = provider._build_payload(request, "glm-5.3", stream=False)
+
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "max"
+
+
+def test_zai_glm53_reasoning_values_are_not_overridden() -> None:
+    provider = ZaiProvider(api_key="zai-key")
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="hi")],
+        extra={"thinking": {"type": "enabled"}, "reasoning_effort": "low"},
+    )
+
+    payload = provider._build_payload(request, "glm-5.3-flash", stream=True)
+
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "low"
 
 
 def test_ollama_provider_url_normalization() -> None:

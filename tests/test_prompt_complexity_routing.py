@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import pytest
 from threading import Event
+
+import pytest
 
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter, _inferred_task_type
@@ -180,3 +181,43 @@ async def test_simple_prompt_keeps_light_tier() -> None:
 
     assert decision.tier == Tier.T1
     assert decision.primary.name == "light-summary"
+
+
+@pytest.mark.asyncio
+async def test_zai_catalog_prefers_flash_for_simple_and_glm53_for_complex() -> None:
+    from llmrouter.core.registry import load_model_registry
+
+    registry = load_model_registry(
+        "config/models.yaml",
+        benchmark_catalog_path="data/model_benchmarks.yaml",
+    )
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        provider_cost_order=["zai", "ollama"],
+        dynamic_benchmark_routing=False,
+    )
+
+    simple = await router.route(
+        ChatRequest(
+            model=None,
+            messages=[ChatMessage(role="user", content="Resuma esta frase em uma linha.")],
+        )
+    )
+    complex_request = await router.route(
+        ChatRequest(
+            model=None,
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=(
+                        "Faça uma auditoria de segurança procurando vulnerabilidades "
+                        "OWASP e injeção SQL."
+                    ),
+                )
+            ],
+        )
+    )
+
+    assert simple.primary.name == "zhipu/glm-5.3-flash"
+    assert complex_request.primary.name == "zhipu/glm-5.3"

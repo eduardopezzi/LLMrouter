@@ -23,6 +23,7 @@ from llmrouter.api.routes import (
     _memory_disabled,
     _memory_project,
     _memory_default_project,
+    _memory_scope_project,
     _normalize_stream_chunk,
     _chunk_has_assistant_output,
     _extract_delta_text,
@@ -310,6 +311,64 @@ def test_retrieve_memory_uses_bounded_routing_query() -> None:
     assert _retrieve_memory(store, project="p", chat_request=req, payload=payload) == []
     assert captured["project"] == "p"
     assert len(captured["query"]) <= 40
+
+
+def test_memory_scope_project_global_without_repository() -> None:
+    store = SQLiteMemoryStore(
+        MemoryConfig(
+            enabled=True,
+            default_project="shared",
+            no_repository_scope="global",
+        )
+    )
+    assert _memory_scope_project(store, project="client", repository="") == "shared"
+    assert _memory_scope_project(store, project="client", repository="owner/repo") == "client"
+
+
+def test_retrieve_memory_uses_global_project_without_repository() -> None:
+    store = SQLiteMemoryStore(
+        MemoryConfig(enabled=True, default_project="shared", no_repository_scope="global")
+    )
+    captured: dict[str, str] = {}
+
+    def retrieve(*, project: str, query: str) -> list[MemoryEntry]:
+        captured["project"] = project
+        return []
+
+    store.retrieve = retrieve  # type: ignore[method-assign]
+    payload = ChatCompletionPayload.model_validate(
+        {"messages": [{"role": "user", "content": "global query"}]}
+    )
+    req = _to_chat_request(payload)
+
+    _retrieve_memory(
+        store,
+        project=_memory_scope_project(store, project="client", repository=""),
+        chat_request=req,
+        payload=payload,
+    )
+
+    assert captured["project"] == "shared"
+
+
+def test_retrieve_memory_skips_when_no_repository_scope_disabled() -> None:
+    config = MemoryConfig(enabled=True, no_repository_scope="disabled")
+    store = SQLiteMemoryStore(config)
+    called = False
+
+    def retrieve(*, project: str, query: str) -> list[MemoryEntry]:
+        nonlocal called
+        called = True
+        return []
+
+    store.retrieve = retrieve  # type: ignore[method-assign]
+    payload = ChatCompletionPayload.model_validate(
+        {"messages": [{"role": "user", "content": "query"}]}
+    )
+    req = _to_chat_request(payload)
+
+    assert _retrieve_memory(store, project="client", chat_request=req, payload=payload) == []
+    assert called is False
 
 
 def test_with_memory_context_no_store() -> None:

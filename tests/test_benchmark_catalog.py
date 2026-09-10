@@ -7,6 +7,7 @@ import pytest
 
 from llmrouter.benchmark_catalog import (
     BenchmarkRefreshError,
+    _parse_score,
     load_catalog_scores,
     load_catalog_source_urls,
     refresh_benchmark_catalog,
@@ -120,6 +121,10 @@ def test_refresh_extracts_markdown_model_card_table(tmp_path) -> None:
         "GPQA Diamond": 91.2,
         "SWE-Bench Pro": 62.1,
     }
+
+
+def test_refresh_accepts_bold_markdown_scores() -> None:
+    assert _parse_score("**84.5**") == 84.5
 
 
 def test_registry_merges_refreshed_scores_over_manual_values(tmp_path) -> None:

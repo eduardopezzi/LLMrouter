@@ -5,6 +5,7 @@ Z.ai exposes an OpenAI-compatible API endpoint.
 
 from __future__ import annotations
 
+from llmrouter.core.types import ChatRequest
 from llmrouter.providers.openai_compatible import OpenAICompatibleProvider
 
 
@@ -38,3 +39,18 @@ class ZaiProvider(OpenAICompatibleProvider):
             headers["Authorization"] = f"Bearer {self._api_key}"
         headers["Accept-Language"] = "en-US,en"
         return headers
+
+    def _build_payload(
+        self, request: ChatRequest, model: str, *, stream: bool
+    ) -> dict[str, object]:
+        """Add the reasoning defaults required by the GLM-5.3 API models.
+
+        GLM-5.3 and GLM-5.3-Flash always run with thinking enabled. Keep
+        caller-supplied values intact, while making plain OpenAI-compatible
+        clients work without requiring Z.ai-specific fields.
+        """
+        payload = super()._build_payload(request, model, stream=stream)
+        if model in {"glm-5.3", "glm-5.3-flash"}:
+            payload.setdefault("thinking", {"type": "enabled"})
+            payload.setdefault("reasoning_effort", "max")
+        return payload

@@ -199,6 +199,36 @@ models:
   # ==================================================================
   # Z AI (Zhipu) — Provedor de fallback
   # ==================================================================
+  - name: "zhipu/glm-5.3-flash"
+    provider: "zai"
+    tier: 1
+    roles: ["summarization", "documentation", "test_generation", "fix", "refactoring", "review", "architecture", "security_audit", "migration"]
+    priority: 1
+    description: "GLM-5.3-Flash via Z.ai — Modelo multimodal de 1M de contexto e 128K de saída, eficiente para resumos, documentação, análise de arquivos/imagens, UI/frontend, automações e tarefas de engenharia curtas. Preferência padrão para prompts simples e de baixa complexidade."
+    max_tokens: 131072
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+    benchmark_sources:
+      - "https://huggingface.co/zai-org/GLM-5.3-Flash/raw/main/README.md"
+      - "https://docs.z.ai/guides/vlm/glm-5.3-flash"
+
+  - name: "zhipu/glm-5.3"
+    provider: "zai"
+    tier: 3
+    roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation"]
+    priority: 1
+    description: "GLM-5.3 via Z.ai — Flagship text-only com raciocínio obrigatório, 1M de contexto e 128K de saída. Indicado para arquitetura, segurança, debugging, migrações, coding agentic e tarefas long-horizon complexas. Preferência para prompts complexos."
+    max_tokens: 131072
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0
+    completion_cost_per_1m_tokens: 0
+    cached_prompt_cost_per_1m_tokens: 0
+    benchmark_sources:
+      - "https://huggingface.co/zai-org/GLM-5.3/raw/main/README.md"
+      - "https://docs.z.ai/guides/llm/glm-5.3"
+
   - name: "zhipu/glm-5.2"
     provider: "zai"
     roles: ["review", "fix", "test_generation", "refactoring", "migration"]

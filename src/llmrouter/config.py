@@ -214,6 +214,14 @@ class MemoryConfig(BaseModel):
     backend: str = "local"  # local | sqlite | precog | hybrid
     db_path: str = "data/llmrouter_memory.db"
     default_project: str = "default"
+    no_repository_scope: str = Field(
+        default="project",
+        pattern="^(project|global|disabled)$",
+        description=(
+            "Scope used when a request has no repository provenance: project, "
+            "global (default project), or disabled."
+        ),
+    )
     top_k: int = 4
     min_score: float = 0.12
     max_context_chars: int = 2400

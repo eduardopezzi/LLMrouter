@@ -336,9 +336,16 @@ def create_app(
             prompt=chat_request.prompt_text,
             directives=prompt_directives,
         )
+        memory_repository = _precog_repository(payload)
+        memory_project = _memory_scope_project(
+            app.state.memory_store,
+            project=memory_project,
+            repository=memory_repository,
+        )
         memory_entries = _retrieve_memory(
             app.state.memory_store,
             project=memory_project,
+            repository=memory_repository,
             chat_request=chat_request,
             payload=payload,
         )
@@ -370,6 +377,7 @@ def create_app(
                 precog_project=app.state.precog_project,
                 memory_store=app.state.memory_store,
                 memory_project=memory_project,
+                memory_repository=memory_repository,
                 original_chat_request=original_chat_request,
                 memory_entries=memory_entries,
                 health_tracker=app.state.health_tracker,
@@ -449,6 +457,7 @@ def create_app(
             request_id=request_id,
             payload=payload,
             memory_entries=memory_entries,
+            repository=memory_repository,
         )
         return {
             "id": response.id,
@@ -560,6 +569,7 @@ async def _stream_response(
     precog_project: str = "llmrouter",
     memory_store: MemoryStore | None = None,
     memory_project: str = "default",
+    memory_repository: str = "",
     original_chat_request: ChatRequest | None = None,
     memory_entries: list[MemoryEntry] | None = None,
     health_tracker: ModelHealthTracker | None = None,
@@ -660,6 +670,7 @@ async def _stream_response(
                 request_id=request_id,
                 payload=payload,
                 memory_entries=memory_entries,
+                repository=memory_repository,
             )
             await _log_selected_model_health(health_tracker, selected_model.name, latency_ms)
 
@@ -920,6 +931,21 @@ def _memory_default_project(
     return memory_store.config.default_project or fallback
 
 
+def _memory_scope_project(
+    memory_store: MemoryStore | None,
+    *,
+    project: str,
+    repository: str,
+) -> str:
+    """Resolve the project namespace when repository provenance is absent."""
+    if memory_store is None or repository:
+        return project
+    scope = str(getattr(memory_store.config, "no_repository_scope", "project")).lower()
+    if scope == "global":
+        return memory_store.config.default_project or project
+    return project
+
+
 def _memory_project(
     payload: ChatCompletionPayload,
     request: Request,
@@ -1129,6 +1155,7 @@ def _retrieve_memory(
     memory_store: MemoryStore | None,
     *,
     project: str,
+    repository: str = "",
     chat_request: ChatRequest,
     payload: ChatCompletionPayload,
 ) -> list[MemoryEntry]:
@@ -1140,9 +1167,22 @@ def _retrieve_memory(
             "Memory retrieval skipped: project=%s reason=memory_disabled via payload", project
         )
         return []
+    if (
+        not repository
+        and str(getattr(memory_store.config, "no_repository_scope", "project")).lower()
+        == "disabled"
+    ):
+        _logger.debug(
+            "Memory retrieval skipped: project=%s reason=no_repository_scope_disabled",
+            project,
+        )
+        return []
     query = chat_request.routing_prompt_text(max_chars=memory_store.config.query_max_chars)
     query_len = len(query)
-    entries = memory_store.retrieve(project=project, query=query)
+    if repository:
+        entries = memory_store.retrieve(project=project, query=query, repository=repository)
+    else:
+        entries = memory_store.retrieve(project=project, query=query)
     if entries:
         _logger.debug(
             "Memory retrieval: project=%s query_len=%d hits=%d ids=%s scores=%s",
@@ -1205,8 +1245,15 @@ def _record_memory(
     request_id: str,
     payload: ChatCompletionPayload,
     memory_entries: list[MemoryEntry],
+    repository: str = "",
 ) -> None:
     if memory_store is None or _memory_disabled(payload):
+        return
+    if (
+        not repository
+        and str(getattr(memory_store.config, "no_repository_scope", "project")).lower()
+        == "disabled"
+    ):
         return
     response_text = "\n".join(_choice_text(choice) for choice in response_payload).strip()
     metadata = {
@@ -1226,12 +1273,15 @@ def _record_memory(
         selected_model.name,
         [entry.id for entry in memory_entries],
     )
-    recorded = memory_store.record_interaction(
-        project=project,
-        prompt=chat_request.prompt_text,
-        response=response_text,
-        metadata=metadata,
-    )
+    record_kwargs: dict[str, Any] = {
+        "project": project,
+        "prompt": chat_request.prompt_text,
+        "response": response_text,
+        "metadata": metadata,
+    }
+    if repository:
+        record_kwargs["repository"] = repository
+    recorded = memory_store.record_interaction(**record_kwargs)
     if recorded:
         _logger.debug(
             "Memory recorded successfully: project=%s model=%s", project, selected_model.name
