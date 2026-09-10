@@ -219,6 +219,30 @@ models:
   # ==================================================================
   # Z AI (Zhipu) — Provedor de fallback
   # ==================================================================
+  - name: "zhipu/glm-5.3"
+    provider: "zai"
+    tier: 3
+    roles: ["review", "fix", "test_generation", "refactoring", "migration", "security_audit", "architecture"]
+    priority: 1
+    description: "GLM-5.3 via Z AI — Flagship: +50% coding vs 5.2, reasoning sempre ativo (effort low/high/max), contexto 1M, output 128K, text-only."
+    max_tokens: 131072
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 1.4
+    completion_cost_per_1m_tokens: 4.4
+    cached_prompt_cost_per_1m_tokens: 0.26
+
+  - name: "zhipu/glm-5.3-flash"
+    provider: "zai"
+    tier: 3
+    roles: ["architecture", "review", "refactoring", "fix", "migration", "test_generation", "security_audit", "summarization", "documentation"]
+    priority: 1
+    description: "GLM-5.3-Flash via Z AI — Variante rápida/multimodal do GLM-5.3 (texto+imagem+vídeo+arquivo), contexto 1M, output 128K, custo ~10x menor que o 5.3."
+    max_tokens: 131072
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0.15
+    completion_cost_per_1m_tokens: 0.5
+    cached_prompt_cost_per_1m_tokens: 0.03
+
   - name: "zhipu/glm-5.2"
     provider: "zai"
     tier: 3
