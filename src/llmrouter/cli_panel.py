@@ -103,11 +103,14 @@ def set_provider_cost_order(env_path: str | Path, providers: list[str]) -> None:
     update_env_file(env_path, {PROVIDER_COST_ORDER_ENV: json.dumps(normalized)})
 
 
-def model_priorities(registry: ModelRegistry, *, limit: int = 10) -> list[ModelPriority]:
+def model_priorities(
+    registry: ModelRegistry, *, limit: int | None = 10
+) -> list[ModelPriority]:
     """Return models ordered by catalog priority."""
     ordered = sorted(registry.all(), key=lambda model: (model.priority, model.name))
+    selected = ordered if limit is None else ordered[: max(limit, 0)]
     rows: list[ModelPriority] = []
-    for rank, model in enumerate(ordered[: max(limit, 0)], 1):
+    for rank, model in enumerate(selected, 1):
         rows.append(
             ModelPriority(
                 rank=rank,
@@ -121,13 +124,26 @@ def model_priorities(registry: ModelRegistry, *, limit: int = 10) -> list[ModelP
     return rows
 
 
-def render_model_priorities(registry: ModelRegistry, *, limit: int = 10) -> str:
+def render_model_priorities(
+    registry: ModelRegistry, *, limit: int | None = 10
+) -> str:
     """Render the highest-priority models in the catalog."""
     rows = model_priorities(registry, limit=limit)
-    lines = [f"Top {len(rows)} model priorities"]
+    title = (
+        f"All {len(rows)} model priorities"
+        if limit is None
+        else f"Top {len(rows)} model priorities"
+    )
+    lines = [title]
     if not rows:
         lines.append("  (catalog is empty)")
         return "\n".join(lines)
+    if limit is None:
+        providers = Counter(model.provider.value for model in registry.all())
+        provider_summary = ", ".join(
+            f"{provider}={count}" for provider, count in sorted(providers.items())
+        )
+        lines.append(f"  Catalog providers: {provider_summary}")
     for row in rows:
         roles = ", ".join(row.roles) if row.roles else "-"
         lines.append(
@@ -409,12 +425,27 @@ async def model_health(tracker: ModelHealthTracker | None) -> list[dict[str, obj
     return [h.to_dict() for h in await tracker.list_health()]
 
 
-def render_model_health(tracker: ModelHealthTracker | None) -> str:
+def render_model_health(
+    tracker: ModelHealthTracker | None,
+    registry: ModelRegistry | None = None,
+) -> str:
     """Render model health metrics for the CLI panel."""
     if tracker is None:
         return "Model health: unavailable (tracker not configured)"
     rows = asyncio.run(model_health(tracker))
     if not rows:
+        if registry is not None:
+            stats = catalog_stats(registry)
+            providers = ", ".join(
+                f"{provider}={count}" for provider, count in stats["providers"].items()
+            )
+            return "\n".join(
+                [
+                    f"Model health (window={tracker.window_minutes}m): no traffic recorded",
+                    f"  Configured catalog: {stats['models']} models ({providers})",
+                    "  Metrics appear after the first routed request in this window.",
+                ]
+            )
         return f"Model health (window={tracker.window_minutes}m): no data yet"
     lines = [f"Model health (window={tracker.window_minutes}m)"]
     for row in rows:
@@ -798,7 +829,10 @@ def _routing_submenu(
             settings = _reload(settings)
         elif choice in {"d", "4"}:
             _prompt_rollout_percentage(settings.models_file, registry)
-            registry = _reload_registry(settings.models_file)
+            registry = _reload_registry(
+                settings.models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+            )
         elif choice in {"0", ""}:
             return settings, registry
         else:
@@ -817,7 +851,7 @@ def _models_submenu(
         print()
         print(_MODELS_BANNER)
         print(f"  ({catalog['models']} models in catalog)")
-        print("  a) Show priorities ..... rank + weights")
+        print("  a) Show priorities ..... all catalog providers")
         print("  b) Promote model ....... promote / reset / LLM reorder")
         print("  c) Health .............. per-model metrics")
         print("  d) Top 3 per benchmark . leaderboard")
@@ -830,13 +864,13 @@ def _models_submenu(
 
         if choice in {"a", "1"}:
             print()
-            print(render_model_priorities(registry, limit=10))
+            print(render_model_priorities(registry, limit=None))
             _pause_for_enter()
         elif choice in {"b", "2"}:
             registry = _prompt_model_priority_panel(settings, registry)
         elif choice in {"c", "3"}:
             print()
-            print(render_model_health(health_tracker))
+            print(render_model_health(health_tracker, registry))
             _pause_for_enter()
         elif choice in {"d", "4"}:
             print()
@@ -1049,7 +1083,7 @@ def _prompt_model_priority_panel(settings: Settings, registry: ModelRegistry) ->
     while True:
         print()
         print("=== Promote model priority ===")
-        print(render_model_priorities(registry, limit=20))
+        print(render_model_priorities(registry, limit=None))
         print()
         print("1. Promote a model to priority 1")
         print("2. Reset priorities to original catalog order")
@@ -1062,13 +1096,22 @@ def _prompt_model_priority_panel(settings: Settings, registry: ModelRegistry) ->
 
         if choice == "1":
             _prompt_promote_model_priority(settings.models_file, registry)
-            registry = _reload_registry(settings.models_file)
+            registry = _reload_registry(
+                settings.models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+            )
         elif choice == "2":
             _prompt_reset_model_priorities(settings.models_file)
-            registry = _reload_registry(settings.models_file)
+            registry = _reload_registry(
+                settings.models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+            )
         elif choice == "3":
             _prompt_llm_model_priority_order(settings, registry)
-            registry = _reload_registry(settings.models_file)
+            registry = _reload_registry(
+                settings.models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+            )
         elif choice in {"0", ""}:
             return registry
         else:
@@ -1138,8 +1181,16 @@ def _prompt_llm_model_priority_order(settings: Settings, registry: ModelRegistry
         )
         set_model_priority_order(settings.models_file, ordered_names)
         print(f"Applied LLM-suggested priority order to {settings.models_file}")
-        print("New top priorities:")
-        print(render_model_priorities(_reload_registry(settings.models_file), limit=10))
+        print("New priorities:")
+        print(
+            render_model_priorities(
+                _reload_registry(
+                    settings.models_file,
+                    benchmark_catalog_path=settings.benchmarks.catalog_path,
+                ),
+                limit=None,
+            )
+        )
     except Exception as exc:
         print(f"Error: {exc}")
 
@@ -1151,10 +1202,33 @@ def _prompt_ranker_model(
 ) -> _RankerModel | None:
     """Prompt for the model/API used to rank priorities."""
     rankers = _available_ranker_models(settings, registry)
+    catalog_providers = Counter(model.provider.value for model in registry.all())
+    provider_summary = ", ".join(
+        f"{provider}={count}" for provider, count in sorted(catalog_providers.items())
+    )
+    print(f"Priority catalog (all providers): {provider_summary or 'empty'}")
     if rankers:
-        print("Available models/APIs for the ranking request:")
+        print("Selectable evaluator models/APIs (enabled and credentialed):")
         for idx, ranker in enumerate(rankers, 1):
             print(f"  {idx}) {ranker.display_name} provider={ranker.provider.value}")
+    unavailable = [
+        model
+        for model in registry.all()
+        if model.provider != Provider.GEMINI
+        and not _ranker_provider_available(settings, model.provider)
+    ]
+    if unavailable:
+        unavailable_providers = Counter(model.provider.value for model in unavailable)
+        missing_summary = ", ".join(
+            f"{provider}={count}" for provider, count in sorted(unavailable_providers.items())
+        )
+        print(f"Not selectable until configured: {missing_summary}")
+        print("  Add the provider API key to .env (for example ZAI_API_KEY=...).")
+    if any(model.provider == Provider.GEMINI for model in registry.all()):
+        print(
+            "Google/Gemini models remain catalog candidates; "
+            "Gemini is not an evaluator adapter yet."
+        )
     value = input(
         f"LLM model to ask, number/name, Enter for {default_model}, or 0 to cancel: "
     ).strip()
@@ -1175,7 +1249,31 @@ def _prompt_ranker_model(
     matched = next((ranker for ranker in rankers if ranker.display_name == value), None)
     if matched is not None:
         return matched
-    return _RankerModel(display_name=value, provider=Provider.OLLAMA, provider_model_name=value)
+    catalog_model = next(
+        (
+            model
+            for model in registry.all()
+            if value in {model.name, model.provider_model_name}
+        ),
+        None,
+    )
+    if catalog_model is not None:
+        if catalog_model.provider == Provider.GEMINI:
+            print("Gemini cannot be used as evaluator until its provider adapter is implemented.")
+            return None
+        if not _ranker_provider_available(settings, catalog_model.provider):
+            print(
+                f"Provider '{catalog_model.provider.value}' is not configured for evaluator use. "
+                f"Set its API key before selecting {catalog_model.name}."
+            )
+            return None
+        return _RankerModel(
+            display_name=catalog_model.name,
+            provider=catalog_model.provider,
+            provider_model_name=catalog_model.provider_model_name,
+        )
+    print(f"Unknown evaluator model '{value}'; choose a model from the catalog.")
+    return None
 
 
 def _available_ranker_models(settings: Settings, registry: ModelRegistry) -> list[_RankerModel]:
@@ -1551,10 +1649,17 @@ def _reload(settings: Settings) -> Settings:
     return reload_settings()
 
 
-def _reload_registry(models_file: str | Path) -> ModelRegistry:
+def _reload_registry(
+    models_file: str | Path,
+    *,
+    benchmark_catalog_path: str | Path | None = None,
+) -> ModelRegistry:
     from llmrouter.core.registry import load_model_registry
 
-    return load_model_registry(models_file)
+    return load_model_registry(
+        models_file,
+        benchmark_catalog_path=benchmark_catalog_path,
+    )
 
 
 def _normalize_provider_order(providers: list[str]) -> list[str]:
@@ -1692,7 +1797,7 @@ def set_model_rollout_percentage(
 def _prompt_rollout_percentage(models_file: str | Path, registry: ModelRegistry) -> None:
     """Interactive prompt for setting model rollout percentage."""
     print()
-    print(render_model_priorities(registry, limit=20))
+    print(render_model_priorities(registry, limit=None))
     value = input("Model number or exact name, Enter to cancel: ").strip()
     if not value:
         print("No changes.")

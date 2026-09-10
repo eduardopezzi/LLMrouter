@@ -14,6 +14,7 @@ from llmrouter.cli_panel import (
     RoutingPanelConfig,
     ModelPriority,
     routing_panel_config,
+    render_model_health,
     set_routing_strategy,
     set_fallback_count,
     set_provider_cost_order,
@@ -44,8 +45,10 @@ from llmrouter.cli_panel import (
     follow_log_file,
     _journalctl_follow_command,
     _journalctl_available,
+    _reload_registry,
 )
 from llmrouter.config import Settings
+from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ModelInfo, Provider, Tier
 
@@ -154,6 +157,69 @@ def test_render_model_priorities_empty() -> None:
     reg = ModelRegistry()
     result = render_model_priorities(reg)
     assert "(catalog is empty)" in result
+
+
+def test_render_all_model_priorities_identifies_every_catalog_provider() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="local", provider=Provider.OLLAMA, tier=Tier.T1, priority=1),
+            ModelInfo(name="zai/model", provider=Provider.ZAI, tier=Tier.T1, priority=2),
+            ModelInfo(
+                name="deepseek/model",
+                provider=Provider.DEEPSEEK,
+                tier=Tier.T2,
+                priority=3,
+            ),
+        )
+    )
+
+    output = render_model_priorities(registry, limit=None)
+
+    assert "All 3 model priorities" in output
+    assert "Catalog providers: deepseek=1, ollama=1, zai=1" in output
+    assert "zai/model provider=zai" in output
+    assert "deepseek/model provider=deepseek" in output
+
+
+def test_render_model_health_explains_empty_window_with_catalog() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="local", provider=Provider.OLLAMA, tier=Tier.T1),
+            ModelInfo(name="zai/model", provider=Provider.ZAI, tier=Tier.T1),
+        )
+    )
+    tracker = ModelHealthTracker(log_health_summary=False)
+
+    output = render_model_health(tracker, registry)
+
+    assert "no traffic recorded" in output
+    assert "Configured catalog: 2 models (ollama=1, zai=1)" in output
+    assert "first routed request" in output
+
+
+def test_reload_registry_preserves_benchmark_catalog(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    catalog_file = tmp_path / "benchmarks.yaml"
+    models_file.write_text(
+        "models:\n"
+        "  - name: 'zai/model'\n"
+        "    provider: zai\n"
+        "    tier: 1\n"
+        "    priority: 1\n",
+        encoding="utf-8",
+    )
+    catalog_file.write_text(
+        "models:\n"
+        "  zai/model:\n"
+        "    benchmark_scores:\n"
+        "      MMLU-Pro:\n"
+        "        value: 84.5\n",
+        encoding="utf-8",
+    )
+
+    registry = _reload_registry(models_file, benchmark_catalog_path=catalog_file)
+
+    assert dict(registry.all()[0].benchmark_scores) == {"MMLU-Pro": 84.5}
 
 
 # ---------------------------------------------------------------------------
