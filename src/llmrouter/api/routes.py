@@ -885,11 +885,8 @@ def _with_observation_identity(
 ) -> ChatCompletionPayload:
     """Use bounded proxy headers only when the request body omits telemetry identity."""
     extra = dict(payload.extra)
-    extra.pop("_llmrouter_trusted_repository", None)
     router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
     project = request.headers.get(_PROJECT_ID_HEADER, "").strip()
-    if project and re.fullmatch(r"Vieli-Tech/[A-Za-z0-9_.-]+", project):
-        extra["_llmrouter_trusted_repository"] = project
     if (
         project
         and _OBSERVATION_ID_RE.fullmatch(project)
@@ -1374,12 +1371,10 @@ def _record_observation(
             )
         )
     if precog_publisher is not None and request_id:
-        project = _precog_project(payload, precog_project)
         precog_publisher.record_observation(
             {
                 "request_id": request_id,
-                "project": project,
-                "repository": _precog_repository(payload),
+                "project": _precog_project(payload, precog_project),
                 "task_role": _task_role(payload),
                 "prompt_hash": _prompt_hash(chat_request.prompt_text),
                 "selected_model": model,
@@ -1394,7 +1389,7 @@ def _record_observation(
                 "rag": _rag_metadata(payload),
                 "memory": _memory_payload(
                     memory_entries or [],
-                    project,
+                    _precog_project(payload, precog_project),
                 ),
             }
         )
@@ -1445,12 +1440,6 @@ def _precog_project(payload: ChatCompletionPayload, default: str) -> str:
     router_options = payload.llmrouter if isinstance(payload.llmrouter, dict) else {}
     project = router_options.get("project") or payload.extra.get("project") or default
     return str(project or default)
-
-
-def _precog_repository(payload: ChatCompletionPayload) -> str:
-    """Return repository provenance captured from the trusted proxy header."""
-    candidate = str(payload.extra.get("_llmrouter_trusted_repository") or "").strip()
-    return candidate if re.fullmatch(r"Vieli-Tech/[A-Za-z0-9_.-]+", candidate) else ""
 
 
 def _task_role(
