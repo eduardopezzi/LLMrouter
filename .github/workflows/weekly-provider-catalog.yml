@@ -1,0 +1,56 @@
+name: Weekly provider catalog refresh
+
+on:
+  schedule:
+    # Mondays at 06:17 UTC (03:17 in America/Sao_Paulo during standard time).
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install LLMrouter
+        run: pip install -e ".[dev]"
+
+      - name: Check provider documentation and rerank models
+        run: python -m llmrouter.main providers-sync --apply-priority
+
+      - name: Validate catalog
+        run: python -c 'from llmrouter.core.registry import load_model_registry; load_model_registry("config/models.yaml", benchmark_catalog_path="data/model_benchmarks.yaml")'
+
+      - name: Open review pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: refresh provider model catalog"
+          branch: automation/weekly-provider-catalog
+          delete-branch: true
+          title: "chore: weekly provider model catalog refresh"
+          body: |
+            Automated weekly review of official LLM provider documentation and model inventories.
+
+            The report is in `data/provider_catalog_report.json`. New models are proposals only;
+            review their roles, tier, context window, pricing, rollout and benchmark evidence before
+            adding them to `config/models.yaml`.
+          add-paths: |
+            config/models.yaml
+            data/provider_catalog_snapshot.yaml
+            data/provider_catalog_report.json

@@ -82,6 +82,7 @@ make benchmarks-refresh # baixa, valida e atualiza o catálogo local
 make benchmarks-check   # verifica se há mudança sem gravar arquivos
 make benchmarks-research # pesquisa na web e gera propostas para revisão humana
 llmrouter catalog-sync # inventaria modelos locais do Ollama e gera propostas
+make providers-sync # verifica docs/modelos oficiais e recalcula prioridades
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
 ```
 
@@ -114,6 +115,16 @@ Controle essa descoberta com
 por modelo com `LLMROUTER_BENCHMARKS__RESEARCH_INTERNET_SEARCH_MAX_RESULTS`
 (padrão: 5). Essas sugestões **nunca** alteram automaticamente as fontes, notas
 ou catálogo.
+
+### Verificação semanal dos provedores
+
+O workflow `.github/workflows/weekly-provider-catalog.yml` roda toda segunda-feira
+e consulta as fontes oficiais listadas em `data/provider_sources.yaml`. Ele registra
+hashes das páginas, inventaria modelos disponíveis quando a API do provedor permite,
+gera propostas para modelos novos/retirados e recalcula as prioridades usando os
+benchmarks locais. O workflow abre um Pull Request para revisão; nenhum modelo novo
+é ativado automaticamente. Para consultar as APIs diretas, configure os secrets
+`DEEPSEEK_API_KEY` e `ZAI_API_KEY` no repositório quando aplicável.
 
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 

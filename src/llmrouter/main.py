@@ -42,6 +42,7 @@ from llmrouter.model_catalog import (
     reconcile_ollama_local_models,
     write_catalog_proposals,
 )
+from llmrouter.provider_catalog import refresh_provider_catalog
 from llmrouter.runtime import _build_scorer, build_app, build_registry
 from llmrouter.utils import resolve_api_key
 
@@ -329,6 +330,27 @@ def _parse_args() -> argparse.Namespace:
         help="Do not write; return status 1 when proposals are found.",
     )
 
+    provider_sync_parser = subparsers.add_parser(
+        "providers-sync",
+        help="Check official provider docs/models and optionally rerank priorities.",
+    )
+    provider_sync_parser.add_argument(
+        "--apply-priority",
+        action="store_true",
+        help="Apply the validated deterministic priority order to the model catalog.",
+    )
+    provider_sync_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Do not write; return status 1 when source or priority changes are found.",
+    )
+    provider_sync_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Per-source network timeout in seconds.",
+    )
+
     parser.add_argument(
         "--debug",
         "-d",
@@ -594,6 +616,39 @@ def main() -> None:
             f"Catalog proposals written: {len(report.proposals)} proposal(s) "
             f"({report.output_path}); active catalog unchanged"
         )
+        return
+
+    if args.command == "providers-sync":
+        try:
+            report = refresh_provider_catalog(
+                settings.benchmarks.provider_sources_path,
+                settings.models_file,
+                settings.benchmarks.provider_snapshot_path,
+                settings.benchmarks.provider_report_path,
+                strategy=settings.routing.strategy.value,
+                provider_cost_order=settings.routing.provider_cost_order,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+                timeout=args.timeout,
+                apply_priority=args.apply_priority and not args.check,
+                write=not args.check,
+            )
+        except Exception as exc:
+            print(f"Provider catalog sync failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print(
+            f"Provider sync: {report.sources_checked} source(s), "
+            f"{report.sources_changed} changed, {len(report.new_models)} new model proposal(s), "
+            f"{len(report.removed_models)} possible removal(s), "
+            f"{len(report.priority_changes)} priority change(s)"
+        )
+        if report.source_errors:
+            for error in report.source_errors:
+                print(
+                    f"  source error [{error['provider']}]: {error['url']} — {error['error']}",
+                    file=sys.stderr,
+                )
+        if args.check and report.changed:
+            sys.exit(1)
         return
 
     # Configure logging based on --debug flag

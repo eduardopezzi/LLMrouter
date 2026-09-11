@@ -286,6 +286,9 @@ class BenchmarksConfig(BaseModel):
     research_internet_search_enabled: bool = True
     research_internet_search_max_results: int = Field(default=5, ge=1, le=10)
     model_catalog_proposals_path: str = "data/model_catalog_proposals.json"
+    provider_sources_path: str = "data/provider_sources.yaml"
+    provider_snapshot_path: str = "data/provider_catalog_snapshot.yaml"
+    provider_report_path: str = "data/provider_catalog_report.json"
 
 
 class HybridScorerConfig(BaseModel):

@@ -130,6 +130,17 @@ class TestArgParsing:
         assert args.command == "panel"
         assert args.promote_model == "gpt-4o"
 
+    def test_parse_args_providers_sync(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["llmrouter", "providers-sync", "--apply-priority", "--timeout", "5"],
+        ):
+            args = _parse_args()
+        assert args.command == "providers-sync"
+        assert args.apply_priority is True
+        assert args.timeout == 5.0
+
     def test_parse_args_panel_set_strategy(self) -> None:
         with patch.object(
             sys,
