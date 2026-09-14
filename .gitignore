@@ -30,12 +30,13 @@ dist/
 .env.*
 !.env.example
 config/config.yaml
+config/models.yaml
 data/
 !data/
 data/*
 !data/benchmark_sources.yaml
 !data/model_benchmarks.yaml
-!data/benchmark_research_proposals.json
+data/benchmark_research_proposals.json
 *.db
 *.sqlite
 *.sqlite3
