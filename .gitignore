@@ -36,6 +36,7 @@ data/
 data/*
 !data/benchmark_sources.yaml
 !data/model_benchmarks.yaml
+!data/provider_sources.yaml
 data/benchmark_research_proposals.json
 *.db
 *.sqlite

@@ -1,0 +1,32 @@
+# Official sources checked by the weekly provider-catalog workflow.
+# Model APIs require the corresponding *_API_KEY when the provider requires it.
+sources:
+  - provider: "ollama"
+    kind: "model_api"
+    url: "https://ollama.com/api/tags"
+    api_key_env: "OLLAMA_API_KEY"
+  - provider: "ollama"
+    kind: "documentation"
+    url: "https://ollama.com/library"
+
+  - provider: "deepseek"
+    kind: "model_api"
+    url: "https://api.deepseek.com/models"
+    api_key_env: "DEEPSEEK_API_KEY"
+  - provider: "deepseek"
+    kind: "documentation"
+    url: "https://api-docs.deepseek.com/api/list-models"
+  - provider: "deepseek"
+    kind: "documentation"
+    url: "https://api-docs.deepseek.com/updates/"
+
+  - provider: "zai"
+    kind: "documentation"
+    url: "https://docs.z.ai/api-reference/llm/chat-completion"
+    complete_inventory: true
+  - provider: "zai"
+    kind: "documentation"
+    url: "https://docs.z.ai/release-notes/new-released"
+  - provider: "zai"
+    kind: "documentation"
+    url: "https://docs.z.ai/guides/overview/pricing"
