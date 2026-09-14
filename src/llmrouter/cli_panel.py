@@ -1437,29 +1437,35 @@ def _build_llm_priority_prompt(
     strategy: str,
     provider_cost_order: list[str],
 ) -> str:
+    provider_order = " > ".join(provider_cost_order) or "none configured"
+    provider_guidance = (
+        f"Provider preference, highest to lowest: {provider_order}. Treat this as a meaningful "
+        "secondary preference in every strategy: among models with similar fit for the selected "
+        "strategy, rank the earlier provider higher. Providers absent from the list come after "
+        "listed providers. Do not override a clear, material advantage in the strategy's main "
+        "objective just to follow provider order."
+    )
     strategy_guidance = {
         "cost": (
-            "Prefer the lowest total token cost. Use provider_cost_order as a tie-breaker "
-            "when costs are equal, then prefer smaller/fast models."
+            "Prefer the lowest total token cost. When costs are equal or close, prefer providers "
+            "earlier in provider_cost_order, then prefer smaller/faster models."
         ),
         "quality": (
             "Prefer the strongest and most capable models first, even when that changes the "
             "current order substantially. Use the benchmark composite scores below as the "
-            "primary quality signal, then roles, context window, tier, provider, and "
-            "descriptions. You may move models from any provider/API to the top when their "
-            "scores justify it."
+            "primary quality signal, then roles, context window, tier, and descriptions. When "
+            "models have similar quality and capability, prefer the model from the earlier "
+            "provider in provider_cost_order."
         ),
         "balanced": (
-            "Re-rank the models using the computed strategy_score shown for each model. "
-            "Higher strategy_score means higher priority. The order MUST differ from the "
-            "current priority whenever a model of higher tier, larger context window, "
-            "better benchmark score, or preferred provider_cost_order position appears later "
-            "in the list. Do not preserve the original order by default. "
-            "Tie-break using provider_cost_order first, then benchmark_score, then tier."
+            "Re-rank the models using the computed strategy_score shown for each model; higher "
+            "means higher priority. When strategy_scores are close, prefer the earlier provider "
+            "in provider_cost_order. Do not preserve the original order by default."
         ),
         "latency": (
-            "Prefer likely faster models first. Favor local Ollama models and smaller models "
-            "when quality is similar. Use strategy_score as a guide."
+            "Prefer likely faster models first and use strategy_score as a guide. When latency "
+            "and quality are similar, prefer the earlier provider in provider_cost_order; do "
+            "not give a blanket preference to any single provider."
         ),
     }.get(strategy, "Rank models according to the selected routing strategy.")
     rows = []
@@ -1490,11 +1496,13 @@ def _build_llm_priority_prompt(
         )
     return (
         f"Current routing strategy: {strategy}\n"
-        f"Provider cost tie-break order: {', '.join(provider_cost_order)}\n"
+        f"Provider cost order: {', '.join(provider_cost_order) or 'none configured'}\n"
+        f"Provider order guidance: {provider_guidance}\n"
         f"Strategy guidance: {strategy_guidance}\n\n"
         "Return a complete priority order for every model below. Lower position means higher "
-        "priority. The order may differ from the current priority and may promote any "
-        "provider/API. Do not add, remove, rename, or duplicate models.\n\n"
+        "priority. Reorder models to follow the strategy and provider order guidance above; "
+        "do not preserve the current priority by default. Do not add, remove, rename, or "
+        "duplicate models.\n\n"
         "Respond ONLY as a single JSON object with this exact shape, no markdown, no prose:\n"
         '{"models":["exact model name","exact model name",...]}\n\n'
         f"Models (with benchmark-derived scores):\n{json.dumps(rows, ensure_ascii=False, indent=2)}"

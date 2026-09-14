@@ -476,9 +476,39 @@ def test_render_current_settings() -> None:
 
 def test_build_llm_priority_prompt() -> None:
     models = list(_registry().all())
-    prompt = _build_llm_priority_prompt(models, strategy="cost", provider_cost_order=["zai", "ollama"])
+    prompt = _build_llm_priority_prompt(
+        models,
+        strategy="cost",
+        provider_cost_order=["zai", "ollama"],
+    )
     assert "cost" in prompt
+    assert "Provider preference, highest to lowest: zai > ollama" in prompt
+    assert "When costs are equal or close" in prompt
     assert "json" in prompt.lower()
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected_guidance"),
+    [
+        ("cost", "When costs are equal or close"),
+        ("quality", "When models have similar quality and capability"),
+        ("balanced", "When strategy_scores are close"),
+        ("latency", "When latency and quality are similar"),
+    ],
+)
+def test_build_llm_priority_prompt_uses_provider_order_for_every_strategy(
+    strategy: str, expected_guidance: str
+) -> None:
+    prompt = _build_llm_priority_prompt(
+        list(_registry().all()),
+        strategy=strategy,
+        provider_cost_order=["deepseek", "zai", "ollama"],
+    )
+
+    assert "Provider preference, highest to lowest: deepseek > zai > ollama" in prompt
+    assert "meaningful secondary preference in every strategy" in prompt
+    assert "Providers absent from the list come after listed providers" in prompt
+    assert expected_guidance in prompt
 
 
 def test_build_llm_priority_prompt_unknown_strategy() -> None:
