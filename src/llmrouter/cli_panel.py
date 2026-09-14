@@ -855,6 +855,7 @@ def _models_submenu(
         print("  b) Promote model ....... promote / reset / LLM reorder")
         print("  c) Health .............. per-model metrics")
         print("  d) Top 3 per benchmark . leaderboard")
+        print("  e) Update model catalog . fetch official provider inventories")
         print()
         print("  0. Back")
         try:
@@ -875,6 +876,48 @@ def _models_submenu(
         elif choice in {"d", "4"}:
             print()
             print(render_benchmark_leaderboards(registry))
+            _pause_for_enter()
+        elif choice in {"e", "5"}:
+            from llmrouter.provider_catalog import refresh_provider_catalog
+
+            print()
+            print("Checking official provider model sources...")
+            try:
+                report = refresh_provider_catalog(
+                    settings.benchmarks.provider_sources_path,
+                    settings.models_file,
+                    settings.benchmarks.provider_snapshot_path,
+                    settings.benchmarks.provider_report_path,
+                    strategy=settings.routing.strategy.value,
+                    provider_cost_order=settings.routing.provider_cost_order,
+                    benchmark_catalog_path=settings.benchmarks.catalog_path,
+                    apply_catalog=True,
+                )
+            except Exception as exc:
+                print(f"Model catalog update failed: {exc}")
+                _pause_for_enter()
+                continue
+            print(
+                f"Provider sync: {report.sources_checked} source(s), "
+                f"{report.sources_changed} changed; "
+                f"{len(report.new_models)} added, "
+                f"{len(report.reactivated_models)} reactivated, "
+                f"{len(report.removed_models)} retired"
+            )
+            for item in report.new_models:
+                print(f"  Added: {item['model']}")
+            for item in report.reactivated_models:
+                print(f"  Reactivated: {item['model']}")
+            for item in report.removed_models:
+                print(f"  Retired: {item['model']}")
+            for error in report.source_errors:
+                print(f"  Source error [{error['provider']}]: {error['url']} — {error['error']}")
+            print(f"  Report: {report.report_path}")
+            registry = _reload_registry(
+                settings.models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+            )
+            catalog = catalog_stats(registry)
             _pause_for_enter()
         elif choice in {"0", ""}:
             return registry
@@ -1694,9 +1737,14 @@ def _model_blocks(path: Path) -> list[_ModelBlock]:
         priority_line_index: int | None = None
         rollout_pct: float = 100.0
         rollout_line_index: int | None = None
+        enabled = True
         rollout_pattern = re.compile(r"^\s+rollout_percentage:\s+([\d.]+)\s*$")
+        enabled_pattern = re.compile(r"^\s+enabled:\s*(true|false)\s*$", re.IGNORECASE)
 
         for index in range(start + 1, end):
+            enabled_match = enabled_pattern.match(lines[index])
+            if enabled_match is not None:
+                enabled = enabled_match.group(1).lower() != "false"
             if priority_line_index is None:
                 priority_match = priority_pattern.match(lines[index])
                 if priority_match is not None:
@@ -1709,6 +1757,8 @@ def _model_blocks(path: Path) -> list[_ModelBlock]:
                     rollout_pct = float(rollout_match.group(1))
                     rollout_line_index = index
                     continue
+        if not enabled:
+            continue
         blocks.append(
             _ModelBlock(
                 name=name,

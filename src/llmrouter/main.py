@@ -43,7 +43,14 @@ from llmrouter.model_catalog import (
     write_catalog_proposals,
 )
 from llmrouter.provider_catalog import refresh_provider_catalog
-from llmrouter.runtime import _build_scorer, build_app, build_registry
+from llmrouter.runtime import (
+    _build_health_tracker as _build_configured_health_tracker,
+)
+from llmrouter.runtime import (
+    _build_scorer,
+    build_app,
+    build_registry,
+)
 from llmrouter.utils import resolve_api_key
 
 
@@ -340,6 +347,11 @@ def _parse_args() -> argparse.Namespace:
         help="Apply the validated deterministic priority order to the model catalog.",
     )
     provider_sync_parser.add_argument(
+        "--apply-catalog",
+        action="store_true",
+        help="Add discovered models and retire models absent from two complete inventories.",
+    )
+    provider_sync_parser.add_argument(
         "--check",
         action="store_true",
         help="Do not write; return status 1 when source or priority changes are found.",
@@ -442,7 +454,9 @@ def main() -> None:
             models_file,
             benchmark_catalog_path=settings.benchmarks.catalog_path,
         )
-        health_tracker = _build_health_tracker_from_settings(settings)
+        health_tracker = (
+            _build_health_tracker_from_settings(settings) if settings.health.enabled else None
+        )
         changed = False
         if args.list_model_priorities:
             print(render_model_priorities(registry, limit=args.priority_limit))
@@ -630,15 +644,20 @@ def main() -> None:
                 benchmark_catalog_path=settings.benchmarks.catalog_path,
                 timeout=args.timeout,
                 apply_priority=args.apply_priority and not args.check,
+                apply_catalog=args.apply_catalog and not args.check,
                 write=not args.check,
             )
         except Exception as exc:
             print(f"Provider catalog sync failed: {exc}", file=sys.stderr)
             sys.exit(2)
+        additions_label = (
+            "added" if args.apply_catalog and not args.check else "new model proposal(s)"
+        )
         print(
             f"Provider sync: {report.sources_checked} source(s), "
-            f"{report.sources_changed} changed, {len(report.new_models)} new model proposal(s), "
-            f"{len(report.removed_models)} possible removal(s), "
+            f"{report.sources_changed} changed, {len(report.new_models)} {additions_label}, "
+            f"{len(report.reactivated_models)} reactivated, "
+            f"{len(report.removed_models)} retired/possible removal(s), "
             f"{len(report.priority_changes)} priority change(s)"
         )
         if report.source_errors:
@@ -677,19 +696,8 @@ def main() -> None:
 
 
 def _build_health_tracker_from_settings(settings: Settings) -> ModelHealthTracker:
-    """Build an in-memory tracker reflecting configured health weights."""
-    from llmrouter.core.health import HealthWeights
-
-    return ModelHealthTracker(
-        store=InMemoryHealthStore(),
-        window_minutes=settings.health.window_minutes,
-        weights=HealthWeights(
-            latency=settings.health.latency_weight,
-            error=settings.health.error_weight,
-            quality=settings.health.quality_weight,
-            cost=settings.health.cost_weight,
-        ),
-    )
+    """Build a tracker using the same health backend as the running service."""
+    return _build_configured_health_tracker(settings)
 
 
 def _build_health_tracker(args: argparse.Namespace) -> ModelHealthTracker:

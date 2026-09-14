@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import replace
@@ -9,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from llmrouter.api.routes import create_app
+from llmrouter.core.health import ModelHealthTracker, SQLiteHealthStore
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.scorer import ScoringResult
 from llmrouter.core.stats import MetricsCollector
@@ -478,6 +480,23 @@ def test_health_reports_model_count() -> None:
             "routing_roles": [],
         },
     }
+
+
+def test_health_models_returns_events_from_sqlite_store(tmp_path) -> None:
+    tracker = ModelHealthTracker(
+        SQLiteHealthStore(str(tmp_path / "health.db")),
+        log_health_summary=False,
+    )
+    asyncio.run(tracker.record_success("cheap", latency_ms=42, cost_usd=0.01, quality=0))
+    client = TestClient(create_app(health_tracker=tracker))
+
+    response = client.get("/health/models")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["models"][0]["model"] == "cheap"
+    assert body["models"][0]["request_count"] == 1
+    assert body["models"][0]["avg_latency_ms"] == 42
 
 
 def test_semantic_inspect_requires_api_key() -> None:

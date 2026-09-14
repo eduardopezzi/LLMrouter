@@ -134,11 +134,19 @@ class TestArgParsing:
         with patch.object(
             sys,
             "argv",
-            ["llmrouter", "providers-sync", "--apply-priority", "--timeout", "5"],
+            [
+                "llmrouter",
+                "providers-sync",
+                "--apply-priority",
+                "--apply-catalog",
+                "--timeout",
+                "5",
+            ],
         ):
             args = _parse_args()
         assert args.command == "providers-sync"
         assert args.apply_priority is True
+        assert args.apply_catalog is True
         assert args.timeout == 5.0
 
     def test_parse_args_panel_set_strategy(self) -> None:
@@ -274,6 +282,30 @@ class TestHealthTrackerBuilders:
         tracker = _build_health_tracker_from_settings(settings)
         assert tracker.window_minutes == settings.health.window_minutes
         assert isinstance(tracker.store, InMemoryHealthStore)
+
+    def test_build_health_tracker_from_settings_uses_configured_sqlite_store(
+        self, tmp_path: Path
+    ) -> None:
+        import asyncio
+
+        from llmrouter.cli_panel import render_model_health
+        from llmrouter.config import Settings
+        from llmrouter.core.health import SQLiteHealthStore
+
+        settings = Settings(
+            health={
+                "backend": "sqlite",
+                "db_path": str(tmp_path / "health.db"),
+                "window_minutes": 45,
+                "ttl_minutes": 120,
+            }
+        )
+        tracker = _build_health_tracker_from_settings(settings)
+        assert tracker.window_minutes == 45
+        assert isinstance(tracker.store, SQLiteHealthStore)
+        asyncio.run(tracker.record_success("persisted-model", 123, 0.001, quality=4.0))
+
+        assert "persisted-model: requests=1" in render_model_health(tracker)
 
     def test_build_health_tracker_memory(self) -> None:
         args = argparse.Namespace(backend="memory", db_path="data/health.db", window_minutes=15)

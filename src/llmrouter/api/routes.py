@@ -978,6 +978,17 @@ def _memory_project(
     return result
 
 
+def _precog_repository(payload: ChatCompletionPayload) -> str:
+    """Read optional repository provenance from supported request metadata."""
+    for metadata in (payload.llmrouter, payload.metadata, payload.extra):
+        if not isinstance(metadata, dict):
+            continue
+        repository = metadata.get("repository") or metadata.get("repo")
+        if isinstance(repository, str) and repository.strip():
+            return repository.strip()
+    return ""
+
+
 def _chat_request_directives(chat_request: ChatRequest) -> dict[str, str]:
     """Parse prompt directives from the leading lines of each message."""
     result: dict[str, str] = {}

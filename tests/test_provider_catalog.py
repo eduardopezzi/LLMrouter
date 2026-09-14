@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 import llmrouter.provider_catalog as provider_catalog
+from llmrouter.core.registry import load_model_registry
 from llmrouter.core.types import ModelInfo, Provider, Tier
 
 
@@ -18,6 +20,12 @@ def test_parse_model_api_supports_ollama_and_openai_shapes() -> None:
     assert provider_catalog._parse_model_api(
         "deepseek", {"data": [{"id": "deepseek-v4-flash", "owned_by": "deepseek"}]}
     ) == [{"id": "deepseek-v4-flash", "owned_by": "deepseek"}]
+
+
+@pytest.mark.parametrize("payload", [{}, {"error": "unauthorized"}])
+def test_parse_model_api_rejects_success_responses_without_inventory(payload) -> None:
+    with pytest.raises(ValueError, match="no model list"):
+        provider_catalog._parse_model_api("deepseek", payload)
 
 
 def test_documentation_models_are_conservative_and_normalized() -> None:
@@ -119,3 +127,140 @@ def test_refresh_writes_report_and_applies_only_priority_order(
     catalog = models_path.read_text(encoding="utf-8")
     assert "name: zhipu/model-b\n    provider: zai\n    tier: 1\n    priority: 1" in catalog
     assert "name: zhipu/model-a\n    provider: zai\n    tier: 1\n    priority: 2" in catalog
+
+
+def test_refresh_applies_new_models_and_retires_after_two_inventory_checks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    models_path = tmp_path / "models.yaml"
+    snapshot_path = tmp_path / "snapshot.yaml"
+    report_path = tmp_path / "report.json"
+    sources_path.write_text(
+        "sources:\n"
+        "  - provider: zai\n"
+        "    kind: model_api\n"
+        "    url: https://provider.example/models\n"
+        "  - provider: zai\n"
+        "    url: https://provider.example/models-secondary\n"
+        "    complete_inventory: true\n",
+        encoding="utf-8",
+    )
+    models_path.write_text(
+        "# Keep this catalog comment.\n"
+        "models:\n"
+        "  - name: zhipu/model-a\n"
+        "    provider: zai\n"
+        "    tier: 2\n"
+        "    priority: 1\n"
+        "  - name: zhipu/model-b\n"
+        "    provider: zai\n"
+        "    tier: 2\n"
+        "    priority: 2\n",
+        encoding="utf-8",
+    )
+    available_ids = ["model-a", "glm-new"]
+    monkeypatch.setattr(
+        provider_catalog,
+        "_fetch_source",
+        lambda source, *, timeout: ("stable inventory", [{"id": item} for item in available_ids]),
+    )
+
+    first = provider_catalog.refresh_provider_catalog(
+        sources_path,
+        models_path,
+        snapshot_path,
+        report_path,
+        strategy="balanced",
+        provider_cost_order=["zai"],
+        apply_catalog=True,
+    )
+    assert [item["model"] for item in first.new_models] == ["zhipu/glm-new"]
+    assert first.removed_models == ()
+    assert "zhipu/glm-new" in {model.name for model in load_model_registry(models_path).all()}
+
+    monkeypatch.setattr(
+        provider_catalog,
+        "_fetch_source",
+        lambda source, *, timeout: ("empty inventory", []),
+    )
+    empty = provider_catalog.refresh_provider_catalog(
+        sources_path,
+        models_path,
+        snapshot_path,
+        report_path,
+        strategy="balanced",
+        provider_cost_order=["zai"],
+        apply_catalog=True,
+    )
+    assert empty.source_errors
+    assert empty.removed_models == ()
+    assert "zhipu/model-b" in {model.name for model in load_model_registry(models_path).all()}
+
+    def fail_source(source, *, timeout):
+        if source.url.endswith("models-secondary"):
+            raise provider_catalog.httpx.ConnectError("provider temporarily unavailable")
+        return "stable inventory", [{"id": item} for item in available_ids]
+
+    monkeypatch.setattr(provider_catalog, "_fetch_source", fail_source)
+    failed = provider_catalog.refresh_provider_catalog(
+        sources_path,
+        models_path,
+        snapshot_path,
+        report_path,
+        strategy="balanced",
+        provider_cost_order=["zai"],
+        apply_catalog=True,
+    )
+    assert failed.source_errors
+    assert failed.removed_models == ()
+    assert "zhipu/model-b" in {model.name for model in load_model_registry(models_path).all()}
+
+    monkeypatch.setattr(
+        provider_catalog,
+        "_fetch_source",
+        lambda source, *, timeout: ("stable inventory", [{"id": item} for item in available_ids]),
+    )
+    second = provider_catalog.refresh_provider_catalog(
+        sources_path,
+        models_path,
+        snapshot_path,
+        report_path,
+        strategy="balanced",
+        provider_cost_order=["zai"],
+        apply_catalog=True,
+    )
+    assert second.removed_models == ()
+
+    third = provider_catalog.refresh_provider_catalog(
+        sources_path,
+        models_path,
+        snapshot_path,
+        report_path,
+        strategy="balanced",
+        provider_cost_order=["zai"],
+        apply_catalog=True,
+    )
+    assert [item["model"] for item in third.removed_models] == ["zhipu/model-b"]
+    active_names = {model.name for model in load_model_registry(models_path).all()}
+    assert active_names == {"zhipu/model-a", "zhipu/glm-new"}
+    catalog = models_path.read_text(encoding="utf-8")
+    assert "# Keep this catalog comment." in catalog
+    assert "  - name: zhipu/model-b\n    enabled: false" in catalog
+
+    available_ids[:] = ["model-a", "model-b", "glm-new"]
+    fourth = provider_catalog.refresh_provider_catalog(
+        sources_path,
+        models_path,
+        snapshot_path,
+        report_path,
+        strategy="balanced",
+        provider_cost_order=["zai"],
+        apply_catalog=True,
+    )
+    assert [item["model"] for item in fourth.reactivated_models] == ["zhipu/model-b"]
+    assert {model.name for model in load_model_registry(models_path).all()} == {
+        "zhipu/model-a",
+        "zhipu/model-b",
+        "zhipu/glm-new",
+    }

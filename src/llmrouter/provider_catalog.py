@@ -1,9 +1,4 @@
-"""Weekly provider documentation and model-catalog monitoring.
-
-The provider APIs and documentation are evidence only.  This module can
-reorder the already approved catalog, but it never adds or removes an active
-model automatically.  New model identifiers are emitted as review proposals.
-"""
+"""Provider model discovery, catalog reconciliation, and change reporting."""
 
 from __future__ import annotations
 
@@ -11,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +27,7 @@ class ProviderSource:
     url: str
     kind: str = "documentation"  # documentation | model_api
     api_key_env: str | None = None
+    complete_inventory: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,6 +46,7 @@ class ProviderSyncReport:
     priority_changes: tuple[dict[str, object], ...]
     priority_order: tuple[str, ...]
     report_path: Path
+    reactivated_models: tuple[dict[str, str], ...] = ()
 
 
 def refresh_provider_catalog(
@@ -63,34 +60,46 @@ def refresh_provider_catalog(
     benchmark_catalog_path: str | Path = "data/model_benchmarks.yaml",
     timeout: float = 30.0,
     apply_priority: bool = False,
+    apply_catalog: bool = False,
     write: bool = True,
 ) -> ProviderSyncReport:
-    """Check official sources and optionally apply a validated priority order.
+    """Check official sources and optionally reconcile the active model catalog.
 
-    A failed source is retained in the report and never causes configured
-    models to be removed.  The priority order is calculated from the active
-    local benchmark catalog, so a provider API outage cannot invent ranking
-    data.
+    New identifiers can be added from official inventories or documentation.
+    Existing models are retired only after two successful checks against a
+    source explicitly marked as a complete inventory. A failed source never
+    removes models.
     """
     sources = _load_sources(Path(sources_path))
     previous = _load_snapshot(Path(snapshot_path))
     registry = load_model_registry(models_path, benchmark_catalog_path=benchmark_catalog_path)
     models = registry.all()
+    configured_ids_by_provider = _configured_model_ids(Path(models_path))
     active_by_provider: dict[str, list[Any]] = {}
     for model in models:
         active_by_provider.setdefault(model.provider.value, []).append(model)
-    active_providers = {model.provider.value for model in models}
+    active_providers = {model.provider.value for model in models} | set(configured_ids_by_provider)
     sources = [source for source in sources if source.provider in active_providers]
 
     source_records: dict[str, dict[str, Any]] = {}
     source_errors: list[dict[str, str]] = []
     discovered: dict[str, dict[str, dict[str, Any]]] = {}
+    inventory_discovered: dict[str, dict[str, dict[str, Any]]] = {}
     changed_source_urls: set[str] = set()
+    failed_inventory_providers: set[str] = set()
 
     for source in sources:
         try:
             body, model_records = _fetch_source(source, timeout=timeout)
+            if (
+                (source.complete_inventory or source.kind == "model_api")
+                and not model_records
+                and configured_ids_by_provider.get(source.provider)
+            ):
+                raise ValueError("complete provider inventory returned no model identifiers")
         except (httpx.HTTPError, OSError, ValueError) as exc:
+            if source.complete_inventory or source.kind == "model_api":
+                failed_inventory_providers.add(source.provider)
             source_errors.append(
                 {"provider": source.provider, "url": source.url, "error": str(exc)[:500]}
             )
@@ -102,19 +111,33 @@ def refresh_provider_catalog(
         source_records[source.url] = {
             "provider": source.provider,
             "kind": source.kind,
+            "complete_inventory": source.complete_inventory or source.kind == "model_api",
             "sha256": digest,
             "models": model_records,
         }
+        if source_records[source.url]["complete_inventory"]:
+            inventory_discovered.setdefault(source.provider, {})
         for record in model_records:
             model_id = record.get("id")
             if isinstance(model_id, str) and model_id:
                 discovered.setdefault(source.provider, {}).setdefault(model_id, record)
+                if source_records[source.url]["complete_inventory"]:
+                    inventory_discovered[source.provider].setdefault(model_id, record)
+
+    _populate_missing_model_counts(
+        active_by_provider,
+        previous,
+        source_records,
+        blocked_providers=failed_inventory_providers,
+    )
 
     new_models, removed_models, updated_models = _model_diffs(
         active_by_provider,
         discovered,
         previous,
         source_records,
+        configured_ids_by_provider=configured_ids_by_provider,
+        blocked_inventory_providers=failed_inventory_providers,
     )
     ordered_models = rank_models(
         models,
@@ -154,13 +177,39 @@ def refresh_provider_catalog(
         report_path=Path(report_path),
     )
 
-    if write and changed:
-        snapshot_records = dict(previous)
-        snapshot_records.update(source_records)
+    snapshot_records = dict(previous)
+    snapshot_records.update(source_records)
+    for url, record in list(snapshot_records.items()):
+        if record.get("provider") in failed_inventory_providers and _is_complete_inventory(record):
+            reset_record = dict(record)
+            reset_record["missing_models"] = {}
+            snapshot_records[url] = reset_record
+
+    snapshot_changed = snapshot_records != previous
+    if write and apply_catalog:
+        added, reactivated = _apply_provider_catalog_changes(
+            Path(models_path),
+            removed_models,
+            inventory_discovered,
+        )
+        changed = changed or bool(added or reactivated)
+        report = replace(
+            report,
+            changed=changed,
+            new_models=tuple(added),
+            reactivated_models=tuple(reactivated),
+        )
+    if write and (changed or snapshot_changed or source_errors):
         _write_snapshot(Path(snapshot_path), snapshot_records)
         _write_report(report)
-    if apply_priority and priority_changes:
-        set_model_priority_order(models_path, list(priority_order))
+    if write and apply_priority and priority_changes:
+        complete_order = list(priority_order)
+        if apply_catalog:
+            complete_order.extend(
+                item["model"] for item in (*report.new_models, *report.reactivated_models)
+                if item["model"] not in complete_order
+            )
+        set_model_priority_order(models_path, complete_order)
     return report
 
 
@@ -186,6 +235,7 @@ def _load_sources(path: Path) -> list[ProviderSource]:
                 url=url,
                 kind=kind,
                 api_key_env=api_key_env if isinstance(api_key_env, str) else None,
+                complete_inventory=bool(item.get("complete_inventory", False)),
             )
         )
     return sources
@@ -215,7 +265,12 @@ def _fetch_source(source: ProviderSource, *, timeout: float) -> tuple[str, list[
 def _parse_model_api(provider: str, payload: object) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         raise ValueError(f"{provider} model API returned a non-object response")
-    raw_models = payload.get("models", payload.get("data", []))
+    if "models" in payload:
+        raw_models = payload["models"]
+    elif "data" in payload:
+        raw_models = payload["data"]
+    else:
+        raise ValueError(f"{provider} model API response has no model list")
     if not isinstance(raw_models, list):
         raise ValueError(f"{provider} model API response has no model list")
     records: list[dict[str, Any]] = []
@@ -262,48 +317,37 @@ def _model_diffs(
     discovered: dict[str, dict[str, dict[str, Any]]],
     previous: dict[str, dict[str, Any]],
     source_records: dict[str, dict[str, Any]],
+    *,
+    configured_ids_by_provider: dict[str, set[str]] | None = None,
+    blocked_inventory_providers: set[str] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     new_models: list[dict[str, str]] = []
     removed_models: list[dict[str, str]] = []
     updated_models: list[dict[str, str]] = []
-    successful_api_providers = {
-        record["provider"]
-        for record in source_records.values()
-        if record["kind"] == "model_api"
-    }
     previous_models: dict[tuple[object, object], dict[str, Any]] = {}
     for source_record in previous.values():
         provider_name = source_record.get("provider")
         for model_record in source_record.get("models", []):
             if isinstance(model_record, dict):
                 previous_models[(provider_name, model_record.get("id"))] = model_record
-    previous_api_ids: dict[str, set[object]] = {}
-    for source_record in previous.values():
-        provider = source_record.get("provider")
-        if source_record.get("kind") != "model_api" or not isinstance(provider, str):
-            continue
-        previous_api_ids.setdefault(provider, set()).update(
-            model.get("id")
-            for model in source_record.get("models", [])
-            if isinstance(model, dict)
-        )
-    current_api_ids: dict[str, set[object]] = {}
+    current_inventory_records: dict[str, list[dict[str, Any]]] = {}
     for source_record in source_records.values():
         provider = source_record.get("provider")
-        if source_record.get("kind") != "model_api" or not isinstance(provider, str):
+        if (
+            not isinstance(provider, str)
+            or not _is_complete_inventory(source_record)
+            or provider in (blocked_inventory_providers or set())
+        ):
             continue
-        current_api_ids.setdefault(provider, set()).update(
-            model.get("id")
-            for model in source_record.get("models", [])
-            if isinstance(model, dict)
-        )
+        current_inventory_records.setdefault(provider, []).append(source_record)
 
     for provider, records in discovered.items():
         active_ids = {
             _model_id(provider, model.name) for model in active_by_provider.get(provider, [])
         }
+        known_ids = (configured_ids_by_provider or {}).get(provider, active_ids)
         for model_id, record in records.items():
-            if model_id not in active_ids and (provider, model_id) not in previous_models:
+            if model_id not in known_ids and (provider, model_id) not in previous_models:
                 new_models.append(
                     {
                         "provider": provider,
@@ -320,18 +364,30 @@ def _model_diffs(
                         "evidence": "official model inventory metadata changed",
                     }
                 )
-        if provider in successful_api_providers:
+        inventories = current_inventory_records.get(provider, [])
+        if inventories:
+            available_ids = {
+                model_record.get("id")
+                for inventory in inventories
+                for model_record in inventory.get("models", [])
+                if isinstance(model_record, dict)
+            }
             for model in active_by_provider.get(provider, []):
                 model_id = _model_id(provider, model.name)
-                if (
-                    model_id in previous_api_ids.get(provider, set())
-                    and model_id not in current_api_ids.get(provider, set())
-                ):
+                miss_count = max(
+                    (
+                        _safe_int(inventory.get("missing_models", {}).get(model_id, 0))
+                        for inventory in inventories
+                        if isinstance(inventory.get("missing_models", {}), dict)
+                    ),
+                    default=0,
+                )
+                if model_id not in available_ids and miss_count >= 2:
                     removed_models.append(
                         {
                             "provider": provider,
                             "model": model.name,
-                            "evidence": "official model inventory no longer lists it",
+                            "evidence": "absent from two successful official inventory checks",
                         }
                     )
     return (
@@ -339,6 +395,219 @@ def _model_diffs(
         sorted(removed_models, key=lambda item: (item["provider"], item["model"])),
         sorted(updated_models, key=lambda item: (item["provider"], item["model"])),
     )
+
+
+def _is_complete_inventory(record: dict[str, Any]) -> bool:
+    """Whether a source claims to list every model available to its API."""
+    return bool(record.get("complete_inventory", record.get("kind") == "model_api"))
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _configured_model_ids(path: Path) -> dict[str, set[str]]:
+    """Read all configured model names, including entries currently disabled."""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+    model_rows = raw.get("models", []) if isinstance(raw, dict) else []
+    configured: dict[str, set[str]] = {}
+    if not isinstance(model_rows, list):
+        return configured
+    for row in model_rows:
+        if not isinstance(row, dict):
+            continue
+        provider, name = row.get("provider"), row.get("name")
+        if isinstance(provider, str) and isinstance(name, str):
+            configured.setdefault(provider, set()).add(_model_id(provider, name))
+    return configured
+
+
+def _populate_missing_model_counts(
+    active_by_provider: dict[str, list[Any]],
+    previous: dict[str, dict[str, Any]],
+    source_records: dict[str, dict[str, Any]],
+    *,
+    blocked_providers: set[str] | None = None,
+) -> None:
+    """Advance absence counts only for providers with a successful full inventory."""
+    inventory_records: dict[str, list[dict[str, Any]]] = {}
+    for record in source_records.values():
+        provider = record.get("provider")
+        if (
+            isinstance(provider, str)
+            and _is_complete_inventory(record)
+            and provider not in (blocked_providers or set())
+        ):
+            inventory_records.setdefault(provider, []).append(record)
+
+    previous_misses: dict[str, dict[str, int]] = {}
+    for record in previous.values():
+        provider = record.get("provider")
+        missing = record.get("missing_models", {})
+        if (
+            not isinstance(provider, str)
+            or not _is_complete_inventory(record)
+            or not isinstance(missing, dict)
+        ):
+            continue
+        provider_misses = previous_misses.setdefault(provider, {})
+        for model_id, count in missing.items():
+            provider_misses[str(model_id)] = max(
+                provider_misses.get(str(model_id), 0), _safe_int(count)
+            )
+
+    for provider, records in inventory_records.items():
+        available_ids = {
+            model.get("id")
+            for record in records
+            for model in record.get("models", [])
+            if isinstance(model, dict)
+        }
+        missing: dict[str, int] = {}
+        for model in active_by_provider.get(provider, []):
+            model_id = _model_id(provider, model.name)
+            if model_id not in available_ids:
+                missing[model_id] = previous_misses.get(provider, {}).get(model_id, 0) + 1
+        for record in records:
+            record["missing_models"] = dict(missing)
+
+
+def _apply_provider_catalog_changes(
+    path: Path,
+    removed_models: list[dict[str, str]],
+    discovered: dict[str, dict[str, dict[str, Any]]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Append new models and enable/disable entries while preserving YAML comments."""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+    model_rows = raw.get("models", []) if isinstance(raw, dict) else []
+    if not isinstance(model_rows, list):
+        raise ValueError(f"models file must contain a top-level 'models' list: {path}")
+    rows_by_name = {
+        row.get("name"): row
+        for row in model_rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    updates: dict[str, bool] = {}
+    reactivated: list[dict[str, str]] = []
+    added: list[dict[str, str]] = []
+
+    for item in removed_models:
+        name = item["model"]
+        row = rows_by_name.get(name)
+        if row is not None and row.get("enabled") is not False:
+            updates[name] = False
+
+    for provider, records in discovered.items():
+        for model_id in records:
+            name = _provider_model_name(provider, model_id)
+            row = rows_by_name.get(name)
+            if row is not None:
+                if row.get("enabled") is False:
+                    updates[name] = True
+                    reactivated.append(
+                        {
+                            "provider": provider,
+                            "model": name,
+                            "evidence": "official provider source lists the model again",
+                        }
+                    )
+                continue
+            entry = _new_model_entry(provider, name, model_rows)
+            rows_by_name[name] = entry
+            model_rows.append(entry)
+            added.append(
+                {
+                    "provider": provider,
+                    "model": name,
+                    "evidence": "official provider source",
+                }
+            )
+
+    if not updates and not added:
+        return added, reactivated
+
+    text = path.read_text(encoding="utf-8") if path.exists() else "models:\n"
+    lines = text.splitlines()
+    starts: list[tuple[int, str]] = []
+    name_pattern = re.compile(r"^(\s*)-\s+name:\s+(.+?)\s*$")
+    for index, line in enumerate(lines):
+        match = name_pattern.match(line)
+        if match:
+            starts.append((index, _unquote_scalar(match.group(2))))
+    for position, (start, name) in enumerate(starts):
+        if name not in updates:
+            continue
+        end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+        property_indent = name_pattern.match(lines[start]).group(1) + "  "  # type: ignore[union-attr]
+        enabled_pattern = re.compile(r"^(\s*)enabled:\s*(?:true|false)\s*$", re.IGNORECASE)
+        enabled_index = next(
+            (i for i in range(start + 1, end) if enabled_pattern.match(lines[i])),
+            None,
+        )
+        state_line = f"{property_indent}enabled: {'true' if updates[name] else 'false'}"
+        if enabled_index is None:
+            lines.insert(start + 1, state_line)
+            starts = [
+                (line_index + 1 if line_index > start else line_index, model_name)
+                for line_index, model_name in starts
+            ]
+        else:
+            lines[enabled_index] = state_line
+
+    if added:
+        if lines and lines[-1].strip():
+            lines.append("")
+        if not any(re.match(r"^\s*models\s*:", line) for line in lines):
+            lines.insert(0, "models:")
+        if any(re.match(r"^\s*models\s*:\s*\[\s*\]\s*$", line) for line in lines):
+            lines = [re.sub(r"^(\s*models\s*):\s*\[\s*\]\s*$", r"\1:", line) for line in lines]
+        entries = [
+            next(row for row in model_rows if row.get("name") == item["model"])
+            for item in added
+        ]
+        serialized = yaml.safe_dump(entries, sort_keys=False, allow_unicode=True)
+        lines.extend("  " + line if line else line for line in serialized.rstrip().splitlines())
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return added, reactivated
+
+
+def _unquote_scalar(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        return stripped[1:-1]
+    return stripped
+
+
+def _new_model_entry(provider: str, name: str, rows: list[Any]) -> dict[str, Any]:
+    priorities = [
+        _safe_int(row.get("priority", 0))
+        for row in rows
+        if isinstance(row, dict) and row.get("enabled") is not False
+    ]
+    lowered = name.lower()
+    if any(marker in lowered for marker in ("pro", "max", "reason", "flagship", "ultra")):
+        tier = 3
+    elif any(marker in lowered for marker in ("flash", "mini", "nano", "small", "-3b", "-7b")):
+        tier = 1
+    else:
+        tier = 2
+    return {
+        "name": name,
+        "provider": provider,
+        "enabled": True,
+        "tier": tier,
+        "priority": max(priorities, default=0) + 1,
+        "roles": ["review", "documentation", "summarization"],
+        "max_tokens": 8192,
+        "context_window": 8192,
+        "description": (
+            "Automatically discovered from an official provider source. "
+            "Review its pricing, context limit, and supported capabilities."
+        ),
+    }
 
 
 def _write_snapshot(path: Path, records: dict[str, dict[str, Any]]) -> None:

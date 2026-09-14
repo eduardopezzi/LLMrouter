@@ -59,7 +59,11 @@ def load_model_registry(
     refreshed_sources = (
         load_catalog_source_urls(benchmark_catalog_path) if benchmark_catalog_path else {}
     )
-    models = [_model_from_mapping(item, refreshed_scores, refreshed_sources) for item in raw_models]
+    models = [
+        _model_from_mapping(item, refreshed_scores, refreshed_sources)
+        for item in raw_models
+        if not (isinstance(item, dict) and item.get("enabled") is False)
+    ]
     return ModelRegistry(models=tuple(sorted(models, key=lambda model: model.priority)))
 
 

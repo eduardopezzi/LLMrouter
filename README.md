@@ -83,6 +83,7 @@ make benchmarks-check   # verifica se há mudança sem gravar arquivos
 make benchmarks-research # pesquisa na web e gera propostas para revisão humana
 llmrouter catalog-sync # inventaria modelos locais do Ollama e gera propostas
 make providers-sync # verifica docs/modelos oficiais e recalcula prioridades
+make providers-update # adiciona/retira modelos do catálogo ativo
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
 ```
 
@@ -124,7 +125,17 @@ hashes das páginas, inventaria modelos disponíveis quando a API do provedor pe
 gera propostas para modelos novos/retirados e recalcula as prioridades usando os
 benchmarks locais. O workflow abre um Pull Request para revisão; nenhum modelo novo
 é ativado automaticamente. Para consultar as APIs diretas, configure os secrets
-`DEEPSEEK_API_KEY` e `ZAI_API_KEY` no repositório quando aplicável.
+`OLLAMA_API_KEY` e `DEEPSEEK_API_KEY` quando aplicável.
+
+No painel interativo, abra `Models > Update model catalog` para reconciliar o
+catálogo ativo com as fontes oficiais. `providers-update` faz a mesma operação
+pela linha de comando. Modelos encontrados são adicionados com configuração
+conservadora; modelos ausentes são desativados (`enabled: false`) após duas
+consultas completas bem-sucedidas. Uma falha de rede limpa a sequência de
+ausências daquele provedor. Se um modelo voltar a aparecer, ele é reativado.
+Entradas desativadas e comentários permanecem no YAML para preservar o histórico.
+Novos modelos recebem limites e papéis genéricos; revise preço, contexto e papéis
+do provedor antes de depender deles em produção.
 
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 
