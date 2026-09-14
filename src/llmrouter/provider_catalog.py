@@ -558,8 +558,6 @@ def _apply_provider_catalog_changes(
             lines[enabled_index] = state_line
 
     if added:
-        if lines and lines[-1].strip():
-            lines.append("")
         if not any(re.match(r"^\s*models\s*:", line) for line in lines):
             lines.insert(0, "models:")
         if any(re.match(r"^\s*models\s*:\s*\[\s*\]\s*$", line) for line in lines):
@@ -569,8 +567,49 @@ def _apply_provider_catalog_changes(
             for item in added
         ]
         serialized = yaml.safe_dump(entries, sort_keys=False, allow_unicode=True)
-        lines.extend("  " + line if line else line for line in serialized.rstrip().splitlines())
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        serialized_lines = [
+            "  " + line if line else line
+            for line in serialized.rstrip().splitlines()
+        ]
+
+        models_header = next(
+            (i for i, line in enumerate(lines) if re.match(r"^models\s*:", line)),
+            None,
+        )
+        if models_header is None:
+            raise ValueError(f"could not locate the top-level models list in {path}")
+        top_level_key = re.compile(r"^(?:[A-Za-z_][\w-]*|['\"][^'\"]+['\"])\s*:")
+        section_end = next(
+            (
+                i
+                for i in range(models_header + 1, len(lines))
+                if top_level_key.match(lines[i])
+            ),
+            len(lines),
+        )
+        if section_end > 0 and lines[section_end - 1].strip():
+            serialized_lines.insert(0, "")
+        if section_end < len(lines) and lines[section_end].strip():
+            serialized_lines.append("")
+        lines[section_end:section_end] = serialized_lines
+
+    rendered = "\n".join(lines) + "\n"
+    try:
+        validated = yaml.safe_load(rendered) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"provider catalog update would create invalid YAML: {path}") from exc
+    if not isinstance(validated, dict) or not isinstance(validated.get("models", []), list):
+        raise ValueError(f"provider catalog update produced an invalid models list: {path}")
+    expected_names = {item["model"] for item in added}
+    written_names = {
+        row.get("name")
+        for row in validated["models"]
+        if isinstance(row, dict)
+    }
+    if not expected_names.issubset(written_names):
+        raise ValueError(f"provider catalog update lost new model entries: {path}")
+
+    path.write_text(rendered, encoding="utf-8")
     return added, reactivated
 
 

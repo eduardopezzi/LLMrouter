@@ -103,9 +103,9 @@ def test_render_model_priorities_shows_ordered_catalog() -> None:
 
     assert "Top 2 model priorities" in output
     assert "1. priority=1" in output
-    assert "first provider=deepseek tier=T3 roles=review" in output
+    assert "first provider=deepseek tier=T3 rollout=100% roles=review" in output
     assert "2. priority=2" in output
-    assert "second provider=zai tier=T1 roles=summarization" in output
+    assert "second provider=zai tier=T1 rollout=100% roles=summarization" in output
     assert "third" not in output
 
 
@@ -302,7 +302,8 @@ def test_quality_priority_prompt_allows_promoting_any_provider_api() -> None:
     )
 
     assert "changes the current order substantially" in prompt
-    assert "promote any provider/API" in prompt
+    assert "Provider preference, highest to lowest: ollama > deepseek" in prompt
+    assert "prefer the model from the earlier provider in provider_cost_order" in prompt
 
 
 def test_observation_stats_reads_sqlite_database(tmp_path) -> None:

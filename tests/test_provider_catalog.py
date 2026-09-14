@@ -58,6 +58,7 @@ def test_model_diffs_do_not_repeat_proposals_or_infer_removals_on_first_run() ->
     assert [item["model"] for item in new] == ["deepseek/deepseek-v4-flash-vision-exp"]
     assert removed == []
 
+
     previous = {
         **source_records,
         "https://docs.example/models": {
@@ -69,6 +70,37 @@ def test_model_diffs_do_not_repeat_proposals_or_infer_removals_on_first_run() ->
     new, removed, _ = provider_catalog._model_diffs(models, discovered, previous, source_records)
     assert new == []
     assert removed == []
+
+
+def test_new_models_are_inserted_before_top_level_defaults(tmp_path: Path) -> None:
+    models_path = tmp_path / "models.yaml"
+    models_path.write_text(
+        "models:\n"
+        "  - name: zhipu/model-a\n"
+        "    provider: zai\n"
+        "    enabled: true\n"
+        "    priority: 1\n"
+        "defaults:\n"
+        "  temperature: 0.1\n"
+        "  max_retries: 2\n",
+        encoding="utf-8",
+    )
+
+    added, reactivated = provider_catalog._apply_provider_catalog_changes(
+        models_path,
+        [],
+        {"zai": {"glm-new": {"id": "glm-new"}}},
+    )
+
+    assert [item["model"] for item in added] == ["zhipu/glm-new"]
+    assert reactivated == []
+    data = yaml.safe_load(models_path.read_text(encoding="utf-8"))
+    assert [item["name"] for item in data["models"]] == [
+        "zhipu/model-a",
+        "zhipu/glm-new",
+    ]
+    assert data["defaults"] == {"temperature": 0.1, "max_retries": 2}
+    assert load_model_registry(models_path).get("zhipu/glm-new") is not None
 
 
 def test_refresh_writes_report_and_applies_only_priority_order(
