@@ -598,6 +598,10 @@ def _new_model_entry(provider: str, name: str, rows: list[Any]) -> dict[str, Any
         "name": name,
         "provider": provider,
         "enabled": True,
+        # Provider discovery is evidence that an identifier exists, not that
+        # it is ready for production traffic. Let an operator promote it via
+        # the per-model rollout controls after reviewing its capabilities.
+        "rollout_percentage": 0,
         "tier": tier,
         "priority": max(priorities, default=0) + 1,
         "roles": ["review", "documentation", "summarization"],

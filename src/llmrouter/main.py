@@ -660,6 +660,9 @@ def main() -> None:
             f"{len(report.removed_models)} retired/possible removal(s), "
             f"{len(report.priority_changes)} priority change(s)"
         )
+        for item in report.new_models:
+            label = "Added" if args.apply_catalog and not args.check else "Proposal"
+            print(f"  {label}: {item['model']} (initial rollout 0%)")
         if report.source_errors:
             for error in report.source_errors:
                 print(

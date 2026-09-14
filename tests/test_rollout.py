@@ -4,7 +4,7 @@ Covers:
 - ``ModelInfo.rollout_percentage`` validation
 - ``_model_from_mapping`` parsing from YAML
 - ``MultiModelRouter._apply_rollout`` hash-based deterministic filtering
-- Safety net returns [] when all filtered (rollback instantâneo)
+- Filter returns [] when all are excluded, and fallback preserves that choice
 - Routing integration (``route()`` populates ``rollout_sampled`` only on primary)
 - ``set_model_rollout_percentage`` YAML persistence with file lock
 - ``RolloutConfig`` in Settings and effect on router
@@ -166,8 +166,8 @@ class TestApplyRollout:
         # The result must be deterministic (all same)
         assert r1 == r2 == r3
 
-    def test_safety_net_returns_empty_when_all_filtered(self):
-        """If all models are rollout=0, safety net returns empty list."""
+    def test_apply_rollout_returns_empty_when_all_filtered(self):
+        """If all models are rollout=0, the filter returns no candidates."""
         model_zero = _make_model("zero", rollout_percentage=0.0)
         model_zero2 = _make_model("zero2", rollout_percentage=0.0)
         router = self._make_router([model_zero, model_zero2])
@@ -176,7 +176,15 @@ class TestApplyRollout:
         filtered = router._apply_rollout([model_zero, model_zero2], request)
 
         assert filtered == []
-        # Downstream fallback should activate (no safety net bypass)
+
+    @pytest.mark.asyncio
+    async def test_route_does_not_bypass_zero_rollout_in_fallback(self):
+        """The full-catalog fallback must honor rollout=0 too."""
+        model_zero = _make_model("zero", rollout_percentage=0.0)
+        router = self._make_router([model_zero])
+
+        with pytest.raises(RuntimeError, match="after applying rollout filter"):
+            await router.route(_make_request("a routine prompt"))
 
     def test_partial_rollout_included(self):
         """When a model with rollout < 100 survives, it appears in filtered list."""

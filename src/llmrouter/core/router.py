@@ -473,16 +473,18 @@ class MultiModelRouter:
         candidates = self._apply_rollout(candidates, request)
 
         if not candidates:
-            # Fallback: try any model available (safety net — bypasses rollout filter).
-            candidates = self._available_models(self._registry.all())
+            # Search the full catalog when the recommended tier has no
+            # available models, while still honoring each model's rollout.
+            available = self._available_models(self._registry.all())
+            candidates = self._apply_rollout(available, request)
             _logger.debug(
-                "No candidates after rollout filter in tier %s, using all %d models",
+                "No candidates after rollout filter in tier %s; checked %d available models",
                 scoring.tier.name,
-                len(candidates),
+                len(available),
             )
 
         if not candidates:
-            raise RuntimeError("No models available for routing")
+            raise RuntimeError("No models available after applying rollout filter")
 
         # Debug: log candidates
         _logger.debug(
@@ -764,9 +766,8 @@ class MultiModelRouter:
         percentage of prompts (based on SHA-256 hash of prompt + model name).
         Models with ``rollout_percentage == 100`` are always eligible.
 
-        Returns the filtered candidate list. When all candidates are removed
-        (safety net) an empty list is returned so downstream fallback logic
-        can activate.
+        Returns the filtered candidate list. When all candidates are removed,
+        route() searches the full catalog and applies this filter again.
         """
         if self._rollout_config and not self._rollout_config.enabled:
             return candidates

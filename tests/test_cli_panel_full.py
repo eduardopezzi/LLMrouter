@@ -153,6 +153,22 @@ def test_render_model_priorities() -> None:
     result = render_model_priorities(reg, limit=10)
     assert "Top" in result
     assert "m1" in result
+    assert "rollout=100%" in result
+
+
+def test_render_model_priorities_shows_zero_rollout() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="new-model",
+                provider=Provider.OPENAI,
+                tier=Tier.T1,
+                rollout_percentage=0,
+            ),
+        )
+    )
+
+    assert "rollout=0%" in render_model_priorities(registry)
 
 
 def test_render_model_priorities_empty() -> None:

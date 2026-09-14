@@ -38,9 +38,11 @@ flowchart TD
     Q --> R[Se não houver especialista da intenção\nno tier, acrescenta especialistas elegíveis]
     R --> S[Aplica rollout/canary\npercentual por modelo]
     S --> T{Há candidatos?}
-    T -->|não| U[Safety net: modelos disponíveis\nde qualquer tier]
+    T -->|não| U[Busca modelos de qualquer tier\ne reaplica rollout]
     T -->|sim| V[Ordena candidatos]
-    U --> V
+    U --> U1{Há modelo elegível?}
+    U1 -->|sim| V
+    U1 -->|não| W[Erro: nenhum modelo respeita\no rollout configurado]
 
     V --> V1[Estratégia: custo, qualidade,\nbalanceada ou latência]
     V1 --> V2[Ranking dinâmico por benchmarks\nquando houver cobertura]
@@ -216,10 +218,11 @@ o tier mais próximo disponível. Se a requisição exigir capacidades explícit
 como `vision` ou `code`, mantém somente modelos que possuem **todas** elas; se
 não encontrar nenhum no tier, procura essas capacidades em todo o catálogo.
 
-Depois aplica rollout: `0%` exclui o modelo; entre 0% e 100%, um hash estável do
-prompt e do nome do modelo decide a elegibilidade; 100% sempre é elegível. Se o
-rollout remover todos os candidatos, há uma rede de segurança que volta a todos
-os modelos disponíveis. Custo máximo está presente na estrutura de constraints,
+Depois aplica rollout: `0%` exclui o modelo da seleção automática; entre 0% e
+100%, um hash estável do prompt e do nome do modelo decide a elegibilidade; 100%
+sempre é elegível. Se não houver candidatos no tier, o router procura em outros
+tiers e aplica o mesmo filtro. Se nenhum modelo passar, a requisição falha em
+vez de ignorar o rollout. Custo máximo está presente na estrutura de constraints,
 mas no fluxo atual não é usado como filtro rígido; custo influencia o ranking.
 
 ### 2. Ordenação inicial: estratégia configurada

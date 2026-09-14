@@ -88,8 +88,9 @@ qualidade para detectar regressões da classificação.
   expor modelos gradualmente sem alterar sua prioridade.
 - CLI e API permitem consultar e alterar o rollout; a alteração recarrega o
   catálogo em runtime.
-- `rollout_percentage=0` fornece rollback imediato, e o safety net evita que
-  um filtro vazio interrompa o tráfego.
+- `rollout_percentage=0` remove o modelo da seleção automática, inclusive no
+  fallback para outros tiers. O router usa outro modelo elegível ou falha se
+  nenhum respeitar o rollout configurado.
 
 ---
 

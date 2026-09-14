@@ -177,7 +177,9 @@ def test_refresh_applies_new_models_and_retires_after_two_inventory_checks(
     )
     assert [item["model"] for item in first.new_models] == ["zhipu/glm-new"]
     assert first.removed_models == ()
-    assert "zhipu/glm-new" in {model.name for model in load_model_registry(models_path).all()}
+    discovered_model = load_model_registry(models_path).get("zhipu/glm-new")
+    assert discovered_model is not None
+    assert discovered_model.rollout_percentage == 0
 
     monkeypatch.setattr(
         provider_catalog,

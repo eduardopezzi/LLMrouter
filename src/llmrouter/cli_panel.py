@@ -56,6 +56,7 @@ class ModelPriority:
     provider: str
     tier: str
     roles: tuple[str, ...]
+    rollout_percentage: float
 
 
 @dataclass
@@ -119,6 +120,7 @@ def model_priorities(
                 provider=model.provider.value,
                 tier=f"T{model.tier.value}",
                 roles=tuple(sorted(model.capabilities)),
+                rollout_percentage=model.rollout_percentage,
             )
         )
     return rows
@@ -148,7 +150,8 @@ def render_model_priorities(
         roles = ", ".join(row.roles) if row.roles else "-"
         lines.append(
             f"  {row.rank:>2}. priority={row.priority:<3} {row.name} "
-            f"provider={row.provider} tier={row.tier} roles={roles}"
+            f"provider={row.provider} tier={row.tier} rollout={row.rollout_percentage:g}% "
+            f"roles={roles}"
         )
     return "\n".join(lines)
 
@@ -905,7 +908,7 @@ def _models_submenu(
                 f"{len(report.removed_models)} retired"
             )
             for item in report.new_models:
-                print(f"  Added: {item['model']}")
+                print(f"  Added: {item['model']} (rollout 0% — increase after review)")
             for item in report.reactivated_models:
                 print(f"  Reactivated: {item['model']}")
             for item in report.removed_models:

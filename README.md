@@ -32,6 +32,10 @@ O catálogo carregado pelo LLMrouter fica em `config/models.yaml` (ou no caminho
 definido por `LLMROUTER_MODELS_FILE`). Para adicionar, remover ou atualizar um
 modelo, edite a lista `models` desse arquivo. Exemplo:
 
+`config/models.yaml` é uma configuração local ignorada pelo Git. O exemplo
+versionado fica em `config/models.example.yaml`; atualize-o quando quiser mudar
+os padrões compartilhados do projeto.
+
 ```yaml
 models:
   - name: "ollama/exemplo:latest"
@@ -109,7 +113,8 @@ web de descoberta e entrega os resultados ao LLM para avaliação. Um alias clou
 results`. A busca e o LLM apenas criam propostas; eles não podem atribuir notas
 nem aprovar equivalência entre variantes. Agregadores como LangDB servem para
 descoberta, enquanto a promoção exige uma fonte oficial, identidade exata do
-modelo e revisão humana.
+modelo e revisão humana. O arquivo de propostas é gerado localmente e ignorado
+pelo Git.
 
 Controle essa descoberta com
 `LLMROUTER_BENCHMARKS__RESEARCH_INTERNET_SEARCH_ENABLED` e limite os resultados
@@ -135,7 +140,10 @@ consultas completas bem-sucedidas. Uma falha de rede limpa a sequência de
 ausências daquele provedor. Se um modelo voltar a aparecer, ele é reativado.
 Entradas desativadas e comentários permanecem no YAML para preservar o histórico.
 Novos modelos recebem limites e papéis genéricos; revise preço, contexto e papéis
-do provedor antes de depender deles em produção.
+do provedor antes de depender deles em produção. Eles entram com
+`rollout_percentage: 0`, então o roteamento automático não os seleciona até você
+promovê-los. No painel, use `Routing > Rollout %` para iniciar um canary (por
+exemplo, 5%) e aumentar o percentual depois de validar o modelo.
 
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 
