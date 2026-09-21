@@ -28,6 +28,8 @@ class ProviderSource:
     kind: str = "documentation"  # documentation | model_api
     api_key_env: str | None = None
     complete_inventory: bool = False
+    model_allowlist: frozenset[str] | None = None
+    model_denylist: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -87,10 +89,30 @@ def refresh_provider_catalog(
     inventory_discovered: dict[str, dict[str, dict[str, Any]]] = {}
     changed_source_urls: set[str] = set()
     failed_inventory_providers: set[str] = set()
+    model_allowlists_by_provider: dict[str, set[str]] = {}
+    model_denylists_by_provider: dict[str, set[str]] = {}
+    for source in sources:
+        if source.model_allowlist is not None:
+            model_allowlists_by_provider.setdefault(source.provider, set()).update(
+                source.model_allowlist
+            )
+        model_denylists_by_provider.setdefault(source.provider, set()).update(
+            source.model_denylist
+        )
 
     for source in sources:
         try:
             body, model_records = _fetch_source(source, timeout=timeout)
+            model_records = [
+                record
+                for record in model_records
+                if isinstance(record.get("id"), str)
+                and (
+                    source.model_allowlist is None
+                    or record["id"] in source.model_allowlist
+                )
+                and record["id"] not in source.model_denylist
+            ]
             if (
                 (source.complete_inventory or source.kind == "model_api")
                 and not model_records
@@ -138,6 +160,8 @@ def refresh_provider_catalog(
         source_records,
         configured_ids_by_provider=configured_ids_by_provider,
         blocked_inventory_providers=failed_inventory_providers,
+        model_allowlists_by_provider=model_allowlists_by_provider,
+        model_denylists_by_provider=model_denylists_by_provider,
     )
     ordered_models = rank_models(
         models,
@@ -236,9 +260,29 @@ def _load_sources(path: Path) -> list[ProviderSource]:
                 kind=kind,
                 api_key_env=api_key_env if isinstance(api_key_env, str) else None,
                 complete_inventory=bool(item.get("complete_inventory", False)),
+                model_allowlist=_source_model_ids(item, "model_allowlist", provider),
+                model_denylist=(
+                    _source_model_ids(item, "model_denylist", provider) or frozenset()
+                ),
             )
         )
     return sources
+
+
+def _source_model_ids(
+    item: dict[str, Any],
+    field: str,
+    provider: str,
+) -> frozenset[str] | None:
+    value = item.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(model_id, str) for model_id in value):
+        raise ValueError(f"{field} for {provider} must be a list of model IDs")
+    model_ids = frozenset(model_id.strip() for model_id in value if model_id.strip())
+    if field == "model_allowlist" and not model_ids:
+        raise ValueError(f"{field} for {provider} must not be empty")
+    return model_ids
 
 
 def _load_snapshot(path: Path) -> dict[str, dict[str, Any]]:
@@ -320,6 +364,8 @@ def _model_diffs(
     *,
     configured_ids_by_provider: dict[str, set[str]] | None = None,
     blocked_inventory_providers: set[str] | None = None,
+    model_allowlists_by_provider: dict[str, set[str]] | None = None,
+    model_denylists_by_provider: dict[str, set[str]] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     new_models: list[dict[str, str]] = []
     removed_models: list[dict[str, str]] = []
@@ -330,6 +376,23 @@ def _model_diffs(
         for model_record in source_record.get("models", []):
             if isinstance(model_record, dict):
                 previous_models[(provider_name, model_record.get("id"))] = model_record
+    allowlists = model_allowlists_by_provider or {}
+    denylists = model_denylists_by_provider or {}
+    for provider in set(allowlists) | set(denylists):
+        allowed_ids = allowlists.get(provider)
+        denied_ids = denylists.get(provider, set())
+        for model in active_by_provider.get(provider, []):
+            model_id = _model_id(provider, model.name)
+            if model_id in denied_ids or (
+                allowed_ids is not None and model_id not in allowed_ids
+            ):
+                removed_models.append(
+                    {
+                        "provider": provider,
+                        "model": model.name,
+                        "evidence": "excluded by explicit provider model allowlist/denylist",
+                    }
+                )
     current_inventory_records: dict[str, list[dict[str, Any]]] = {}
     for source_record in source_records.values():
         provider = source_record.get("provider")
@@ -392,7 +455,10 @@ def _model_diffs(
                     )
     return (
         sorted(new_models, key=lambda item: (item["provider"], item["model"])),
-        sorted(removed_models, key=lambda item: (item["provider"], item["model"])),
+        sorted(
+            {item["model"]: item for item in removed_models}.values(),
+            key=lambda item: (item["provider"], item["model"]),
+        ),
         sorted(updated_models, key=lambda item: (item["provider"], item["model"])),
     )
 

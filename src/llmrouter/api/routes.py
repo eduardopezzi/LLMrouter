@@ -860,6 +860,7 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
         max_tokens=payload.max_tokens or payload.max_completion_tokens,
         stream=payload.stream,
         top_p=payload.top_p if payload.top_p is not None else 1.0,
+        top_p_explicit=payload.top_p is not None and "top_p" in payload.model_fields_set,
         stop=_normalize_stop(payload.stop),
         extra=extra,
     )

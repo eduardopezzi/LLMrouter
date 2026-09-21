@@ -307,7 +307,13 @@ class RolloutConfig(BaseModel):
     Controls how ``rollout_percentage`` is applied during routing.
     """
 
-    enabled: bool = True
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When false, rollout percentages are ignored and all models, including "
+            "models at 0%, remain eligible for routing."
+        ),
+    )
     deterministic: bool = True
     critical_threshold_pct: float = Field(
         default=5.0,

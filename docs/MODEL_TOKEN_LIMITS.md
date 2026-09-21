@@ -1,6 +1,6 @@
 # Model Token Limits
 
-Validated on 2026-07-03.
+Validated on 2026-09-21.
 
 The catalog keeps two token fields:
 
@@ -28,8 +28,8 @@ The catalog keeps two token fields:
   - https://api-docs.deepseek.com/quick_start/pricing
   - https://api-docs.deepseek.com/guides/reasoning_model
 - Z.AI docs:
-  - https://docs.z.ai/guides/llm/glm-5.2
-  - https://docs.z.ai/guides/llm/glm-5.1
+  - https://docs.z.ai/guides/llm/glm-5.3
+  - https://docs.z.ai/guides/vlm/glm-5.3-flash
   - https://docs.z.ai/api-reference/llm/chat-completion
 - Qwen official notes:
   - https://qwenlm.github.io/blog/qwen3-coder/
@@ -52,6 +52,4 @@ The catalog keeps two token fields:
 | `ollama/deepseek-v3.1:cloud` | 128000 | 163840 | Ollama tag reports 160K context; output cap not separately published. |
 | `deepseek/deepseek-chat` | 393216 | 1000000 | Deprecated alias maps to DeepSeek V4 Flash non-thinking mode. |
 | `deepseek/deepseek-reasoner` | 65536 | 1000000 | Deprecated alias maps to DeepSeek V4 Flash thinking mode; reasoning guide still caps `max_tokens` at 64K. |
-| `zhipu/glm-5.2` | 131072 | 1000000 | Z.AI documents 1M context and 128K output. |
-| `zhipu/glm-5.1` | 131072 | 200000 | Z.AI documents 200K context and 128K output. |
 

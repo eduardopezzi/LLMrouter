@@ -766,6 +766,9 @@ class MultiModelRouter:
         percentage of prompts (based on SHA-256 hash of prompt + model name).
         Models with ``rollout_percentage == 100`` are always eligible.
 
+        When the global rollout setting is disabled, all percentages are ignored
+        and every otherwise-available candidate remains eligible.
+
         Returns the filtered candidate list. When all candidates are removed,
         route() searches the full catalog and applies this filter again.
         """

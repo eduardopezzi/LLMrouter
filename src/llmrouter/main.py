@@ -349,7 +349,10 @@ def _parse_args() -> argparse.Namespace:
     provider_sync_parser.add_argument(
         "--apply-catalog",
         action="store_true",
-        help="Add discovered models and retire models absent from two complete inventories.",
+        help=(
+            "Add discovered models and retire models absent from complete inventories "
+            "or excluded by source allowlists/denylists."
+        ),
     )
     provider_sync_parser.add_argument(
         "--check",

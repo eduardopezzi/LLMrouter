@@ -138,12 +138,16 @@ pela linha de comando. Modelos encontrados são adicionados com configuração
 conservadora; modelos ausentes são desativados (`enabled: false`) após duas
 consultas completas bem-sucedidas. Uma falha de rede limpa a sequência de
 ausências daquele provedor. Se um modelo voltar a aparecer, ele é reativado.
+Modelos excluídos por `model_allowlist` ou `model_denylist` são desativados na
+sincronização, mesmo que continuem aparecendo na fonte do provedor.
 Entradas desativadas e comentários permanecem no YAML para preservar o histórico.
 Novos modelos recebem limites e papéis genéricos; revise preço, contexto e papéis
 do provedor antes de depender deles em produção. Eles entram com
 `rollout_percentage: 0`, então o roteamento automático não os seleciona até você
 promovê-los. No painel, use `Routing > Rollout %` para iniciar um canary (por
 exemplo, 5%) e aumentar o percentual depois de validar o modelo.
+Mantenha `LLMROUTER_ROLLOUT__ENABLED=true` no servidor: com essa opção em
+`false`, o filtro inteiro é ignorado, inclusive para modelos com rollout `0`.
 
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 
@@ -228,7 +232,7 @@ LLMrouter também aceita diretivas curtas no começo do prompt. Elas devem apare
 nas primeiras 5 linhas de uma mensagem:
 
 ```text
-{{project:PRecog}} {{task:deep_research}} {{model:zhipu/glm-5.1}}
+{{project:PRecog}} {{task:deep_research}}
 
 Investigue como melhorar o pipeline de memória/RAG.
 ```

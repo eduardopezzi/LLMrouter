@@ -101,23 +101,6 @@ sources:
       "HLE with Tools": "HLE w/ Tools"
       "GDPval-AA v2": "GDPval-AA v2"
 
-  - model: "zhipu/glm-5.1"
-    source_type: "benchmark_leaderboard"
-    url: "https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md"
-    format: "markdown_table"
-    benchmark_column: "Benchmark"
-    model_column: "GLM-5.1"
-    methodology: "Official GLM-5.2 cross-model table; HMMT Feb. 2026 and documented harnesses."
-    metrics:
-      "Humanity's Last Exam (HLE)": "HLE"
-      "HMMT": "HMMT Feb. 2026"
-      "GPQA Diamond": "GPQA-Diamond"
-      "SWE-Bench Pro": "SWE-bench Pro"
-      "Program Bench": "ProgramBench"
-      "TerminalBench 2.1": "Terminal Bench 2.1 (Terminus-2)"
-      "MCP Atlas": "MCP-Atlas (Public Set)"
-      "Tool Decathlon": "Tool-Decathlon"
-
   - model: "ollama/minimax-m3:cloud"
     source_type: "benchmark_leaderboard"
     url: "https://huggingface.co/zai-org/GLM-5.2/raw/main/README.md"

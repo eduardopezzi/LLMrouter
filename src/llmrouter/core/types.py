@@ -164,6 +164,7 @@ class ChatRequest:
     max_tokens: int | None = None
     stream: bool = False
     top_p: float = 1.0
+    top_p_explicit: bool = True
     stop: list[str] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 

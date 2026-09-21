@@ -1,10 +1,17 @@
 # Official sources checked by the weekly provider-catalog workflow.
 # Model APIs require the corresponding *_API_KEY when the provider requires it.
+# model_allowlist keeps only the reviewed Z.ai chat models; model_denylist retires
+# exact Ollama IDs from both discovery proposals and the active catalog.
 sources:
   - provider: "ollama"
     kind: "model_api"
     url: "https://ollama.com/api/tags"
     api_key_env: "OLLAMA_API_KEY"
+    model_denylist:
+      - "deepseek-v4-flash:0731"
+      - "deepseek-v4-pro:0813"
+      - "glm-5.1"
+      - "kimi-k2.6"
   - provider: "ollama"
     kind: "documentation"
     url: "https://ollama.com/library"
@@ -22,11 +29,13 @@ sources:
 
   - provider: "zai"
     kind: "documentation"
-    url: "https://docs.z.ai/api-reference/llm/chat-completion"
-    complete_inventory: true
+    url: "https://docs.z.ai/guides/llm/glm-5.3"
+    model_allowlist:
+      - "glm-5.3"
+      - "glm-5.3-flash"
   - provider: "zai"
     kind: "documentation"
-    url: "https://docs.z.ai/release-notes/new-released"
-  - provider: "zai"
-    kind: "documentation"
-    url: "https://docs.z.ai/guides/overview/pricing"
+    url: "https://docs.z.ai/guides/vlm/glm-5.3-flash"
+    model_allowlist:
+      - "glm-5.3"
+      - "glm-5.3-flash"

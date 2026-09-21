@@ -1,4 +1,4 @@
-"""Z.ai (Zhipu AI) provider — GLM-4, ChatGLM, etc.
+"""Z.ai (Zhipu AI) provider — GLM models.
 
 Z.ai exposes an OpenAI-compatible API endpoint.
 """
@@ -43,14 +43,23 @@ class ZaiProvider(OpenAICompatibleProvider):
     def _build_payload(
         self, request: ChatRequest, model: str, *, stream: bool
     ) -> dict[str, object]:
-        """Add the reasoning defaults required by the GLM-5.3 API models.
+        """Apply documented request defaults for GLM-5.3 API models.
 
-        GLM-5.3 and GLM-5.3-Flash always run with thinking enabled. Keep
-        caller-supplied values intact, while making plain OpenAI-compatible
-        clients work without requiring Z.ai-specific fields.
+        Both GLM-5.3 models require thinking to be enabled. GLM-5.3-Flash
+        recommends top_p=0.95 and thinking.clear_thinking=false. Preserve
+        caller-supplied sampling and reasoning settings when valid.
         """
         payload = super()._build_payload(request, model, stream=stream)
         if model in {"glm-5.3", "glm-5.3-flash"}:
-            payload.setdefault("thinking", {"type": "enabled"})
-            payload.setdefault("reasoning_effort", "max")
+            raw_thinking = payload.get("thinking")
+            thinking = dict(raw_thinking) if isinstance(raw_thinking, dict) else {}
+            thinking["type"] = "enabled"
+            if model == "glm-5.3-flash":
+                thinking.setdefault("clear_thinking", False)
+                if not request.top_p_explicit:
+                    payload["top_p"] = 0.95
+            payload["thinking"] = thinking
+            effort = payload.get("reasoning_effort")
+            if effort not in {"low", "high", "max"}:
+                payload["reasoning_effort"] = "max"
         return payload
