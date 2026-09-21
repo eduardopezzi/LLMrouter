@@ -114,13 +114,13 @@ def refresh_provider_catalog(
                 and record["id"] not in source.model_denylist
             ]
             if (
-                (source.complete_inventory or source.kind == "model_api")
+                source.complete_inventory
                 and not model_records
                 and configured_ids_by_provider.get(source.provider)
             ):
                 raise ValueError("complete provider inventory returned no model identifiers")
         except (httpx.HTTPError, OSError, ValueError) as exc:
-            if source.complete_inventory or source.kind == "model_api":
+            if source.complete_inventory:
                 failed_inventory_providers.add(source.provider)
             source_errors.append(
                 {"provider": source.provider, "url": source.url, "error": str(exc)[:500]}
@@ -133,7 +133,7 @@ def refresh_provider_catalog(
         source_records[source.url] = {
             "provider": source.provider,
             "kind": source.kind,
-            "complete_inventory": source.complete_inventory or source.kind == "model_api",
+            "complete_inventory": source.complete_inventory,
             "sha256": digest,
             "models": model_records,
         }
@@ -465,7 +465,7 @@ def _model_diffs(
 
 def _is_complete_inventory(record: dict[str, Any]) -> bool:
     """Whether a source claims to list every model available to its API."""
-    return bool(record.get("complete_inventory", record.get("kind") == "model_api"))
+    return bool(record.get("complete_inventory", False))
 
 
 def _safe_int(value: object) -> int:
@@ -603,12 +603,24 @@ def _apply_provider_catalog_changes(
         match = name_pattern.match(line)
         if match:
             starts.append((index, _unquote_scalar(match.group(2))))
-    for position, (start, name) in enumerate(starts):
+    enabled_pattern = re.compile(r"^(\s*)enabled:\s*(?:true|false)\s*$", re.IGNORECASE)
+    # Work from the bottom up so inserting an `enabled` line never shifts the
+    # positions of model entries that still need to be updated.
+    for start, name in reversed(starts):
         if name not in updates:
             continue
-        end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
-        property_indent = name_pattern.match(lines[start]).group(1) + "  "  # type: ignore[union-attr]
-        enabled_pattern = re.compile(r"^(\s*)enabled:\s*(?:true|false)\s*$", re.IGNORECASE)
+        name_match = name_pattern.match(lines[start])
+        if name_match is None:
+            raise ValueError(f"could not locate model entry while updating {name!r}")
+        property_indent = name_match.group(1) + "  "
+        end = next(
+            (
+                index
+                for index in range(start + 1, len(lines))
+                if name_pattern.match(lines[index])
+            ),
+            len(lines),
+        )
         enabled_index = next(
             (i for i in range(start + 1, end) if enabled_pattern.match(lines[i])),
             None,
@@ -616,10 +628,6 @@ def _apply_provider_catalog_changes(
         state_line = f"{property_indent}enabled: {'true' if updates[name] else 'false'}"
         if enabled_index is None:
             lines.insert(start + 1, state_line)
-            starts = [
-                (line_index + 1 if line_index > start else line_index, model_name)
-                for line_index, model_name in starts
-            ]
         else:
             lines[enabled_index] = state_line
 

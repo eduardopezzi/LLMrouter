@@ -1045,9 +1045,13 @@ def _resolve_prompt_directives(
     resolved = dict(directives)
     if model := resolved.get("model"):
         model_match = _closest_model_name(model, registry)
-        if model_match and model_match != model:
-            _logger.debug("Prompt directive model fuzzy matched: %s -> %s", model, model_match)
+        if model_match:
+            if model_match != model:
+                _logger.debug("Prompt directive model fuzzy matched: %s -> %s", model, model_match)
             resolved["model"] = model_match
+        elif model.strip().casefold() not in {"auto", "default"}:
+            _logger.debug("Ignoring unmatched prompt model directive: %s", model)
+            resolved.pop("model", None)
     if project := resolved.get("project"):
         project_match = _closest_word(project, project_candidates, cutoff=0.6)
         if project_match and project_match != project:
@@ -1061,12 +1065,22 @@ def _resolve_prompt_directives(
 
 
 def _closest_model_name(term: str, registry: ModelRegistry) -> str | None:
+    normalized_term = term.strip().strip("<>[]{}()").strip()
+    if not normalized_term or normalized_term.casefold() in {
+        "model",
+        "model_id",
+        "model-id",
+        "model name",
+        "model_name",
+        "placeholder",
+    }:
+        return None
     choices: dict[str, str] = {}
     for model in registry.models:
         choices[model.name] = model.name
         choices[model.provider_model_name] = model.name
         choices[model.name.removeprefix(f"{model.provider.value}/")] = model.name
-    matched = _closest_word(term, list(choices))
+    matched = _closest_word(normalized_term, list(choices), cutoff=0.7)
     return choices.get(matched or "")
 
 

@@ -2,6 +2,7 @@
 ## Uso: make <alvo>
 
 PYTHONPATH := src
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 HOST ?= 0.0.0.0
 PORT ?= 12345
 WORKERS ?= 1
@@ -57,10 +58,10 @@ benchmarks-research: ## Pesquisa fontes para modelos sem notas; gera propostas p
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main benchmarks-research
 
 providers-sync: ## Verifica docs/modelos oficiais e recalcula prioridades
-	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main providers-sync --apply-priority
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m llmrouter.main providers-sync --apply-priority
 
 providers-update: ## Sincroniza o catálogo ativo com os inventários oficiais
-	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main providers-sync --apply-catalog
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m llmrouter.main providers-sync --apply-catalog
 
 test: ## Executa os testes
 	pytest

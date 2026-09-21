@@ -29,6 +29,7 @@ models:
   # Ollama — Provedor primário (sempre disponível)
   # ==================================================================
   - name: "ollama/kimi-k3:cloud"
+    enabled: false
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
@@ -81,6 +82,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/deepseek-v4-flash:0731-cloud"
+    enabled: false
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
@@ -134,6 +136,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/north-mini-code-1.0:cloud"
+    enabled: false
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
@@ -147,6 +150,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/qwen3.6-27b:cloud"
+    enabled: false
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
@@ -160,6 +164,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/gemma4:31b"
+    enabled: false
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
@@ -186,6 +191,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/deepseek-v3.2:cloud"
+    enabled: false
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
@@ -199,6 +205,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/deepseek-v3.1:cloud"
+    enabled: false
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
