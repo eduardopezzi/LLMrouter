@@ -282,6 +282,47 @@ class SemanticConfig(BaseModel):
     fallback_to_rule_based: bool = True
 
 
+class SemanticCacheConfig(BaseModel):
+    """Semantic (embedding-similarity) response cache configuration.
+
+    Strictly opt-in: the similarity cache only activates when ``enabled`` is
+    set AND the semantic scorer provides a working embedder.  Without an
+    embedder the runtime keeps serving the exact cache only (no error).
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Opt-in flag for the semantic (similarity) response cache. Default off.",
+    )
+    threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity required for a semantic cache hit.",
+    )
+    ttl_seconds: int = Field(
+        default=3600,
+        gt=0,
+        description="Per-entry TTL for semantic cache entries, in seconds.",
+    )
+    db_path: str = "data/semantic_cache.db"
+    embed_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Deadline for each embedding call.  The synchronous embedder runs in "
+            "a worker thread and is abandoned after this timeout."
+        ),
+    )
+    background_store: bool = Field(
+        default=True,
+        description=(
+            "Store semantic cache entries in a background task so embedding "
+            "latency is never added to the response path."
+        ),
+    )
+
+
 class BenchmarksConfig(BaseModel):
     """Locally versioned, externally refreshed benchmark score catalog."""
 
@@ -390,6 +431,7 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     semantic: SemanticConfig = Field(default_factory=SemanticConfig)
+    semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
     hybrid: HybridScorerConfig = Field(default_factory=HybridScorerConfig)
     rollout: RolloutConfig = Field(default_factory=RolloutConfig)
 

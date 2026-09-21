@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -39,6 +41,7 @@ from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry, load_model_registry
 from llmrouter.core.router import MultiModelRouter
 from llmrouter.core.scorer import PromptScorer, ScorerWeights
+from llmrouter.core.semantic_cache import SemanticCache
 from llmrouter.core.semantic_scorer import HybridScorer, SemanticPromptScorer
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import ModelInfo, Provider
@@ -64,6 +67,108 @@ from llmrouter.providers import (
 )
 from llmrouter.providers.base import ProviderError
 from llmrouter.utils import resolve_api_key
+
+# Number of consecutive embedding failures after which the semantic cache
+# gives up calling the embedder for the rest of the process lifetime.
+_SEMANTIC_EMBED_FAILURE_LIMIT = 3
+
+_runtime_logger = logging.getLogger("llmrouter.runtime")
+
+
+class _CircuitBrokenEmbedderAdapter:
+    """Async embedding adapter with timeout and a session circuit breaker.
+
+    The production embedder (``OllamaEmbedder`` / sentence-transformers) is
+    synchronous and would block the event loop if called directly.  This
+    adapter wraps every call in :func:`asyncio.to_thread` and enforces a
+    deadline via :func:`asyncio.wait_for`.
+
+    A simple circuit breaker opens after ``failure_limit`` consecutive
+    failures: further calls return ``None`` immediately (no thread, no
+    timeout), the structured warning is logged exactly once, and the
+    ``semantic_unavailable`` counter keeps increasing on the
+    :class:`~llmrouter.core.semantic_cache.SemanticCache` that consumes the
+    ``None`` result.  A success resets the consecutive-failure counter.
+    """
+
+    def __init__(
+        self,
+        embedder: Any,
+        *,
+        timeout_seconds: float,
+        failure_limit: int = _SEMANTIC_EMBED_FAILURE_LIMIT,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._embedder = embedder
+        self._timeout_seconds = timeout_seconds
+        self._failure_limit = failure_limit
+        self._consecutive_failures = 0
+        self._circuit_open = False
+        self._logger = logger or _runtime_logger
+
+    @property
+    def circuit_open(self) -> bool:
+        """Whether the breaker has disabled embedder calls for this session."""
+        return self._circuit_open
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Consecutive embedding failures observed so far."""
+        return self._consecutive_failures
+
+    async def embed(self, texts: list[str]) -> list[list[float]] | None:
+        """Embed ``texts`` off the event loop, or ``None`` when unavailable.
+
+        Never raises: failures (exception, timeout, breaker open, empty
+        result) are logged and surfaced as ``None`` so the semantic cache
+        degrades to a miss instead of failing the request.
+        """
+        if self._circuit_open:
+            return None
+        try:
+            vectors = await asyncio.wait_for(
+                asyncio.to_thread(self._embedder.encode, texts),
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError:
+            self._register_failure(
+                "SemanticCacheEmbedTimeout",
+                "semantic cache embedder timed out after %.2fs",
+                self._timeout_seconds,
+            )
+            return None
+        except Exception as exc:
+            self._register_failure(
+                "SemanticCacheEmbedError",
+                "semantic cache embedder call failed: %s",
+                exc,
+            )
+            return None
+        if not isinstance(vectors, list) or not vectors:
+            self._register_failure(
+                "SemanticCacheEmbedEmpty",
+                "semantic cache embedder returned no vectors",
+            )
+            return None
+        self._consecutive_failures = 0
+        return vectors
+
+    def _register_failure(self, event: str, message: str, *args: Any) -> None:
+        self._consecutive_failures += 1
+        if self._circuit_open:
+            return
+        if self._consecutive_failures >= self._failure_limit:
+            self._circuit_open = True
+            self._logger.warning(
+                "event=%s semantic_cache_embedder_disabled=true "
+                "consecutive_failures=%d limit=%d "
+                "(embeddings disabled for the semantic cache this session)",
+                event,
+                self._consecutive_failures,
+                self._failure_limit,
+            )
+            return
+        self._logger.warning("event=%s detail=%r", event, args[0] if args else None)
 
 
 def build_app(settings: Settings | None = None) -> FastAPI:
@@ -110,6 +215,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     cache_manager = CacheManager(
         SQLiteCacheBackend("data/cache.db"),
     )
+    semantic_cache = _build_semantic_cache(resolved_settings, scorer=router._scorer)
     proxy = ProviderProxy(
         build_providers(resolved_settings, registry),
         on_provider_error=_priority_demoter(
@@ -124,6 +230,8 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         provider_cooldowns=provider_cooldowns,
         metrics_collector=metrics_collector,
         cache_manager=cache_manager,
+        semantic_cache=semantic_cache,
+        semantic_cache_background_store=resolved_settings.semantic_cache.background_store,
         probe_max_tokens=resolved_settings.routing.quota_probe_max_tokens,
     )
     proxy_holder["proxy"] = proxy
@@ -217,6 +325,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         health_tracker=health_tracker,
         metrics_collector=metrics_collector,
         cache_manager=cache_manager,
+        semantic_cache=semantic_cache,
         benchmark_scheduler=benchmark_scheduler,
     )
     app_holder["app"] = app
@@ -358,6 +467,56 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
             exc_info=True,
         )
         return rule_scorer
+
+
+def _scorer_embedder(scorer: object) -> Any | None:
+    """Return the shared synchronous embedder behind a hybrid scorer, if any.
+
+    ``semantic_scorer`` is intentionally untouched by this card, so its
+    internals are reached duck-typed: ``HybridScorer._semantic_scorer``
+    (a :class:`~llmrouter.core.semantic_scorer.SemanticPromptScorer`) exposes
+    the shared ``embedder`` property.  Returns ``None`` for rule-based scorers
+    or any scorer without an accessible embedder.
+    """
+    semantic_scorer = getattr(scorer, "_semantic_scorer", None)
+    if semantic_scorer is None:
+        return None
+    embedder = getattr(semantic_scorer, "embedder", None)
+    return embedder if embedder is not None else None
+
+
+def _build_semantic_cache(
+    settings: Settings,
+    *,
+    scorer: object,
+) -> SemanticCache | None:
+    """Build the opt-in semantic cache wired to the shared scorer embedder.
+
+    Returns ``None`` when the feature flag is off or when no embedder is
+    available — the proxy then serves the exact cache only, exactly as before
+    (zero regression when the flag is off, no errors when Ollama is down).
+    """
+    cache_config = settings.semantic_cache
+    if not cache_config.enabled:
+        return None
+    embedder = _scorer_embedder(scorer)
+    if embedder is None:
+        _runtime_logger.warning(
+            "event=SemanticCacheDisabled reason=no_embedder_available "
+            "(enable llmrouter.semantic and ensure the hybrid scorer loaded; "
+            "serving the exact cache only)"
+        )
+        return None
+    adapter = _CircuitBrokenEmbedderAdapter(
+        embedder,
+        timeout_seconds=cache_config.embed_timeout_seconds,
+    )
+    return SemanticCache(
+        cache_config.db_path,
+        adapter,
+        threshold=cache_config.threshold,
+        ttl_seconds=cache_config.ttl_seconds,
+    )
 
 
 def _benchmark_catalog_reloader(

@@ -28,6 +28,7 @@ from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter, NoModelsAvailableError
 from llmrouter.core.scorer import PromptScorer
+from llmrouter.core.semantic_cache import SemanticCache
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatMessage,
@@ -121,6 +122,7 @@ def create_app(
     health_tracker: ModelHealthTracker | None = None,
     metrics_collector: MetricsCollector | None = None,
     cache_manager: CacheManager | None = None,
+    semantic_cache: SemanticCache | None = None,
     benchmark_scheduler: BenchmarkRefreshScheduler | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
@@ -175,6 +177,7 @@ def create_app(
     app.state.health_tracker = health_tracker
     app.state.metrics_collector = metrics_collector
     app.state.cache_manager = cache_manager
+    app.state.semantic_cache = semantic_cache
     app.state.benchmark_scheduler = benchmark_scheduler
 
     @app.get("/health/models")
@@ -541,7 +544,11 @@ def create_app(
                 detail="Cache manager is not configured",
             )
         stats = await cache.stats()
-        return stats.to_dict()
+        payload: dict[str, object] = stats.to_dict()
+        semantic: SemanticCache | None = getattr(app.state, "semantic_cache", None)
+        if semantic is not None:
+            payload.update(semantic.stats())
+        return payload
 
     @app.post("/admin/evaluator/run-cycle")
     async def run_evaluator_cycle(request: Request, limit: int = 50) -> dict[str, object]:

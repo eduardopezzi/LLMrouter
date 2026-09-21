@@ -118,6 +118,7 @@ class ProviderProxy:
         metrics_collector: MetricsCollector | None = None,
         cache_manager: CacheManager | None = None,
         semantic_cache: SemanticCache | None = None,
+        semantic_cache_background_store: bool = False,
         probe_max_tokens: int = 32,
     ) -> None:
         self._providers = providers
@@ -128,6 +129,8 @@ class ProviderProxy:
         self._metrics_collector = metrics_collector
         self._cache_manager = cache_manager
         self._semantic_cache = semantic_cache
+        self._semantic_background_store = semantic_cache_background_store
+        self._semantic_store_tasks: list[asyncio.Task[bool]] = []
         self._probe_max_tokens = probe_max_tokens
         self._probe_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -313,6 +316,10 @@ class ProviderProxy:
         Additionally feeds the semantic cache (when injected) with the same
         first-attempt, non-streaming response.  Cache hits never reach this
         method, so semantic entries are never duplicated by their own hit.
+
+        When ``semantic_cache_background_store`` was enabled at construction
+        the semantic store is scheduled as a fire-and-forget task so the
+        response path never waits for the (potentially slow) embedder.
         """
         if request.stream:
             return
@@ -324,16 +331,41 @@ class ProviderProxy:
                 response,
                 cost_usd=self._estimate_cost(model, response.usage),
             )
-        if self._semantic_cache is not None:
-            await self._semantic_cache.store(
-                response,
-                request.prompt_text,
-                model=model.name,
-                tier=int(model.tier),
-                temperature=request.temperature,
-                top_p=request.top_p,
-                max_tokens=request.max_tokens,
+        if self._semantic_cache is None:
+            return
+        if self._semantic_background_store:
+            self._semantic_store_tasks = [
+                task for task in self._semantic_store_tasks if not task.done()
+            ]
+            task = asyncio.create_task(
+                self._semantic_cache.store(
+                    response,
+                    request.prompt_text,
+                    model=model.name,
+                    tier=int(model.tier),
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    max_tokens=request.max_tokens,
+                )
             )
+            self._semantic_store_tasks.append(task)
+            task.add_done_callback(self._semantic_store_task_finished)
+            return
+        await self._semantic_cache.store(
+            response,
+            request.prompt_text,
+            model=model.name,
+            tier=int(model.tier),
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
+        )
+
+    def _semantic_store_task_finished(self, completed: asyncio.Future[bool]) -> None:
+        for task in list(self._semantic_store_tasks):
+            if task is completed:
+                self._semantic_store_tasks.remove(task)
+                return
 
     async def stream_chat_completion(
         self,
@@ -453,12 +485,17 @@ class ProviderProxy:
         raise ProviderError("No provider attempts were available for streaming", status_code=503)
 
     async def close(self) -> None:
-        """Close all provider clients."""
+        """Close all provider clients and stop background semantic stores."""
         probe_tasks = list(self._probe_tasks.values())
         for task in probe_tasks:
             task.cancel()
         if probe_tasks:
             await asyncio.gather(*probe_tasks, return_exceptions=True)
+        store_tasks = list(self._semantic_store_tasks)
+        for store_task in store_tasks:
+            store_task.cancel()
+        if store_tasks:
+            await asyncio.gather(*store_tasks, return_exceptions=True)
         for provider in self._providers.values():
             await provider.close()
 

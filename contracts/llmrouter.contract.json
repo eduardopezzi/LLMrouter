@@ -93,7 +93,36 @@
         "hit_rate": "float",
         "hits": "int",
         "misses": "int",
+        "semantic_hits": "int",
+        "semantic_misses": "int",
+        "semantic_unavailable": "int",
         "tokens_saved": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/rollout",
+      "response_schema": {
+        "models": "list[object]"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/rollout/{model_name}",
+      "request_schema": {
+        "properties": [
+          "percentage"
+        ],
+        "required": [
+          "percentage"
+        ]
+      },
+      "response_schema": {
+        "applied": "bool",
+        "model": "str",
+        "rollout_percentage": "float"
       }
     },
     {
