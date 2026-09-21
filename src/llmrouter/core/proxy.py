@@ -10,6 +10,7 @@ from typing import Any
 from llmrouter.core.cache import CacheManager
 from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
+from llmrouter.core.semantic_cache import SemanticCache
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatMessage,
@@ -26,7 +27,6 @@ _logger = get_logger("llmrouter.proxy")
 
 _FallbackMetrics: dict[str, int] = {
     "total_requests": 0,
-    "fallback_attempted": 0,
     "fallback_attempted": 0,
     "fallback_used": 0,
     "failed_requests": 0,
@@ -117,6 +117,7 @@ class ProviderProxy:
         provider_cooldowns: ProviderCooldownStore | None = None,
         metrics_collector: MetricsCollector | None = None,
         cache_manager: CacheManager | None = None,
+        semantic_cache: SemanticCache | None = None,
         probe_max_tokens: int = 32,
     ) -> None:
         self._providers = providers
@@ -126,6 +127,7 @@ class ProviderProxy:
         self._provider_cooldowns = provider_cooldowns
         self._metrics_collector = metrics_collector
         self._cache_manager = cache_manager
+        self._semantic_cache = semantic_cache
         self._probe_max_tokens = probe_max_tokens
         self._probe_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -273,13 +275,31 @@ class ProviderProxy:
         request: ChatRequest,
         decision: RoutingDecision,
     ) -> ChatResponse | None:
-        """Return a short-lived exact cache hit for non-streaming requests."""
-        if self._cache_manager is None or request.stream:
+        """Return a short-lived exact cache hit for non-streaming requests.
+
+        On an exact miss, consults the optional semantic cache (also
+        non-streaming only).  Semantic hits carry ``cache_status
+        "semantic_hit"`` vs ``"local_hit"`` for exact hits.
+        """
+        if request.stream:
             return None
-        return await self._cache_manager.get(
-            request,
-            decision.primary.name,
-            decision.primary.tier,
+        cached: ChatResponse | None = None
+        if self._cache_manager is not None:
+            cached = await self._cache_manager.get(
+                request,
+                decision.primary.name,
+                decision.primary.tier,
+            )
+        if cached is not None or self._semantic_cache is None:
+            return cached
+        # Exact miss — only now pay the embedding latency.
+        return await self._semantic_cache.lookup_prompt(
+            request.prompt_text,
+            model=decision.primary.name,
+            tier=int(decision.primary.tier),
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
         )
 
     async def _store_cached_response(
@@ -288,16 +308,32 @@ class ProviderProxy:
         model: Any,
         response: ChatResponse,
     ) -> None:
-        """Store only first-choice non-streaming responses for retry reuse."""
-        if self._cache_manager is None or request.stream:
+        """Store only first-choice non-streaming responses for retry reuse.
+
+        Additionally feeds the semantic cache (when injected) with the same
+        first-attempt, non-streaming response.  Cache hits never reach this
+        method, so semantic entries are never duplicated by their own hit.
+        """
+        if request.stream:
             return
-        await self._cache_manager.set(
-            request,
-            model.name,
-            model.tier,
-            response,
-            cost_usd=self._estimate_cost(model, response.usage),
-        )
+        if self._cache_manager is not None:
+            await self._cache_manager.set(
+                request,
+                model.name,
+                model.tier,
+                response,
+                cost_usd=self._estimate_cost(model, response.usage),
+            )
+        if self._semantic_cache is not None:
+            await self._semantic_cache.store(
+                response,
+                request.prompt_text,
+                model=model.name,
+                tier=int(model.tier),
+                temperature=request.temperature,
+                top_p=request.top_p,
+                max_tokens=request.max_tokens,
+            )
 
     async def stream_chat_completion(
         self,
