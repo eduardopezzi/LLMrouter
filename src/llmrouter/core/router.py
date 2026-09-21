@@ -54,6 +54,10 @@ _last_metrics_log: float = 0.0
 _METRICS_LOG_INTERVAL: float = 120.0  # seconds
 
 
+class NoModelsAvailableError(RuntimeError):
+    """Raised when no configured model is currently available for routing."""
+
+
 async def _log_routing_metrics() -> None:
     """Log aggregated routing metrics periodically."""
     global _last_metrics_log
@@ -471,11 +475,12 @@ class MultiModelRouter:
 
         # Apply canary/blue-green rollout filter (pre-strategy eligibility)
         candidates = self._apply_rollout(candidates, request)
+        available = self._available_models(self._registry.all())
+        emergency_models = self._rollout_zero_models(available, constraints)
 
         if not candidates:
             # Search the full catalog when the recommended tier has no
             # available models, while still honoring each model's rollout.
-            available = self._available_models(self._registry.all())
             candidates = self._apply_rollout(available, request)
             _logger.debug(
                 "No candidates after rollout filter in tier %s; checked %d available models",
@@ -484,7 +489,17 @@ class MultiModelRouter:
             )
 
         if not candidates:
-            raise RuntimeError("No models available after applying rollout filter")
+            if emergency_models:
+                candidates = emergency_models
+                _logger.warning(
+                    "No rollout-eligible models are available; using rollout=0 models "
+                    "as last-resort candidates: %s",
+                    [model.name for model in emergency_models],
+                )
+            else:
+                raise NoModelsAvailableError(
+                    "No models are currently available after provider and rollout filtering"
+                )
 
         # Debug: log candidates
         _logger.debug(
@@ -506,6 +521,26 @@ class MultiModelRouter:
             ordered[1:],
             self._fallback_count,
         )
+
+        # Rollout 0% models stay out of normal selection, but remain available
+        # after every rollout-eligible fallback has failed. Keep this emergency
+        # chain bounded while guaranteeing one emergency slot when one exists.
+        if emergency_models and primary.rollout_percentage > 0.0:
+            emergency_ordered = _unique_models(
+                self._strategy.select(emergency_models, constraints)
+            )
+            emergency_ordered = self._apply_client_provider_affinity(
+                emergency_ordered,
+                request,
+                constraints,
+            )
+            emergency_ordered = self._apply_peak_pricing_priority(emergency_ordered)
+            emergency_fallbacks = _provider_diverse_fallbacks(
+                primary,
+                emergency_ordered,
+                max(1, self._fallback_count),
+            )
+            fallbacks = _unique_models([*fallbacks, *emergency_fallbacks])
 
         # Debug: log final selection
         _logger.debug(
@@ -546,7 +581,11 @@ class MultiModelRouter:
             fallbacks=fallbacks,
             score=scoring.score,
             tier=scoring.tier,
-            reason=self._build_reason(scoring, primary),
+            reason=(
+                f"Last-resort rollout=0 model selected; {self._build_reason(scoring, primary)}"
+                if primary.rollout_percentage <= 0.0
+                else self._build_reason(scoring, primary)
+            ),
             rollout_sampled=rollout_sampled,
             probe_models=self._claim_due_probe_models(),
         )
@@ -831,6 +870,21 @@ class MultiModelRouter:
                 continue
             available.append(model)
         return available
+
+    def _rollout_zero_models(
+        self,
+        models: list[ModelInfo],
+        constraints: RoutingConstraints,
+    ) -> list[ModelInfo]:
+        """Return available 0% models for emergency use after normal candidates."""
+        if self._rollout_config and not self._rollout_config.enabled:
+            return []
+        return [
+            model
+            for model in models
+            if model.rollout_percentage <= 0.0
+            and constraints.required_capabilities <= model.capabilities
+        ]
 
     @staticmethod
     def _build_reason(scoring: ScoringResult, model: ModelInfo) -> str:

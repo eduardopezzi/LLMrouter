@@ -26,7 +26,7 @@ from llmrouter.core.cache import CacheManager
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.router import MultiModelRouter
+from llmrouter.core.router import MultiModelRouter, NoModelsAvailableError
 from llmrouter.core.scorer import PromptScorer
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
@@ -386,7 +386,13 @@ def create_app(
         started = time.perf_counter()
         request_id = _request_id(request)
         constraints = _routing_constraints(payload, prompt_directives)
-        decision = await app.state.router.route(original_chat_request, constraints)
+        try:
+            decision = await app.state.router.route(original_chat_request, constraints)
+        except NoModelsAvailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
 
         # Debug: log routing decision
         _logger.debug(
@@ -582,7 +588,13 @@ async def _stream_response(
     original_chat_request = original_chat_request or chat_request
     prompt_directives = _chat_request_directives(original_chat_request)
     constraints = _routing_constraints(payload, prompt_directives)
-    decision = await app_router.route(original_chat_request, constraints)
+    try:
+        decision = await app_router.route(original_chat_request, constraints)
+    except NoModelsAvailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     selected_model = decision.primary
     started = time.perf_counter()
     request_id = _request_id(request)
