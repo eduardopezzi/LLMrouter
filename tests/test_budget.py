@@ -22,6 +22,7 @@ from llmrouter.core.budget import (
     DEFAULT_USER_ID,
     BudgetLimits,
     BudgetManager,
+    _normalize_tenant,
     estimate_cost,
 )
 
@@ -58,6 +59,15 @@ class TestEstimateCost:
     def test_matches_proxy_formula(self) -> None:
         # (input/1000)*in_cost + (output/1000)*out_cost
         assert estimate_cost(0.5, 1.5, 1000, 2000) == pytest.approx(0.5 + 3.0)
+
+    def test_normalize_tenant_strips_whitespace(self) -> None:
+        """Blank/whitespace tenant headers collapse to the shared default
+        tenant instead of creating an untracked per-header tenant (QA wave 2,
+        risco 4)."""
+        assert _normalize_tenant(None, None) == (DEFAULT_PROJECT_ID, DEFAULT_USER_ID)
+        assert _normalize_tenant("", "  ") == (DEFAULT_PROJECT_ID, DEFAULT_USER_ID)
+        assert _normalize_tenant("  ", "alice") == (DEFAULT_PROJECT_ID, "alice")
+        assert _normalize_tenant(" proj ", " alice ") == ("proj", "alice")
 
     def test_zero_tokens_zero_cost(self) -> None:
         assert estimate_cost(10.0, 20.0, 0, 0) == 0.0
