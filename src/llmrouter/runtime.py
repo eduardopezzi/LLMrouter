@@ -19,6 +19,7 @@ from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
 from llmrouter.cli_panel import demote_model_priority
 from llmrouter.config import ProviderConfig, Settings, get_settings
 from llmrouter.core.benchmark_affinity import BenchmarkAffinityScorer
+from llmrouter.core.budget import BudgetManager
 from llmrouter.core.cache import CacheManager, SQLiteCacheBackend
 from llmrouter.core.cooldown import (
     ProviderCooldownStore,
@@ -212,6 +213,11 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
     metrics_collector = MetricsCollector()
+    budget_manager = (
+        BudgetManager(resolved_settings.budgets.db_path)
+        if resolved_settings.budgets.enabled
+        else None
+    )
     cache_manager = CacheManager(
         SQLiteCacheBackend("data/cache.db"),
     )
@@ -326,6 +332,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         metrics_collector=metrics_collector,
         cache_manager=cache_manager,
         semantic_cache=semantic_cache,
+        budget_manager=budget_manager,
         benchmark_scheduler=benchmark_scheduler,
     )
     app_holder["app"] = app
