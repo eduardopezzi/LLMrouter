@@ -10,7 +10,9 @@ from llmrouter.runtime import build_registry
 def test_load_model_registry_from_catalog() -> None:
     registry = load_model_registry("config/models.example.yaml")
 
-    assert len(registry.models) == 18
+    # 1009017 alinhou o catálogo com o Yoda: 11 modelos ativos (os demais
+    # ficam comentados no YAML aguardando revisão).
+    assert len(registry.models) == 11
     first = registry.models[0]
     assert first.name == "ollama/glm-5.3-flash:cloud"
     assert first.provider == Provider.OLLAMA
@@ -41,4 +43,4 @@ def test_build_registry_creates_local_models_file_from_example(tmp_path) -> None
     registry = build_registry(str(config_dir / "models.yaml"))
 
     assert (config_dir / "models.yaml").exists()
-    assert len(registry.models) == 18
+    assert len(registry.models) == 11
