@@ -621,7 +621,13 @@ def test_chat_completions_respects_task_role() -> None:
     assert body["llmrouter"]["selected_model"] == "reviewer"
 
 
-def test_chat_completions_accepts_prompt_directives() -> None:
+def test_chat_completions_accepts_prompt_directives(tmp_path, monkeypatch) -> None:
+    # Hermetiza o fuzzy-match de projeto: sem chdir, o resolvedor varre
+    # subdiretórios do cwd pai e pode "corrigir" PRecog para um diretório
+    # local com grafia diferente (ex.: precog em /opt/data).
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
     registry = ModelRegistry(
         models=(
             ModelInfo(name="summary", provider=Provider.OPENAI, tier=Tier.T1),
@@ -667,7 +673,13 @@ def test_chat_completions_accepts_prompt_directives() -> None:
     }
 
 
-def test_chat_completions_accepts_prompt_directives_after_context_messages() -> None:
+def test_chat_completions_accepts_prompt_directives_after_context_messages(
+    tmp_path, monkeypatch
+) -> None:
+    # Mesma hermetização do teste irmão acima (fuzzy-match de projeto).
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
     registry = ModelRegistry(
         models=(
             ModelInfo(name="summary", provider=Provider.OPENAI, tier=Tier.T1),
