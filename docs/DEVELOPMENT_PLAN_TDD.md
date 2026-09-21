@@ -187,31 +187,24 @@ semantico.
 **Criterio de aceite:** cache semantico nao gera resposta errada em cenarios
 obvios.
 
-## Fase 6 - Budget Manager MVP
+## Fase 6 - Budget Manager MVP — CONCLUIDA (opt-in)
 
 **Objetivo:** governanca de custo por projeto/usuario.
 
-**Implementacao:**
+**Implementacao (entregue nos commits B1-B3):**
 
-- Criar `src/llmrouter/core/budget.py`.
-- SQLite backend primeiro.
-- Usar headers `X-Project-ID` e `X-User-ID`.
-- Limites diario e mensal.
-- Modo `soft`: warning/header.
-- Modo `hard`: bloquear ou fazer downgrade para modelo local/Ollama.
-- Endpoints:
-  - `GET /v1/llmrouter/budgets/{project_id}`
-  - `POST /v1/llmrouter/budgets`
+- `src/llmrouter/core/budget.py` com SQLite backend.
+- Headers `X-Project-ID` e `X-User-ID` (fallback `default`).
+- Limites diario e mensal; modo `soft` (header `X-Budget-Warning`) e `hard`
+  (HTTP 402 no pre-flight).
+- Endpoints `GET /v1/llmrouter/budgets/{project_id}` e
+  `POST /v1/llmrouter/budgets`.
+- Wiring via `llmrouter.budgets.enabled` (default **off**).
 
-**Testes:**
-
-- Permite dentro do limite.
-- Bloqueia excedido.
-- Soft mode nao bloqueia.
-- Budgets por projeto/usuario sao independentes.
-- Reset diario e mensal.
-- Persistencia.
-- Integracao com rota chat.
+**Testes:** `tests/test_budget.py` + `tests/test_budget_api.py` (permite
+dentro do limite, bloqueia excedido, soft nao bloqueia, budgets por
+projeto/usuario independentes, reset diario/mensal, persistencia,
+integracao com a rota chat, 503 sem manager).
 
 **Criterio de aceite:** custo por tenant e governavel.
 

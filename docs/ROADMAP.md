@@ -14,7 +14,7 @@ implementação no repositório, e não apenas a existência de um plano.
 | **7. Roteamento semântico** | 90% | Calibrar roles e thresholds com feedback de produção |
 | **8. Cache de respostas** | 100% | Habilitar `llmrouter.semantic_cache.enabled` em produção com observação de hit rate e falsos positivos |
 | **9. Rollout canary / blue-green** | 100% | Evoluir para rollout automatizado e sticky bucketing |
-| **10. Budgets e alertas por tenant** | 0% | Entregar controle de custo por projeto e usuário |
+| **10. Budgets e alertas por tenant** | 100% | Evoluir para downgrade automático e alertas proativos (webhook/PRecog) |
 | **11. Contratos para APIs customizadas** | 0% | Permitir declarar endpoints fora do perfil OpenAI-compatible |
 | **12. Governança do catálogo de modelos** | 0% | Validar metadados, limites e fontes de forma repetível |
 
@@ -121,19 +121,24 @@ de intervenção imediata.
 **Dependências:** itens 6 e 6.1. **Critério de aceite:** canary degradado é
 removido automaticamente, com motivo observável e sem reinício do serviço.
 
-### 10. Budgets e alertas por tenant — 0%
+### 10. Budgets e alertas por tenant — 100%
 
-**Objetivo:** governar custo por projeto e usuário de forma persistente.
+**Entregue (B1-B3, opt-in via `llmrouter.budgets.enabled`).**
 
-- Implementar `BudgetManager` com SQLite como primeiro backend e uma interface
-  que permita Redis em produção.
-- Identificar consumo por `X-Project-ID` e `X-User-ID`, com fallback seguro
-  para `default`; manter limites diário e mensal independentes.
-- Oferecer modo `soft` (warning/header) e `hard` (bloqueio ou downgrade para
-  modelo local previamente elegível), sem assumir que todo modelo Ollama tem
-  custo zero.
-- Expor configuração e consulta por API/CLI, persistir consumo e incorporar
-  uso/custo aos dados operacionais.
+- `BudgetManager` com SQLite como primeiro backend e interface que permite
+  Redis em produção (`core/budget.py`).
+- Consumo identificado por `X-Project-ID` e `X-User-ID`, com fallback seguro
+  para `default`; limites diário e mensal independentes.
+- Modo `soft` (header `X-Budget-Warning`) e `hard` (HTTP 402 no pré-flight);
+  gravação de uso pós-resposta via `record_usage` com `cost_known=False`
+  quando o modelo não tem preço no catálogo.
+- Endpoints `GET /v1/llmrouter/budgets/{project_id}` e
+  `POST /v1/llmrouter/budgets`; limites no snapshot de contrato.
+- Streaming registra pré-flight apenas (usage pós-stream é limitação
+  documentada); erro de budget nunca quebra a resposta de chat.
+
+**Próxima evolução:** downgrade automático para modelo local e alertas
+proativos (webhook/PRecog).
 
 **Dependências:** custos confiáveis do item 6. **Critério de aceite:** tenants
 independentes têm consumo correto, resets de período e enforcement testados na
