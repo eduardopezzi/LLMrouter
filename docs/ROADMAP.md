@@ -12,7 +12,7 @@ implementação no repositório, e não apenas a existência de um plano.
 | **6. Health e performance por modelo** | 100% | Usar os indicadores como base para automações de rollout |
 | **6.1. Estatísticas operacionais unificadas** | 100% | Evoluir o payload conforme novos subsistemas forem adicionados |
 | **7. Roteamento semântico** | 90% | Calibrar roles e thresholds com feedback de produção |
-| **8. Cache de respostas** | 50% | Adicionar busca semântica conservadora sobre o cache exato existente |
+| **8. Cache de respostas** | 100% | Habilitar `llmrouter.semantic_cache.enabled` em produção com observação de hit rate e falsos positivos |
 | **9. Rollout canary / blue-green** | 100% | Evoluir para rollout automatizado e sticky bucketing |
 | **10. Budgets e alertas por tenant** | 0% | Entregar controle de custo por projeto e usuário |
 | **11. Contratos para APIs customizadas** | 0% | Permitir declarar endpoints fora do perfil OpenAI-compatible |
@@ -62,25 +62,32 @@ implementação no repositório, e não apenas a existência de um plano.
 embeddings e thresholds por projeto/tipo de tarefa e definir métricas de
 qualidade para detectar regressões da classificação.
 
-### 8. Cache de respostas — 50%
+### 8. Cache de respostas — 100%
 
-**Entregue: cache exato (MVP).**
+**Entregue: cache exato (MVP) + cache semântico (opt-in).**
 
 - `SQLiteCacheBackend` e `CacheManager` persistem respostas não-streaming.
 - A chave normalizada considera prompt, modelo, `temperature`, `top_p` e
   `max_tokens`; streaming sempre ignora o cache.
 - TTL por tier, expiração, persistência e métricas de hit rate, tokens e custo
   economizados estão implementados.
-- `GET /v1/llmrouter/cache/stats` expõe as estatísticas.
+- `GET /v1/llmrouter/cache/stats` expõe as estatísticas (incluindo os contadores
+  semânticos `semantic_hits`/`semantic_misses`/`semantic_unavailable`).
 
-**Próxima fase: cache semântico.**
+**Cache semântico (entregue, desligado por padrão).**
 
-- Reutilizar embeddings do scorer e procurar respostas por similaridade cosine
-  com threshold configurável e conservador (inicialmente `0.95`).
-- Restringir candidatos por modelo, tier e parâmetros de sampling, mantendo o
-  cache exato como fallback quando embeddings não estiverem disponíveis.
-- Validar explicitamente falsos positivos/negativos antes de habilitar por
-  padrão; respostas erradas são um risco maior que um cache miss.
+- Reutiliza os embeddings do scorer híbrido e procura respostas por similaridade
+  cosine com threshold conservador configurável (default `0.95`).
+- Restringe candidatos por modelo, tier e parâmetros de sampling, mantendo o
+  cache exato como fallback quando embeddings não estiverem disponíveis
+  (circuit breaker abre após 3 falhas consecutivas do embedder).
+- Embedder síncrono roda em `asyncio.to_thread` com timeout configurável
+  (`embed_timeout_seconds`, default 5s) — nunca bloqueia o event loop.
+- Store semântico opcionalmente em background task (`background_store`, default
+  on) para não somar latência ao caminho de resposta.
+- Habilitar via `llmrouter.semantic_cache.enabled=true` após validar hit rate e
+  falsos positivos em produção; respostas erradas são um risco maior que um
+  cache miss.
 
 ### 9. Rollout canary / blue-green — 100%
 

@@ -169,23 +169,20 @@ normalizada.
 **Criterio de aceite:** chamadas repetidas reduzem custo/latencia sem risco
 semantico.
 
-## Fase 5 - Cache Semantico
+## Fase 5 - Cache Semantico — CONCLUIDA (opt-in)
 
 **Objetivo:** reutilizar respostas para prompts semanticamente equivalentes.
 
-**Implementacao:**
+**Implementacao (entregue nos commits A1-A3):**
 
-- Reutilizar embeddings do semantic scorer.
+- Reutilizar embeddings do semantic scorer (adapter com `asyncio.to_thread`,
+  timeout e circuit breaker de 3 falhas).
 - Similaridade cosine com threshold configuravel, default conservador `0.95`.
 - Restringir por modelo, tier e parametros de sampling.
 - Fallback para cache exato quando embeddings indisponiveis.
+- Wiring via `llmrouter.semantic_cache.enabled` (default **off**).
 
-**Testes:**
-
-- Prompts equivalentes dao hit.
-- Prompts diferentes nao dao hit.
-- Threshold e respeitado.
-- Falha de embeddings nao quebra o fluxo.
+**Testes:** `tests/test_semantic_cache.py` + `tests/test_semantic_wiring.py`.
 
 **Criterio de aceite:** cache semantico nao gera resposta errada em cenarios
 obvios.
