@@ -80,6 +80,8 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     provider_cooldowns = ProviderCooldownStore(
         default_seconds=resolved_settings.routing.quota_cooldown_seconds,
         probe_retry_seconds=resolved_settings.routing.quota_probe_retry_seconds,
+        credit_cooldown_seconds=resolved_settings.routing.credit_cooldown_seconds,
+        credit_probe_retry_seconds=resolved_settings.routing.credit_probe_retry_seconds,
     )
     router = MultiModelRouter(
         registry=registry,

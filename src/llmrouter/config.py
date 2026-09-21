@@ -103,6 +103,16 @@ class RoutingConfig(BaseModel):
         gt=0,
         description="Cooldown after a failed half-open probe.",
     )
+    credit_cooldown_seconds: float = Field(
+        default=60 * 60,
+        gt=0,
+        description="Minimum initial cooldown after an account credit or balance error.",
+    )
+    credit_probe_retry_seconds: float = Field(
+        default=6 * 60 * 60,
+        gt=0,
+        description="Minimum cooldown after a failed probe caused by depleted account credits.",
+    )
     quota_probe_max_tokens: int = Field(
         default=32,
         ge=1,

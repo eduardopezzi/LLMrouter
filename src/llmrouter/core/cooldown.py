@@ -59,9 +59,13 @@ class ProviderCooldownStore:
         *,
         default_seconds: float = 10 * 60,
         probe_retry_seconds: float = 60 * 60,
+        credit_cooldown_seconds: float = 60 * 60,
+        credit_probe_retry_seconds: float = 6 * 60 * 60,
     ) -> None:
         self._default_seconds = default_seconds
         self._probe_retry_seconds = probe_retry_seconds
+        self._credit_cooldown_seconds = credit_cooldown_seconds
+        self._credit_probe_retry_seconds = credit_probe_retry_seconds
         self._provider_until: dict[Provider, CooldownEntry] = {}
         self._cloud_until: dict[Provider, CooldownEntry] = {}
         self._model_until: dict[str, CooldownEntry] = {}
@@ -221,7 +225,13 @@ class ProviderCooldownStore:
             )
         if not is_quota_exhaustion_error(exc):
             return None
-        until = current + self._default_seconds
+        is_credit_error = is_credit_exhaustion_error(exc)
+        cooldown_seconds = (
+            self._credit_cooldown_seconds if is_credit_error else self._default_seconds
+        )
+        until = quota_reset_timestamp(reason, default_seconds=cooldown_seconds, now=current)
+        if is_credit_error:
+            until = max(until, current + cooldown_seconds)
         if model.provider == Provider.OLLAMA:
             if is_ollama_cloud_model(model):
                 return self.put_cloud(
@@ -328,10 +338,24 @@ class ProviderCooldownStore:
                 )
                 self._set_entry(entry)
                 return entry
+            retry_seconds = (
+                self._credit_probe_retry_seconds
+                if is_credit_exhaustion_error(exc)
+                else self._probe_retry_seconds
+            )
+            until = current + retry_seconds
+            if is_quota_exhaustion_error(exc):
+                until = quota_reset_timestamp(
+                    str(exc),
+                    default_seconds=retry_seconds,
+                    now=current,
+                )
+                if is_credit_exhaustion_error(exc):
+                    until = max(until, current + retry_seconds)
             entry = CooldownEntry(
                 provider=claimed.provider,
                 model_name=claimed.model_name,
-                until=current + self._probe_retry_seconds,
+                until=until,
                 reason=str(exc)[:300],
                 scope=claimed.scope,
                 failures=claimed.failures + 1,
@@ -449,17 +473,48 @@ def is_quota_exhaustion_error(exc: ProviderError) -> bool:
     return any(indicator in message for indicator in indicators)
 
 
-def quota_reset_timestamp(message: str, *, default_seconds: float) -> float:
+def is_credit_exhaustion_error(exc: ProviderError) -> bool:
+    """Return whether an upstream failure indicates depleted account credits."""
+    if exc.status_code == 402:
+        return True
+    message = re.sub(r"[_-]+", " ", str(exc).lower())
+    return any(
+        indicator in message
+        for indicator in (
+            "insufficient balance",
+            "balance is insufficient",
+            "insufficient credit",
+            "credits exhausted",
+            "credit exhausted",
+            "out of credits",
+            "no credits remaining",
+            "billing balance",
+            "payment required",
+            "recharge",
+            "top up your account",
+            "余额不足",
+            "请充值",
+        )
+    )
+
+
+def quota_reset_timestamp(
+    message: str,
+    *,
+    default_seconds: float,
+    now: float | None = None,
+) -> float:
     """Infer quota reset unix timestamp from provider message."""
+    current = time.time() if now is None else now
     parsed = _parse_reset_datetime(message)
     if parsed is not None:
         return parsed.timestamp()
 
     duration = _parse_duration_seconds(message)
     if duration is not None:
-        return time.time() + duration
+        return current + duration
 
-    return time.time() + default_seconds
+    return current + default_seconds
 
 
 def _parse_reset_datetime(message: str) -> datetime | None:

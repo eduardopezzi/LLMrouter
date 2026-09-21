@@ -305,11 +305,18 @@ modelos `ollama/*:cloud`, mas não os locais; uma falha de Ollama local bloqueia
 somente aquele modelo. Erros de catálogo bloqueiam apenas o modelo e respostas
 de retirada permanente (`410`) o removem do roteamento durante o processo.
 
-O cooldown inicial é de 10 minutos. Quando vence, a primeira requisição ainda é
-servida pelo fallback e, em paralelo, executa um canário curto no escopo
-bloqueado. Um sucesso restaura o preferencial para a próxima requisição; uma
-nova falha reabre o cooldown por 60 minutos. O claim do canário é atômico para
-evitar testes duplicados em requisições concorrentes.
+Rate limits e limites de uso usam 10 minutos por padrão, ou o horário/duração de
+reset informado pelo provider. Após o prazo, a requisição continua sendo servida
+pelo fallback enquanto um canário curto testa o escopo bloqueado. Se o canário
+falhar por rate limit, o prazo informado pelo provider é respeitado; sem essa
+informação, o novo cooldown usa 60 minutos.
+
+Saldo/créditos insuficientes (`402` ou mensagem explícita de crédito em `429`)
+usam no mínimo 1 hora antes do primeiro canário e 6 horas após um canário que
+confirme a falta de saldo. Um reset posterior informado pelo provider prevalece.
+Os valores são configuráveis por `routing.credit_cooldown_seconds` e
+`routing.credit_probe_retry_seconds`. O claim do canário é atômico para evitar
+testes duplicados em requisições concorrentes.
 
 ## Observações importantes
 

@@ -597,15 +597,23 @@ realmente foi afetada:
 | Modelo ausente (`404`) | Somente o modelo, temporariamente |
 | Modelo retirado (`410` ou resposta explícita de retirada) | Somente o modelo, removido do roteamento até reiniciar o processo |
 
-O primeiro cooldown dura 10 minutos. Depois desse prazo, a primeira requisição
-continua sendo respondida por um modelo alternativo e dispara, em paralelo, um
-prompt canário curto para o escopo bloqueado. Se o canário funcionar, o modelo
-preferencial volta na próxima requisição. Se falhar, o novo cooldown dura 60
-minutos. Somente um canário por escopo pode ficar em andamento.
+Rate limits e limites de uso usam 10 minutos por padrão; se a resposta informar
+um horário ou duração de reset, esse prazo é respeitado. Depois do prazo, a
+requisição continua sendo respondida pelo fallback enquanto um canário curto
+verifica o provider em segundo plano. Se falhar, o cooldown padrão do novo
+canário é de 60 minutos.
+
+Erros de saldo/créditos insuficientes (`402` ou mensagem explícita de créditos
+em uma resposta `429`) usam no mínimo 1 hora antes do primeiro canário e no
+mínimo 6 horas depois de um canário que confirme que o saldo continua insuficiente.
+Um prazo de recuperação posterior informado pelo provider prevalece. Esses
+tempos têm configuração própria:
 
 ```env
 LLMROUTER_ROUTING__QUOTA_COOLDOWN_SECONDS=600
 LLMROUTER_ROUTING__QUOTA_PROBE_RETRY_SECONDS=3600
+LLMROUTER_ROUTING__CREDIT_COOLDOWN_SECONDS=3600
+LLMROUTER_ROUTING__CREDIT_PROBE_RETRY_SECONDS=21600
 LLMROUTER_ROUTING__QUOTA_PROBE_MAX_TOKENS=32
 ```
 

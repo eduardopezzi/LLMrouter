@@ -556,7 +556,8 @@ class ProviderProxy:
             entry = self._provider_cooldowns.record_error(model, exc)
             if entry is not None:
                 _logger.warning(
-                    "Provider '%s' put in quota cooldown for %.0fs after model '%s': %s",
+                    "Cooldown scope=%s provider='%s' duration=%.0fs model='%s' error=%s",
+                    entry.scope.value,
                     model.provider.value,
                     entry.seconds_remaining,
                     model.name,
