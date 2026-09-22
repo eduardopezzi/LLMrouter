@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -143,10 +143,22 @@ class TestSQLiteCacheBackend:
         backend = SQLiteCacheBackend(db_path)
         assert await backend.count() == 0
         await backend.set(
-            key="k1", response={"id": "1"}, model="m", tier=1, tokens_total=1, cost_usd=0, ttl_seconds=3600,
+            key="k1",
+            response={"id": "1"},
+            model="m",
+            tier=1,
+            tokens_total=1,
+            cost_usd=0,
+            ttl_seconds=3600,
         )
         await backend.set(
-            key="k2", response={"id": "2"}, model="m", tier=1, tokens_total=1, cost_usd=0, ttl_seconds=3600,
+            key="k2",
+            response={"id": "2"},
+            model="m",
+            tier=1,
+            tokens_total=1,
+            cost_usd=0,
+            ttl_seconds=3600,
         )
         assert await backend.count() == 2
 
@@ -154,7 +166,13 @@ class TestSQLiteCacheBackend:
     async def test_persistence(self, db_path: str) -> None:
         backend = SQLiteCacheBackend(db_path)
         await backend.set(
-            key="persist", response={"id": "p"}, model="m", tier=1, tokens_total=1, cost_usd=0, ttl_seconds=3600,
+            key="persist",
+            response={"id": "p"},
+            model="m",
+            tier=1,
+            tokens_total=1,
+            cost_usd=0,
+            ttl_seconds=3600,
         )
         # Create a new backend pointing to the same file
         backend2 = SQLiteCacheBackend(db_path)
@@ -170,12 +188,14 @@ class TestCacheManager:
             yield str(Path(tmp) / "test_cache_mgr.db")
 
     def _make_request(self, prompt: str = "hello", **kwargs: object) -> ChatRequest:
+        max_tokens_value = kwargs.get("max_tokens")
+        max_tokens = int(str(max_tokens_value)) if max_tokens_value is not None else 100
         return ChatRequest(
             model="gpt-4",
             messages=[ChatMessage(role="user", content=prompt)],
             temperature=float(kwargs.get("temperature", 1.0)),
             top_p=float(kwargs.get("top_p", 1.0)),
-            max_tokens=int(kwargs.get("max_tokens", 100) or 0) if kwargs.get("max_tokens") is not None else 100,
+            max_tokens=max_tokens,
         )
 
     def _make_response(self, content: str = "hi") -> ChatResponse:

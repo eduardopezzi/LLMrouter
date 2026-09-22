@@ -122,9 +122,24 @@ class SQLiteCacheBackend:
         self._last_prune: float = 0.0
         self._prune_interval: float = 300.0  # 5 min
 
+    def _connect(self) -> sqlite3.Connection:
+        """Open a connection tuned for low-latency cache commits.
+
+        ``synchronous=NORMAL`` (with WAL journal mode, enabled once in
+        ``_ensure_table``) skips the per-commit fsync that costs
+        ~100-200ms on some filesystems.  For a TTL response cache the
+        durability of the last commit is irrelevant, but sub-second TTLs
+        are meaningless if writing an entry takes longer than the TTL.
+        """
+        conn = sqlite3.connect(str(self._db_path))
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
     async def _ensure_table(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self._db_path)) as conn:
+        with self._connect() as conn:
+            # WAL mode persists in the DB file and makes commits nearly free.
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cache_entries (
                     key TEXT PRIMARY KEY,
@@ -147,7 +162,7 @@ class SQLiteCacheBackend:
         """Return cached response dict if entry exists and is not expired."""
         await self._ensure_table()
         async with self._lock:
-            with sqlite3.connect(str(self._db_path)) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     """SELECT response_json, created_at, ttl_seconds
                        FROM cache_entries
@@ -159,7 +174,7 @@ class SQLiteCacheBackend:
             response_json, created_at, ttl_seconds = row
             if time.time() - created_at > ttl_seconds:
                 # Expired — delete lazily
-                with sqlite3.connect(str(self._db_path)) as conn:
+                with self._connect() as conn:
                     conn.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
                     conn.commit()
                 return None
@@ -178,7 +193,7 @@ class SQLiteCacheBackend:
         """Store a response in the cache."""
         await self._ensure_table()
         async with self._lock:
-            with sqlite3.connect(str(self._db_path)) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO cache_entries

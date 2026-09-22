@@ -12,13 +12,13 @@ def test_load_model_registry_from_catalog() -> None:
 
     assert len(registry.models) == 18
     first = registry.models[0]
-    assert first.name == "ollama/kimi-k3:cloud"
+    assert first.name == "ollama/glm-5.3-flash:cloud"
     assert first.provider == Provider.OLLAMA
     assert first.tier == Tier.T3
     assert "architecture" in first.capabilities
     assert first.cost_per_1k_input == 0
     assert first.api_base == "http://localhost:11434"
-    assert first.max_tokens == 128000
+    assert first.max_tokens == 131072
     assert first.context_window == 1000000
 
 
@@ -27,10 +27,10 @@ def test_provider_model_name_removes_catalog_namespace() -> None:
 
     assert registry.get("ollama/qwen2.5-coder:3b").provider_model_name == "qwen2.5-coder:3b"
     assert (
-        registry.get("deepseek/deepseek-chat").provider_model_name
-        == "deepseek-chat"
+        registry.get("deepseek/deepseek-v4-flash").provider_model_name
+        == "deepseek-v4-flash"
     )
-    assert registry.get("zhipu/glm-5.2").provider_model_name == "glm-5.2"
+    assert registry.get("zhipu/glm-5.3").provider_model_name == "glm-5.3"
 
 
 def test_build_registry_creates_local_models_file_from_example(tmp_path) -> None:

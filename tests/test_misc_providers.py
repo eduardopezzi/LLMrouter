@@ -102,7 +102,7 @@ def test_zai_glm53_reasoning_values_are_not_overridden() -> None:
 
     payload = provider._build_payload(request, "glm-5.3-flash", stream=True)
 
-    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["thinking"] == {"type": "enabled", "clear_thinking": False}
     assert payload["reasoning_effort"] == "low"
 
 
