@@ -17,6 +17,7 @@ implementação no repositório, e não apenas a existência de um plano.
 | **10. Budgets e alertas por tenant** | 100% | Evoluir para downgrade automático e alertas proativos (webhook/PRecog) |
 | **11. Contratos para APIs customizadas** | 0% | Permitir declarar endpoints fora do perfil OpenAI-compatible |
 | **12. Governança do catálogo de modelos** | 0% | Validar metadados, limites e fontes de forma repetível |
+| **13. Otimização de tokens (ecossistema)** | 5% | Seguir `ROADMAP_TOKEN_OPTIMIZATION.md` (E1–E7) |
 
 ---
 
@@ -186,6 +187,8 @@ validada no CI e refletida no contrato exportado.
 4. Automatizar rollback de canary; só então considerar auto-promoção (item 9.1).
 5. Entregar contratos de endpoints customizados (item 11).
 6. Instituir governança e checagens do catálogo (item 12).
+7. Executar o roadmap de otimização de tokens (item 13,
+   `ROADMAP_TOKEN_OPTIMIZATION.md`): E1 → E3 → E2 → E4 → E5 → E6 → E7.
 
 ## Qualidade transversal
 
