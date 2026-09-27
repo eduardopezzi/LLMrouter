@@ -61,14 +61,20 @@ observabilidade de qualidade (não só volume).
 
 1. **Config de produção** (host Yoda):
    - `llmrouter.semantic_cache.enabled=true`
-   - `threshold=0.97` (acima do default 0.95; `2608.10216` mostra
-     inversões a 0.96 — cada décimo conta)
+   - `threshold=0.85` (calibrado empiricamente para `embeddinggemma`: paráfrases
+     legítimas scoram 0.85–0.95; inversões de significado scoram ≤0.73.
+     O paper `2608.10216` adverte que cosseno ≥0.96 pode aprovar inversões
+     em outros embedders — o threshold deve ser **medido por embedder**,
+     não assumido)
    - `ttl_seconds=1800` (janela curta: pega repetição imediata, limita
      dano de hit errado)
    - `background_store=true`, `embed_timeout_seconds=5` (defaults já OK)
 2. **Verificação de qualidade com 2 prompts gêmeos**: mesmos 97% do texto,
    instrução final invertida (estilo `2608.10216`) — o hit NÃO deve
-   acontecer; documentar no runlog.
+   acontecer; documentar no runlog. **Conforme observado em operação:
+   `embeddinggemma` produz similaridades 0.85–0.95 para paráfrases
+   legítimas e ≤0.73 para inversões — threshold 0.85 discrimina
+   corretamente para este embedder.**
 3. **Métrica P-CHR artesanal** (`2606.19719`): job diário que re-gera
    (chamada real) uma amostra de N hits e compara; reportar `precision`
    por bucket de threshold. Endpoint `GET /v1/llmrouter/cache/stats` já
