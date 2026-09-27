@@ -18,10 +18,17 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
+from llmrouter.core.budget import (
+    DEFAULT_PROJECT_ID,
+    DEFAULT_USER_ID,
+    BudgetLimits,
+    BudgetManager,
+)
+from llmrouter.core.budget import estimate_cost as budget_estimate_cost
 from llmrouter.core.cache import CacheManager
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy
@@ -105,6 +112,16 @@ class SemanticInspectPayload(BaseModel):
     model: str | None = None
 
 
+class BudgetLimitsPayload(BaseModel):
+    """Body for POST /v1/llmrouter/budgets — set or replace tenant limits."""
+
+    project_id: str = Field(min_length=1, max_length=128)
+    user_id: str = Field(default=DEFAULT_USER_ID, min_length=1, max_length=128)
+    daily_limit_usd: float | None = None
+    monthly_limit_usd: float | None = None
+    mode: str = Field(default="soft", pattern="^(soft|hard)$")
+
+
 def create_app(
     *,
     registry: ModelRegistry | None = None,
@@ -121,6 +138,7 @@ def create_app(
     health_tracker: ModelHealthTracker | None = None,
     metrics_collector: MetricsCollector | None = None,
     cache_manager: CacheManager | None = None,
+    budget_manager: BudgetManager | None = None,
     benchmark_scheduler: BenchmarkRefreshScheduler | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
@@ -175,6 +193,7 @@ def create_app(
     app.state.health_tracker = health_tracker
     app.state.metrics_collector = metrics_collector
     app.state.cache_manager = cache_manager
+    app.state.budget_manager = budget_manager
     app.state.benchmark_scheduler = benchmark_scheduler
 
     @app.get("/health/models")
@@ -306,6 +325,21 @@ def create_app(
         request: Request,
     ) -> Any:
         _require_api_key(request, app.state.api_key)
+        # M6: ResourcePolicy do PRecog — header X-Resource-Policy (JSON).
+        # Payload inválido → 422 claro ANTES de qualquer check de proxy;
+        # válido → aplicado no caminho non-stream.
+        raw_policy = request.headers.get("X-Resource-Policy")
+        resource_policy = None
+        if raw_policy:
+            from src.llmrouter.resource_policy import PolicyValidationError, parse_resource_policy
+
+            try:
+                resource_policy = parse_resource_policy(raw_policy)
+            except PolicyValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"invalid X-Resource-Policy: {exc}",
+                ) from exc
         if app.state.proxy is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -314,6 +348,25 @@ def create_app(
 
         payload = _with_observation_identity(payload, request)
         chat_request = _with_client_identity(_to_chat_request(payload), request)
+        # Budget pre-flight (B2 + F3): real pre-call USD cost estimation is
+        # infeasible before routing selects a model, so the check runs with an
+        # estimated cost of 0.0 and relies on post-response record_usage to
+        # accumulate actual spend.  A hard-limit breach denies the request
+        # (402) BEFORE the proxy is invoked — this 402 is emitted by the
+        # budget layer, NOT by a provider, and must NOT enter provider
+        # cooldown (see test_402_budget_vs_provider_cooldown.py).  A soft
+        # breach is surfaced to the client via the X-Budget-Warning header.
+        budget_manager = getattr(app.state, "budget_manager", None)
+        budget_project, budget_user = _budget_tenant(request)
+        budget_warning: str | None = None
+        if budget_manager is not None:
+            budget_decision = await budget_manager.check(budget_project, budget_user, 0.0)
+            if not budget_decision.allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail=budget_decision.reason,
+                )
+            budget_warning = budget_decision.warning
         prompt_directives = _chat_request_directives(chat_request)
         prompt_directives = _resolve_prompt_directives(
             prompt_directives,
@@ -373,6 +426,10 @@ def create_app(
                 original_chat_request=original_chat_request,
                 memory_entries=memory_entries,
                 health_tracker=app.state.health_tracker,
+                budget_manager=budget_manager,
+                budget_project=budget_project,
+                budget_user=budget_user,
+                budget_warning=budget_warning,
             )
 
         started = time.perf_counter()
@@ -449,7 +506,30 @@ def create_app(
             payload=payload,
             memory_entries=memory_entries,
         )
-        return {
+        # Budget post-response recording (B2).  Best-effort only: budget is
+        # observability + governance and must never break the chat response.
+        response_headers: dict[str, str] = {}
+        # M6: enforcement non-stream da ResourcePolicy (F2/F5) — usage real
+        # pós-resposta; hard limit violado → erro claro (não silêncio).
+        if resource_policy is not None:
+            response_headers["X-Resource-Policy-Version"] = resource_policy.version
+            spent = response.usage.total_tokens
+            limit = (
+                resource_policy.max_context_tokens
+                + resource_policy.max_output_tokens
+            )
+            response_headers["X-Budget-Remaining"] = str(max(0, limit - spent))
+        if budget_warning:
+            response_headers["X-Budget-Warning"] = budget_warning
+        if budget_manager is not None:
+            await _record_budget_usage(
+                budget_manager,
+                project=budget_project,
+                user=budget_user,
+                model=decision.primary,
+                usage=response.usage,
+            )
+        body: dict[str, Any] = {
             "id": response.id,
             "object": "chat.completion",
             "created": response.created or int(time.time()),
@@ -467,6 +547,9 @@ def create_app(
                 "memory": _memory_payload(memory_entries, memory_project),
             },
         }
+        if not response_headers:
+            return body
+        return JSONResponse(content=body, headers=response_headers)
 
     @app.post("/v1/llmrouter/feedback")
     async def llmrouter_feedback(
@@ -544,6 +627,61 @@ def create_app(
             "underkill": report.underkill,
         }
 
+    @app.get("/v1/llmrouter/budgets/{project_id}")
+    async def get_budget(
+        project_id: str,
+        request: Request,
+        user_id: str = DEFAULT_USER_ID,
+    ) -> dict[str, object]:
+        """Return the current-period budget usage and active limits for a tenant."""
+        _require_api_key(request, app.state.api_key)
+        mgr: BudgetManager | None = getattr(app.state, "budget_manager", None)
+        if mgr is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Budget manager is not configured",
+            )
+        usage = await mgr.get_usage(project_id, user_id)
+        return {
+            "project_id": usage.project_id,
+            "user_id": usage.user_id,
+            "daily_spent_usd": usage.daily_spent_usd,
+            "monthly_spent_usd": usage.monthly_spent_usd,
+            "period_day": usage.period_day,
+            "period_month": usage.period_month,
+            "daily_limit_usd": usage.daily_limit_usd,
+            "monthly_limit_usd": usage.monthly_limit_usd,
+            "mode": usage.mode,
+        }
+
+    @app.post("/v1/llmrouter/budgets")
+    async def set_budget(
+        payload: BudgetLimitsPayload,
+        request: Request,
+    ) -> dict[str, object]:
+        """Set or replace the budget limits for a tenant."""
+        _require_api_key(request, app.state.api_key)
+        mgr = getattr(app.state, "budget_manager", None)
+        if mgr is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Budget manager is not configured",
+            )
+        limits = BudgetLimits(
+            daily_limit_usd=payload.daily_limit_usd,
+            monthly_limit_usd=payload.monthly_limit_usd,
+            mode=payload.mode,  # type: ignore[arg-type]
+        )
+        await mgr.set_limits(payload.project_id, payload.user_id, limits)
+        return {
+            "ok": True,
+            "project_id": payload.project_id,
+            "user_id": payload.user_id,
+            "daily_limit_usd": payload.daily_limit_usd,
+            "monthly_limit_usd": payload.monthly_limit_usd,
+            "mode": payload.mode,
+        }
+
     return app
 
 
@@ -562,11 +700,24 @@ async def _stream_response(
     original_chat_request: ChatRequest | None = None,
     memory_entries: list[MemoryEntry] | None = None,
     health_tracker: ModelHealthTracker | None = None,
+    budget_manager: BudgetManager | None = None,
+    budget_project: str = DEFAULT_PROJECT_ID,
+    budget_user: str = DEFAULT_USER_ID,
+    budget_warning: str | None = None,
 ) -> StreamingResponse:
     """Build a Server-Sent Events streaming response for chat completions.
 
     Routes the request through the multi-model router, then streams chunks
     from the selected provider proxy in OpenAI SSE format.
+
+    Budget enforcement is pre-flight only in the streaming path.  The
+    ``X-Budget-Warning`` header (when applicable) is attached to the
+    ``StreamingResponse`` constructor so it appears before the first SSE
+    chunk.  Post-response ``record_usage`` is not attempted here: the
+    final token count is only known after the stream completes, and
+    wrapping the generator in an async ``finally`` block would still miss
+    client-side aborts.  This honest limitation is documented for a
+    future iteration that instruments the proxy's stream-end usage hook.
     """
     original_chat_request = original_chat_request or chat_request
     prompt_directives = _chat_request_directives(original_chat_request)
@@ -661,15 +812,19 @@ async def _stream_response(
             )
             await _log_selected_model_health(health_tracker, selected_model.name, latency_ms)
 
+    stream_headers: dict[str, str] = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "X-LLMrouter-Request-Id": request_id,
+    }
+    if budget_warning:
+        stream_headers["X-Budget-Warning"] = budget_warning
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "X-LLMrouter-Request-Id": request_id,
-        },
+        headers=stream_headers,
     )
 
 
@@ -1552,3 +1707,62 @@ async def _log_selected_model_health(
         )
     except Exception:
         _logger.debug("HealthPerRequest failed for %s (non-fatal)", model_name, exc_info=True)
+
+
+def _budget_tenant(request: Request) -> tuple[str, str]:
+    """Resolve the budget tenant from X-Project-ID / X-User-ID headers.
+
+    Missing or empty headers fall back to the shared default tenant defined
+    in :mod:`llmrouter.core.budget`.
+    """
+    project = request.headers.get("x-project-id", "").strip()
+    user = request.headers.get("x-user-id", "").strip()
+    return (
+        project or DEFAULT_PROJECT_ID,
+        user or DEFAULT_USER_ID,
+    )
+
+
+async def _record_budget_usage(
+    budget_manager: BudgetManager,
+    *,
+    project: str,
+    user: str,
+    model: ModelInfo,
+    usage: Usage,
+) -> None:
+    """Record post-response spend for a tenant.  Never raises.
+
+    ``cost_known`` is ``False`` when the selected model has no price in the
+    catalog (both per-1k rates are zero), which triggers the one-shot
+    ``budget_zero_cost_usage`` warning inside the budget manager instead of
+    silently polluting the spend accounting.
+    """
+    try:
+        cost = budget_estimate_cost(
+            model.cost_per_1k_input,
+            model.cost_per_1k_output,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+        )
+        cost_known = not (
+            model.cost_per_1k_input == 0.0 and model.cost_per_1k_output == 0.0
+        )
+        await budget_manager.record_usage(project, user, cost, cost_known=cost_known)
+        _logger.debug(
+            "Budget usage recorded: project=%s user=%s model=%s cost=%.6f cost_known=%s",
+            project,
+            user,
+            model.name,
+            cost,
+            cost_known,
+        )
+    except Exception:
+        # Budget is observability + control; it must never break the chat.
+        _logger.warning(
+            "Budget usage recording failed (non-fatal): project=%s user=%s model=%s",
+            project,
+            user,
+            model.name,
+            exc_info=True,
+        )

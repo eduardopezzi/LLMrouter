@@ -220,6 +220,27 @@ class SemanticConfig(BaseModel):
     fallback_to_rule_based: bool = True
 
 
+class BudgetConfig(BaseModel):
+    """Per-tenant budget governance configuration.
+
+    Strictly opt-in: the :class:`~llmrouter.core.budget.BudgetManager` is only
+    constructed (and the chat pre-flight enforced) when ``enabled`` is ``True``.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Opt-in flag for per-tenant budget enforcement. Default off.",
+    )
+    db_path: str = "data/budget.db"
+    hard_default_usd: float | None = Field(
+        default=None,
+        description=(
+            "Optional default hard daily limit applied to tenants without "
+            "explicit budget configuration (reserved; not enforced yet)."
+        ),
+    )
+
+
 class BenchmarksConfig(BaseModel):
     """Locally versioned, externally refreshed benchmark score catalog."""
 
@@ -316,6 +337,7 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     semantic: SemanticConfig = Field(default_factory=SemanticConfig)
+    budgets: BudgetConfig = Field(default_factory=BudgetConfig)
     hybrid: HybridScorerConfig = Field(default_factory=HybridScorerConfig)
     rollout: RolloutConfig = Field(default_factory=RolloutConfig)
 
