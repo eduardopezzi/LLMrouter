@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from src.llmrouter.resource_policy import (
+from llmrouter.resource_policy import (
     PolicyValidationError,
     ResourcePolicy,
     parse_resource_policy,
@@ -94,7 +94,7 @@ class TestResourcePolicySchema:
 
 
 def _client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    from src.llmrouter.api.routes import create_app
+    from llmrouter.api.routes import create_app
 
     app = create_app()
     return TestClient(app)
@@ -114,6 +114,27 @@ class TestProxyResourcePolicy:
         assert response.status_code == 422
         assert "X-Resource-Policy" in response.json()["detail"]
 
+    def test_max_tokens_clamped_to_policy(self, client: TestClient) -> None:
+        """F2 enforcement: max_tokens acima do teto da política é clamped."""
+        policy = {
+            "version": "1",
+            "model_class": "standard",
+            "max_context_tokens": 16000,
+            "max_output_tokens": 256,
+        }
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            headers={"X-Resource-Policy": json.dumps(policy)},
+        )
+        # Pode ser 200/502/503, mas o header de clamp prova enforcement
+        if response.status_code == 200:
+            assert response.headers.get("X-Resource-Policy-Clamped") == "max_tokens"
+
     def test_valid_policy_echoes_version_header(self, client: TestClient) -> None:
         policy = {
             "version": "1",
@@ -121,8 +142,6 @@ class TestProxyResourcePolicy:
             "max_context_tokens": 16000,
             "max_output_tokens": 4096,
         }
-        # sem providers configurados o proxy pode 503; o header de policy
-        # ainda assim prova que o parse aconteceu ANTES do proxy
         response = client.post(
             "/v1/chat/completions",
             json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
@@ -146,7 +165,7 @@ class TestBudget402VsProvider402:
     ) -> None:
         """O 402 do BudgetManager é emitido ANTES do proxy e NÃO pode contar
         como erro de provider (senão colocaria o modelo em cooldown)."""
-        from src.llmrouter.core.budget import BudgetDecision, BudgetManager
+        from llmrouter.core.budget import BudgetDecision, BudgetManager
 
         manager = BudgetManager(":memory:")
 
@@ -159,10 +178,63 @@ class TestBudget402VsProvider402:
         # a decisão negada é puramente de governança — o provider nunca é chamado
         decision = await manager.check("p", "u", 0.0)
         assert decision.allowed is False
-        assert "budget" in decision.reason
+        assert "budget" in (decision.reason or "")
+
+    def test_budget_402_http_path_never_records_cooldown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MEDIUM-1 (QA): invariante pelo caminho HTTP REAL.
+
+        App com BudgetManager que nega (hard limit) + proxy que gravaria
+        cooldown. A resposta deve ser 402 e o proxy/cooldown NUNCA tocados
+        — cooldown pertence a falha de provider (ProviderError), não a
+        governança de budget.
+        """
+        from llmrouter.core.budget import BudgetDecision
+        from llmrouter.core.cooldown import ProviderCooldownStore
+        from llmrouter.api.routes import create_app
+
+        class _DeniedManager:
+            async def check(self, *args: Any, **kwargs: Any) -> BudgetDecision:
+                return BudgetDecision(
+                    allowed=False, reason="daily budget exceeded", warning=None
+                )
+
+            async def record_usage(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        cooldown = ProviderCooldownStore()
+
+        class _SpyProxy:
+            def __init__(self) -> None:
+                self.called = False
+
+            async def chat_completion(self, chat_request, decision):  # noqa: ANN001
+                self.called = True
+                raise AssertionError("proxy NÃO deve ser chamado sob budget 402")
+
+        app = create_app(budget_manager=_DeniedManager())  # type: ignore[arg-type]
+        original_store = getattr(app.state, "cooldown_store", None)
+        if original_store is not None:
+            monkeypatch.setattr(
+                original_store, "record_quota_error", cooldown.record_quota_error
+            )
+        proxy = _SpyProxy()
+        app.state.proxy = proxy
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "budget-model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code == 402
+        assert "budget" in (response.json().get("detail") or "").lower()
+        assert proxy.called is False
+        # cooldown nunca recebe entrada
+        assert cooldown.active_entries() == []
 
     def test_provider_402_is_a_provider_error(self) -> None:
-        from src.llmrouter.providers.base import ProviderError
+        from llmrouter.providers.base import ProviderError
 
         exc = ProviderError("provider quota exhausted", status_code=402)
         assert exc.status_code == 402

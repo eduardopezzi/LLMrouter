@@ -330,8 +330,9 @@ def create_app(
         # válido → aplicado no caminho non-stream.
         raw_policy = request.headers.get("X-Resource-Policy")
         resource_policy = None
+        policy_clamped: int | None = None
         if raw_policy:
-            from src.llmrouter.resource_policy import PolicyValidationError, parse_resource_policy
+            from llmrouter.resource_policy import PolicyValidationError, parse_resource_policy
 
             try:
                 resource_policy = parse_resource_policy(raw_policy)
@@ -348,6 +349,16 @@ def create_app(
 
         payload = _with_observation_identity(payload, request)
         chat_request = _with_client_identity(_to_chat_request(payload), request)
+        # M6 enforcement (F2): max_output_tokens é hard-limit do router —
+        # clamp de max_tokens ANTES do proxy. Requests acima do limite não
+        # são recusados: são servidos com o teto da política (fail-open de
+        # usabilidade, fail-closed de custo — o custo nunca excede o teto).
+        if resource_policy is not None:
+            requested_max = chat_request.max_tokens
+            policy_max = resource_policy.max_output_tokens
+            if requested_max is None or requested_max > policy_max:
+                chat_request = replace(chat_request, max_tokens=policy_max)
+                policy_clamped = requested_max if requested_max is not None else 0
         # Budget pre-flight (B2 + F3): real pre-call USD cost estimation is
         # infeasible before routing selects a model, so the check runs with an
         # estimated cost of 0.0 and relies on post-response record_usage to
@@ -519,6 +530,8 @@ def create_app(
                 + resource_policy.max_output_tokens
             )
             response_headers["X-Budget-Remaining"] = str(max(0, limit - spent))
+            if policy_clamped is not None:
+                response_headers["X-Resource-Policy-Clamped"] = "max_tokens"
         if budget_warning:
             response_headers["X-Budget-Warning"] = budget_warning
         if budget_manager is not None:
