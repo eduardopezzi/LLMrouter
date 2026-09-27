@@ -282,6 +282,68 @@ class SemanticConfig(BaseModel):
     fallback_to_rule_based: bool = True
 
 
+class SemanticCacheConfig(BaseModel):
+    """Semantic (embedding-similarity) response cache configuration.
+
+    Strictly opt-in: the similarity cache only activates when ``enabled`` is
+    set AND the semantic scorer provides a working embedder.  Without an
+    embedder the runtime keeps serving the exact cache only (no error).
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Opt-in flag for the semantic (similarity) response cache. Default off.",
+    )
+    threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity required for a semantic cache hit.",
+    )
+    ttl_seconds: int = Field(
+        default=3600,
+        gt=0,
+        description="Per-entry TTL for semantic cache entries, in seconds.",
+    )
+    db_path: str = "data/semantic_cache.db"
+    embed_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Deadline for each embedding call.  The synchronous embedder runs in "
+            "a worker thread and is abandoned after this timeout."
+        ),
+    )
+    background_store: bool = Field(
+        default=True,
+        description=(
+            "Store semantic cache entries in a background task so embedding "
+            "latency is never added to the response path."
+        ),
+    )
+
+
+class BudgetConfig(BaseModel):
+    """Per-tenant budget governance configuration.
+
+    Strictly opt-in: the :class:`~llmrouter.core.budget.BudgetManager` is only
+    constructed (and the chat pre-flight enforced) when ``enabled`` is ``True``.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Opt-in flag for per-tenant budget enforcement. Default off.",
+    )
+    db_path: str = "data/budget.db"
+    hard_default_usd: float | None = Field(
+        default=None,
+        description=(
+            "Optional default hard daily limit applied to tenants without "
+            "explicit budget configuration (reserved; not enforced yet)."
+        ),
+    )
+
+
 class BenchmarksConfig(BaseModel):
     """Locally versioned, externally refreshed benchmark score catalog."""
 
@@ -390,6 +452,8 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     semantic: SemanticConfig = Field(default_factory=SemanticConfig)
+    semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
+    budgets: BudgetConfig = Field(default_factory=BudgetConfig)
     hybrid: HybridScorerConfig = Field(default_factory=HybridScorerConfig)
     rollout: RolloutConfig = Field(default_factory=RolloutConfig)
 

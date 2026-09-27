@@ -179,12 +179,27 @@ class TestApplyRollout:
 
     @pytest.mark.asyncio
     async def test_route_does_not_bypass_zero_rollout_in_fallback(self):
-        """The full-catalog fallback must honor rollout=0 too."""
+        """Zero-rollout models are excluded normally, but kept as emergency fallback."""
         model_zero = _make_model("zero", rollout_percentage=0.0)
         router = self._make_router([model_zero])
 
-        with pytest.raises(RuntimeError, match="after applying rollout filter"):
-            await router.route(_make_request("a routine prompt"))
+        # Rota direta: nenhum candidato elegível — agora usa o zero-rollout como
+        # emergência (56139ba) em vez de levantar RuntimeError.
+        decision = await router.route(_make_request("a routine prompt"))
+        assert decision.primary is not None
+        assert decision.primary.name == "zero"
+
+    @pytest.mark.asyncio
+    async def test_route_all_zero_rollout_still_routes_with_emergency(self):
+        """Even a catalog of only zero-rollout models must produce a decision."""
+        model_zero = _make_model("zeroA", rollout_percentage=0.0)
+        model_zero2 = _make_model("zeroB", rollout_percentage=0.0)
+        router = self._make_router([model_zero, model_zero2])
+
+        decision = await router.route(_make_request("a routine prompt"))
+
+        assert decision.primary is not None
+        assert decision.primary.name in {"zeroA", "zeroB"}
 
     def test_partial_rollout_included(self):
         """When a model with rollout < 100 survives, it appears in filtered list."""
