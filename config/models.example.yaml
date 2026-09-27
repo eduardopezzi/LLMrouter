@@ -123,6 +123,7 @@ models:
 
   - name: "ollama/glm-5.3-flash:cloud"
     provider: "ollama"
+    model_family: "glm-5.3-flash"
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
@@ -250,6 +251,7 @@ models:
   # ==================================================================
   - name: "zhipu/glm-5.3-flash"
     provider: "zai"
+    model_family: "glm-5.3-flash"
     tier: 1
     roles: ["summarization", "documentation", "test_generation", "fix", "refactoring", "review", "architecture", "security_audit", "migration"]
     priority: 1

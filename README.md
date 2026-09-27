@@ -526,6 +526,14 @@ desempate segue a ordem comercial atual:
 Zhipu -> Ollama -> NVIDIA
 ```
 
+Para variantes do mesmo modelo hospedadas por mais de um provedor, o catalogo
+aceita `model_family`. O roteador primeiro classifica a capacidade para a
+tarefa e depois escolhe, dentro da mesma familia, a menor oferta de custo;
+quando os custos empatam, aplica `provider_cost_order`. Assim,
+`zhipu/glm-5.3-flash` pode ter prioridade sobre
+`ollama/glm-5.3-flash:cloud` sem permitir que um modelo barato de outra
+familia desloque um modelo mais adequado para a tarefa.
+
 Para trocar a estrategia:
 
 ```env

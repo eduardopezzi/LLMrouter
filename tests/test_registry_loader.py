@@ -23,6 +23,11 @@ def test_load_model_registry_from_catalog() -> None:
     assert first.max_tokens == 131072
     assert first.context_window == 1000000
 
+    zhipu_flash = registry.get("zhipu/glm-5.3-flash")
+    assert zhipu_flash is not None
+    assert zhipu_flash.model_family == "glm-5.3-flash"
+    assert zhipu_flash.tier == Tier.T1
+
 
 def test_provider_model_name_removes_catalog_namespace() -> None:
     registry = build_registry("config/models.example.yaml")

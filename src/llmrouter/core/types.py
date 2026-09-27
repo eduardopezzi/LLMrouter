@@ -82,6 +82,9 @@ class ModelInfo:
         context_window: Maximum input context length in tokens.
         api_base: Optional provider endpoint declared by the model catalog.
         description: Human-facing description from the catalog.
+        model_family: Explicit equivalence group for provider variants of the
+            same underlying model. Provider preference is applied only inside
+            this group, after task-quality ranking.
         rollout_percentage: Traffic percentage this model receives during
             a canary/blue-green rollout (0–100). Defaults to ``100`` (full traffic).
             Set to ``0`` to instantly remove from routing without deleting the entry.
@@ -104,6 +107,7 @@ class ModelInfo:
     context_window: int = 8192
     api_base: str | None = None
     description: str = ""
+    model_family: str | None = None
     rollout_percentage: float = 100.0
     benchmark_scores: tuple[tuple[str, float], ...] = ()
     benchmark_sources: tuple[str, ...] = ()

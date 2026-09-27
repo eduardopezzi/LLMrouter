@@ -472,10 +472,15 @@ class MultiModelRouter:
         # Get candidate models for the recommended tier
         candidates = self._get_candidates(scoring.tier, constraints)
         candidates = self._augment_inferred_task_candidates(candidates, scoring, constraints)
+        available = self._available_models(self._registry.all())
+        candidates = self._augment_provider_family_candidates(
+            candidates,
+            available,
+            constraints,
+        )
 
         # Apply canary/blue-green rollout filter (pre-strategy eligibility)
         candidates = self._apply_rollout(candidates, request)
-        available = self._available_models(self._registry.all())
         emergency_models = self._rollout_zero_models(available, constraints)
 
         if not candidates:
@@ -515,6 +520,7 @@ class MultiModelRouter:
         ordered = self._apply_inferred_task_affinity(ordered, scoring)
         ordered = self._apply_client_provider_affinity(ordered, request, constraints)
         ordered = self._apply_peak_pricing_priority(ordered)
+        ordered = self._apply_provider_family_preference(ordered)
         primary = ordered[0]
         fallbacks = _provider_diverse_fallbacks(
             primary,
@@ -535,6 +541,7 @@ class MultiModelRouter:
                 constraints,
             )
             emergency_ordered = self._apply_peak_pricing_priority(emergency_ordered)
+            emergency_ordered = self._apply_provider_family_preference(emergency_ordered)
             emergency_fallbacks = _provider_diverse_fallbacks(
                 primary,
                 emergency_ordered,
@@ -659,6 +666,35 @@ class MultiModelRouter:
         )
         return _unique_models([*specialists, *candidates]) if specialists else candidates
 
+    @staticmethod
+    def _augment_provider_family_candidates(
+        candidates: list[ModelInfo],
+        available: list[ModelInfo],
+        constraints: RoutingConstraints,
+    ) -> list[ModelInfo]:
+        """Include eligible provider variants of already selected model families.
+
+        A provider catalog may assign different operational tiers to the same
+        underlying model (for example, a subscription offer optimized for
+        simple prompts versus a cloud offer with a larger rollout). Once one
+        variant is a task candidate, all eligible variants of that explicit
+        family must be compared before the provider preference is applied.
+        """
+        families = {model.model_family for model in candidates if model.model_family}
+        if not families:
+            return candidates
+
+        family_variants = [
+            model
+            for model in available
+            if model.model_family in families
+            and (
+                not constraints.required_capabilities
+                or constraints.required_capabilities <= model.capabilities
+            )
+        ]
+        return _unique_models([*candidates, *family_variants])
+
     def _apply_inferred_task_affinity(
         self,
         ordered: list[ModelInfo],
@@ -770,6 +806,44 @@ class MultiModelRouter:
                 [model.name for model in reprioritized],
             )
         return reprioritized
+
+    def _apply_provider_family_preference(self, ordered: list[ModelInfo]) -> list[ModelInfo]:
+        """Choose the most cost-effective provider within equivalent models.
+
+        Task quality and capability ranking happen before this step. Only
+        models with an explicit ``model_family`` are reordered, so a cheap
+        model from a different family cannot displace a better model for the
+        task. Numeric catalog cost wins first; ``provider_cost_order`` is the
+        deterministic tie-break for equal or zero prices (normally Zhipu,
+        then Ollama).
+        """
+        if len(ordered) < 2:
+            return ordered
+
+        provider_rank = _provider_cost_rank(self._provider_cost_order)
+        family_positions: dict[str, list[int]] = {}
+        for position, model in enumerate(ordered):
+            if model.model_family:
+                family_positions.setdefault(model.model_family, []).append(position)
+
+        if not family_positions:
+            return ordered
+
+        result = list(ordered)
+        for positions in family_positions.values():
+            if len(positions) < 2:
+                continue
+            members = [(result[position], position) for position in positions]
+            members.sort(
+                key=lambda pair: (
+                    pair[0].cost_ratio,
+                    provider_rank.get(pair[0].provider, 99),
+                    pair[1],
+                )
+            )
+            for position, (model, _) in zip(positions, members):
+                result[position] = model
+        return result
 
     @staticmethod
     def _client_affinity_provider(

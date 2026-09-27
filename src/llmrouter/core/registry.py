@@ -111,6 +111,7 @@ def _model_from_mapping(
         context_window=context_window,
         api_base=_optional_str(item.get("api_base")),
         description=_optional_str(item.get("description")) or "",
+        model_family=_optional_str(item.get("model_family") or item.get("family")),
         rollout_percentage=rollout_percentage,
         benchmark_scores=tuple(sorted(configured_scores.items())),
         benchmark_sources=tuple(sorted(benchmark_sources)),
