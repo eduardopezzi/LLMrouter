@@ -433,6 +433,29 @@ def _default_endpoints() -> tuple[dict[str, object], ...]:
                 "underkill": "int",
             },
         },
+        {
+            "path": "/v1/llmrouter/budgets/{project_id}",
+            "method": "GET",
+            "auth_required": True,
+            "response_schema": {
+                "project_id": "str",
+                "usage": "object",
+                "limits": "object",
+            },
+        },
+        {
+            "path": "/v1/llmrouter/budgets",
+            "method": "POST",
+            "auth_required": True,
+            "request_schema": {
+                "project_id": "str",
+                "limits": "object",
+            },
+            "response_schema": {
+                "project_id": "str",
+                "limits": "object",
+            },
+        },
     )
 
 
