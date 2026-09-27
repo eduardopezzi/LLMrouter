@@ -82,6 +82,8 @@ class ModelInfo:
         context_window: Maximum input context length in tokens.
         api_base: Optional provider endpoint declared by the model catalog.
         description: Human-facing description from the catalog.
+        enabled: Whether this catalog entry is eligible for routing. Disabled
+            entries remain visible in catalog-management views.
         model_family: Explicit equivalence group for provider variants of the
             same underlying model. Provider preference is applied only inside
             this group, after task-quality ranking.
@@ -107,6 +109,7 @@ class ModelInfo:
     context_window: int = 8192
     api_base: str | None = None
     description: str = ""
+    enabled: bool = True
     model_family: str | None = None
     rollout_percentage: float = 100.0
     benchmark_scores: tuple[tuple[str, float], ...] = ()

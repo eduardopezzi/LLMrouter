@@ -9,7 +9,10 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
+import termios
 import time
+import tty
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -57,6 +60,7 @@ class ModelPriority:
     tier: str
     roles: tuple[str, ...]
     rollout_percentage: float
+    enabled: bool = True
 
 
 @dataclass
@@ -65,7 +69,9 @@ class _ModelBlock:
     priority: int
     name_line_index: int
     priority_line_index: int | None
+    enabled_line_index: int | None
     rollout_line_index: int | None
+    enabled: bool = True
     rollout_percentage: float = 100.0
 
 
@@ -121,6 +127,7 @@ def model_priorities(
                 tier=f"T{model.tier.value}",
                 roles=tuple(sorted(model.capabilities)),
                 rollout_percentage=model.rollout_percentage,
+                enabled=model.enabled,
             )
         )
     return rows
@@ -152,6 +159,7 @@ def render_model_priorities(
             f"  {row.rank:>2}. priority={row.priority:<3} {row.name} "
             f"provider={row.provider} tier={row.tier} rollout={row.rollout_percentage:g}% "
             f"roles={roles}"
+            + (" status=disabled" if not row.enabled else "")
         )
     return "\n".join(lines)
 
@@ -195,10 +203,15 @@ def render_benchmark_leaderboards(registry: ModelRegistry, *, limit: int = 3) ->
     return "\n".join(lines)
 
 
-def promote_model_priority(models_file: str | Path, model_name: str) -> None:
+def promote_model_priority(
+    models_file: str | Path,
+    model_name: str,
+    *,
+    include_disabled: bool = False,
+) -> None:
     """Move a model to priority 1 and shift the remaining catalog priorities down."""
     path = Path(models_file)
-    blocks = _model_blocks(path)
+    blocks = _model_blocks(path, include_disabled=include_disabled)
     if not blocks:
         raise ValueError("models file does not contain model entries")
     if model_name not in {block.name for block in blocks}:
@@ -232,10 +245,15 @@ def promote_model_priority(models_file: str | Path, model_name: str) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def set_model_priority_order(models_file: str | Path, ordered_model_names: list[str]) -> None:
+def set_model_priority_order(
+    models_file: str | Path,
+    ordered_model_names: list[str],
+    *,
+    include_disabled: bool = False,
+) -> None:
     """Apply a complete priority order to the catalog."""
     path = Path(models_file)
-    blocks = _model_blocks(path)
+    blocks = _model_blocks(path, include_disabled=include_disabled)
     if not blocks:
         raise ValueError("models file does not contain model entries")
 
@@ -266,21 +284,34 @@ def set_model_priority_order(models_file: str | Path, ordered_model_names: list[
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def reset_model_priorities_to_catalog_order(models_file: str | Path) -> None:
+def reset_model_priorities_to_catalog_order(
+    models_file: str | Path,
+    *,
+    include_disabled: bool = False,
+) -> None:
     """Reset priorities to the original model order in the YAML catalog."""
-    blocks = _model_blocks(Path(models_file))
+    blocks = _model_blocks(Path(models_file), include_disabled=include_disabled)
     if not blocks:
         raise ValueError("models file does not contain model entries")
-    set_model_priority_order(models_file, [block.name for block in blocks])
+    set_model_priority_order(
+        models_file,
+        [block.name for block in blocks],
+        include_disabled=include_disabled,
+    )
 
 
-def demote_model_priority(models_file: str | Path, model_name: str) -> bool:
+def demote_model_priority(
+    models_file: str | Path,
+    model_name: str,
+    *,
+    include_disabled: bool = False,
+) -> bool:
     """Move a model to the lowest catalog priority.
 
     Returns ``True`` when the model was found and rewritten, or ``False`` when
     it was already the lowest-priority model.
     """
-    blocks = _model_blocks(Path(models_file))
+    blocks = _model_blocks(Path(models_file), include_disabled=include_disabled)
     if not blocks:
         raise ValueError("models file does not contain model entries")
     if model_name not in {block.name for block in blocks}:
@@ -290,8 +321,30 @@ def demote_model_priority(models_file: str | Path, model_name: str) -> bool:
     if ordered[-1].name == model_name:
         return False
     reordered = [block.name for block in ordered if block.name != model_name] + [model_name]
-    set_model_priority_order(models_file, reordered)
+    set_model_priority_order(models_file, reordered, include_disabled=include_disabled)
     return True
+
+
+def set_model_enabled(models_file: str | Path, model_name: str, enabled: bool) -> None:
+    """Enable or disable one catalog model while preserving YAML formatting."""
+    path = Path(models_file)
+    blocks = _model_blocks(path, include_disabled=True)
+    target = next((block for block in blocks if block.name == model_name), None)
+    if target is None:
+        raise ValueError(f"model not found in catalog: {model_name}")
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    value = "true" if enabled else "false"
+    if target.enabled_line_index is not None:
+        current = lines[target.enabled_line_index]
+        lines[target.enabled_line_index] = f"{_line_indent(current)}enabled: {value}"
+    else:
+        name_line = lines[target.name_line_index]
+        lines.insert(
+            target.name_line_index + 1,
+            f"{_line_indent(name_line)}  enabled: {value}",
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 async def request_llm_model_priority_order(
@@ -1126,12 +1179,17 @@ def _prompt_provider_cost_order(
 
 def _prompt_model_priority_panel(settings: Settings, registry: ModelRegistry) -> ModelRegistry:
     """Submenu for model priority operations."""
+    priority_registry = _reload_registry(
+        settings.models_file,
+        benchmark_catalog_path=settings.benchmarks.catalog_path,
+        include_disabled=True,
+    )
     while True:
         print()
-        print("=== Promote model priority ===")
-        print(render_model_priorities(registry, limit=None))
+        print("=== Model priority order ===")
+        print(render_model_priorities(priority_registry, limit=None))
         print()
-        print("1. Promote a model to priority 1")
+        print("1. Reorder models with ↑/↓ (j/k), Enter saves")
         print("2. Reset priorities to original catalog order")
         print("3. Ask evaluator LLM to reorder for current strategy")
         print("0. Return to main menu")
@@ -1141,25 +1199,31 @@ def _prompt_model_priority_panel(settings: Settings, registry: ModelRegistry) ->
             return registry
 
         if choice == "1":
-            _prompt_promote_model_priority(settings.models_file, registry)
-            registry = _reload_registry(
+            _prompt_reorder_model_priorities(settings.models_file, priority_registry)
+            priority_registry = _reload_registry(
                 settings.models_file,
                 benchmark_catalog_path=settings.benchmarks.catalog_path,
+                include_disabled=True,
             )
         elif choice == "2":
-            _prompt_reset_model_priorities(settings.models_file)
-            registry = _reload_registry(
+            _prompt_reset_model_priorities(settings.models_file, include_disabled=True)
+            priority_registry = _reload_registry(
                 settings.models_file,
                 benchmark_catalog_path=settings.benchmarks.catalog_path,
+                include_disabled=True,
             )
         elif choice == "3":
-            _prompt_llm_model_priority_order(settings, registry)
-            registry = _reload_registry(
+            _prompt_llm_model_priority_order(settings, priority_registry)
+            priority_registry = _reload_registry(
+                settings.models_file,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+                include_disabled=True,
+            )
+        elif choice in {"0", ""}:
+            return _reload_registry(
                 settings.models_file,
                 benchmark_catalog_path=settings.benchmarks.catalog_path,
             )
-        elif choice in {"0", ""}:
-            return registry
         else:
             print("Invalid option")
 
@@ -1189,7 +1253,93 @@ def _prompt_promote_model_priority(models_file: str | Path, registry: ModelRegis
         print(f"Error: {exc}")
 
 
-def _prompt_reset_model_priorities(models_file: str | Path) -> None:
+def _prompt_reorder_model_priorities(models_file: str | Path, registry: ModelRegistry) -> None:
+    """Interactively reorder the complete catalog with keyboard navigation."""
+    rows = model_priorities(registry, limit=None)
+    if not rows:
+        print("No models in catalog.")
+        return
+    if not sys.stdin.isatty():
+        print("Interactive keyboard ordering requires a terminal (TTY). No changes.")
+        return
+
+    selected = 0
+    order = [row.name for row in rows]
+    enabled_by_name = {row.name: row.enabled for row in rows}
+    print()
+    print("Use ↑/↓ or k/j to move; e toggles enabled; Enter saves; q cancels.")
+    try:
+        while True:
+            _clear_priority_editor()
+            current_rows = {row.name: row for row in rows}
+            print("=== Edit model priority order ===")
+            for index, name in enumerate(order):
+                row = current_rows[name]
+                marker = "▶" if index == selected else " "
+                status = "disabled" if not enabled_by_name[name] else "enabled"
+                print(
+                    f"{marker} {index + 1:>3}. {name} "
+                    f"provider={row.provider} tier={row.tier} {status}"
+                )
+
+            key = _read_priority_editor_key()
+            if key in {"up", "k"}:
+                selected = max(selected - 1, 0)
+            elif key in {"down", "j"}:
+                selected = min(selected + 1, len(order) - 1)
+            elif key == "enter":
+                set_model_priority_order(
+                    models_file,
+                    order,
+                    include_disabled=True,
+                )
+                for name, enabled in enabled_by_name.items():
+                    if enabled != current_rows[name].enabled:
+                        set_model_enabled(models_file, name, enabled)
+                print(f"Saved priority order for {len(order)} models in {models_file}")
+                return
+            elif key == "e":
+                name = order[selected]
+                enabled_by_name[name] = not enabled_by_name[name]
+            elif key in {"q", "escape"}:
+                print("No changes.")
+                return
+    except (EOFError, KeyboardInterrupt):
+        print("\nNo changes.")
+
+
+def _clear_priority_editor() -> None:
+    if sys.stdout.isatty():
+        print("\033[2J\033[H", end="")
+
+
+def _read_priority_editor_key() -> str:
+    """Read one normalized key from a terminal in cbreak mode."""
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        first = sys.stdin.read(1)
+        if first in {"\r", "\n"}:
+            return "enter"
+        if first == "\x03":
+            raise KeyboardInterrupt
+        if first == "\x1b":
+            sequence = sys.stdin.read(2)
+            return {"[A": "up", "[B": "down", "[D": "left", "[C": "right"}.get(
+                sequence,
+                "escape",
+            )
+        return first.lower()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+
+
+def _prompt_reset_model_priorities(
+    models_file: str | Path,
+    *,
+    include_disabled: bool = False,
+) -> None:
     """Interactive prompt for resetting priorities to catalog order."""
     value = input("Reset priorities to the original YAML order? [y/N]: ").strip().lower()
     if value not in {"y", "yes", "s", "sim"}:
@@ -1197,7 +1347,10 @@ def _prompt_reset_model_priorities(models_file: str | Path) -> None:
         return
 
     try:
-        reset_model_priorities_to_catalog_order(models_file)
+        reset_model_priorities_to_catalog_order(
+            models_file,
+            include_disabled=include_disabled,
+        )
         print(f"Reset priorities to original catalog order in {models_file}")
     except Exception as exc:
         print(f"Error: {exc}")
@@ -1225,7 +1378,11 @@ def _prompt_llm_model_priority_order(settings: Settings, registry: ModelRegistry
         ordered_names = asyncio.run(
             request_llm_model_priority_order(settings, registry, ranker_model=ranker_model)
         )
-        set_model_priority_order(settings.models_file, ordered_names)
+        set_model_priority_order(
+            settings.models_file,
+            ordered_names,
+            include_disabled=True,
+        )
         print(f"Applied LLM-suggested priority order to {settings.models_file}")
         print("New priorities:")
         print(
@@ -1707,12 +1864,14 @@ def _reload_registry(
     models_file: str | Path,
     *,
     benchmark_catalog_path: str | Path | None = None,
+    include_disabled: bool = False,
 ) -> ModelRegistry:
     from llmrouter.core.registry import load_model_registry
 
     return load_model_registry(
         models_file,
         benchmark_catalog_path=benchmark_catalog_path,
+        include_disabled=include_disabled,
     )
 
 
@@ -1727,7 +1886,7 @@ def _normalize_provider_order(providers: list[str]) -> list[str]:
     return normalized
 
 
-def _model_blocks(path: Path) -> list[_ModelBlock]:
+def _model_blocks(path: Path, *, include_disabled: bool = False) -> list[_ModelBlock]:
     lines = path.read_text(encoding="utf-8").splitlines()
     starts: list[int] = []
     name_pattern = re.compile(r"^(\s*)-\s+name:\s+(.+?)\s*$")
@@ -1746,6 +1905,7 @@ def _model_blocks(path: Path) -> list[_ModelBlock]:
         name = _strip_yaml_scalar(name_match.group(2))
         priority = 10
         priority_line_index: int | None = None
+        enabled_line_index: int | None = None
         rollout_pct: float = 100.0
         rollout_line_index: int | None = None
         enabled = True
@@ -1756,6 +1916,7 @@ def _model_blocks(path: Path) -> list[_ModelBlock]:
             enabled_match = enabled_pattern.match(lines[index])
             if enabled_match is not None:
                 enabled = enabled_match.group(1).lower() != "false"
+                enabled_line_index = index
             if priority_line_index is None:
                 priority_match = priority_pattern.match(lines[index])
                 if priority_match is not None:
@@ -1768,18 +1929,26 @@ def _model_blocks(path: Path) -> list[_ModelBlock]:
                     rollout_pct = float(rollout_match.group(1))
                     rollout_line_index = index
                     continue
-        if not enabled:
+        if not include_disabled and not enabled:
             continue
-        blocks.append(
-            _ModelBlock(
-                name=name,
-                priority=priority,
-                name_line_index=start,
-                priority_line_index=priority_line_index,
-                rollout_line_index=rollout_line_index,
-                rollout_percentage=rollout_pct,
-            )
+        block = _ModelBlock(
+            name=name,
+            priority=priority,
+            name_line_index=start,
+            priority_line_index=priority_line_index,
+            enabled_line_index=enabled_line_index,
+            rollout_line_index=rollout_line_index,
+            enabled=enabled,
+            rollout_percentage=rollout_pct,
         )
+        duplicate_index = next(
+            (index for index, existing in enumerate(blocks) if existing.name == name),
+            None,
+        )
+        if duplicate_index is None:
+            blocks.append(block)
+        elif not blocks[duplicate_index].enabled and enabled:
+            blocks[duplicate_index] = block
     return blocks
 
 

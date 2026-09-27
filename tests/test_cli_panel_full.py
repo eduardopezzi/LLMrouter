@@ -44,6 +44,7 @@ from llmrouter.cli_panel import (
     reset_model_priorities_to_catalog_order,
     routing_panel_config,
     set_fallback_count,
+    set_model_enabled,
     set_model_priority_order,
     set_provider_cost_order,
     set_routing_strategy,
@@ -331,6 +332,49 @@ def test_set_model_priority_order_wrong_count(tmp_path: Path) -> None:
     models_file = _models_file(tmp_path)
     with pytest.raises(ValueError):
         set_model_priority_order(models_file, ["model-a"])
+
+
+def test_priority_order_can_include_disabled_models(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        "models:\n"
+        "  - name: active\n"
+        "    provider: ollama\n"
+        "    priority: 1\n"
+        "  - name: disabled\n"
+        "    provider: zai\n"
+        "    enabled: false\n"
+        "    priority: 2\n",
+        encoding="utf-8",
+    )
+
+    set_model_priority_order(
+        models_file,
+        ["disabled", "active"],
+        include_disabled=True,
+    )
+
+    complete = _model_blocks(models_file, include_disabled=True)
+    assert {block.name: block.priority for block in complete} == {
+        "disabled": 1,
+        "active": 2,
+    }
+
+
+def test_set_model_enabled_preserves_catalog_entry(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        "models:\n"
+        "  - name: model-a\n"
+        "    provider: ollama\n"
+        "    enabled: false\n"
+        "    priority: 1\n",
+        encoding="utf-8",
+    )
+
+    set_model_enabled(models_file, "model-a", True)
+
+    assert "enabled: true" in models_file.read_text(encoding="utf-8")
 
 
 def test_set_model_priority_order_unknown_model(tmp_path: Path) -> None:

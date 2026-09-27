@@ -149,6 +149,17 @@ exemplo, 5%) e aumentar o percentual depois de validar o modelo.
 Mantenha `LLMROUTER_ROLLOUT__ENABLED=true` no servidor: com essa opção em
 `false`, o filtro inteiro é ignorado, inclusive para modelos com rollout `0`.
 
+No painel interativo, em `Models > Promote model`, a lista de prioridade mostra
+todo o catálogo, inclusive entradas com `enabled: false`. Escolha `Reorder`
+para editar com `↑`/`↓` (ou `j`/`k`); pressione `e` para alternar o status do
+modelo selecionado, `Enter` para salvar e `q` para cancelar. Pela linha de
+comando, o mesmo status pode ser alterado diretamente no `config/models.yaml`:
+
+```yaml
+- name: ollama/glm-5.3-flash:cloud
+  enabled: true
+```
+
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 
 ```bash
