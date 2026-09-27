@@ -1293,6 +1293,22 @@ def _record_observation(
         metadata["request_id"] = request_id
     if memory_entries:
         metadata["memory_ids"] = ",".join(str(entry.id) for entry in memory_entries)
+    # M9: campos de política de recurso e orçamento (PRecog ↔ LLMRouter).
+    # O header X-Resource-Policy (M6) é refletido no payload de observação
+    # para correlação: qual política vigorou e quanto do orçamento restou.
+    resource_policy = getattr(chat_request, "resource_policy", None)
+    if resource_policy is not None:
+        policy_id = getattr(resource_policy, "policy_id", None) or getattr(
+            resource_policy, "id", None
+        )
+        if policy_id is not None:
+            metadata["resource_policy_id"] = str(policy_id)
+        policy_version = getattr(resource_policy, "version", None)
+        if policy_version is not None:
+            metadata["resource_policy_version"] = str(policy_version)
+    budget_remaining = getattr(chat_request, "budget_remaining_usd", None)
+    if budget_remaining is not None:
+        metadata["budget_remaining_usd"] = budget_remaining
     if collector is not None:
         collector.record(
             RoutingObservation(
