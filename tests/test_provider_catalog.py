@@ -11,6 +11,7 @@ import yaml
 import llmrouter.provider_catalog as provider_catalog
 from llmrouter.core.registry import load_model_registry
 from llmrouter.core.types import ModelInfo, Provider, Tier
+from llmrouter.provider_catalog import ProviderSource
 
 
 def test_parse_model_api_supports_ollama_and_openai_shapes() -> None:
@@ -26,6 +27,44 @@ def test_parse_model_api_supports_ollama_and_openai_shapes() -> None:
 def test_parse_model_api_rejects_success_responses_without_inventory(payload) -> None:
     with pytest.raises(ValueError, match="no model list"):
         provider_catalog._parse_model_api("deepseek", payload)
+
+
+def test_fetch_source_loads_dotenv_api_key(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_load_dotenv(*, override: bool) -> None:
+        assert override is False
+        monkeypatch.setenv("TEST_PROVIDER_API_KEY", "secret")
+
+    class FakeResponse:
+        text = "models"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def fake_get(url: str, **kwargs: object) -> FakeResponse:
+        seen["url"] = url
+        seen["headers"] = kwargs["headers"]
+        return FakeResponse()
+
+    monkeypatch.delenv("TEST_PROVIDER_API_KEY", raising=False)
+    monkeypatch.setattr(provider_catalog, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(provider_catalog.httpx, "get", fake_get)
+
+    provider_catalog._fetch_source(
+        ProviderSource(
+            provider="deepseek",
+            url="https://provider.example/models",
+            api_key_env="TEST_PROVIDER_API_KEY",
+        ),
+        timeout=5,
+    )
+
+    assert seen["url"] == "https://provider.example/models"
+    assert seen["headers"] == {
+        "User-Agent": "LLMrouter provider catalog monitor/1.0",
+        "Authorization": "Bearer secret",
+    }
 
 
 def test_documentation_models_are_conservative_and_normalized() -> None:
