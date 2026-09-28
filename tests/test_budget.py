@@ -230,11 +230,16 @@ async def test_monthly_reset_on_month_rollover(db_path: str) -> None:
 
 
 async def test_persistence_across_managers(db_path: str) -> None:
-    mgr1 = _manager(db_path, _clock_at(2026, 9, 21))
+    # Both managers share the SAME fake day so the test stays hermetic:
+    # persistence must come from the SQLite store, not from wall-clock
+    # alignment between writer and reader (a real second clock broke the
+    # day-bucket match once the real date drifted past 2026-09-21).
+    write_clock = _clock_at(2026, 9, 21)
+    mgr1 = _manager(db_path, write_clock)
     await mgr1.set_limits("p1", "u1", BudgetLimits(daily_limit_usd=10.0, mode="hard"))
     await mgr1.record_usage("p1", "u1", 9.5)
 
-    mgr2 = BudgetManager(db_path)  # real clock, same day in UTC
+    mgr2 = BudgetManager(db_path, clock=write_clock)  # separate manager, same day (UTC)
     usage = await mgr2.get_usage("p1", "u1")
 
     assert usage.project_id == "p1"
