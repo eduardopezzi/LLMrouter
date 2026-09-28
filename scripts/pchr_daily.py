@@ -48,7 +48,8 @@ def _resolve_api_key(explicit: str | None) -> str | None:
     try:
         from llmrouter.config import get_settings
 
-        return get_settings().server.api_key
+        key: str | None = get_settings().server.api_key
+        return key
     except Exception:
         return None
 
@@ -68,7 +69,7 @@ def run_verify(
         headers["x-api-key"] = api_key
 
     owns_client = client is None
-    if owns_client:
+    if client is None:
         client = httpx.Client(timeout=JOB_TIMEOUT_SECONDS)
     try:
         payload: dict[str, Any] = {}
@@ -106,7 +107,7 @@ def run_verify(
     except httpx.HTTPError as exc:
         return {"ok": False, "stage": "connect", "detail": str(exc)[:500]}
     finally:
-        if owns_client:
+        if owns_client and client is not None:
             client.close()
 
 
