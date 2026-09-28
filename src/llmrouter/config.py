@@ -321,6 +321,35 @@ class SemanticCacheConfig(BaseModel):
             "latency is never added to the response path."
         ),
     )
+    hit_log_enabled: bool = Field(
+        default=True,
+        description=(
+            "Persist one audit row per semantic cache hit into the sibling "
+            "semantic_cache_hit_log table (P-CHR base, E1.3). Best-effort: "
+            "write failures never break the served response."
+        ),
+    )
+    verify_sample_size: int = Field(
+        default=20,
+        gt=0,
+        description=(
+            "Maximum number of pending hit-log rows audited per "
+            "verify_pending run (most recent first)."
+        ),
+    )
+    verify_judge_base_url: str = Field(
+        default="http://127.0.0.1:11434",
+        description="Base URL of the native Ollama endpoint backing the P-CHR judge.",
+    )
+    verify_judge_model: str = Field(
+        default="glm-5.2",
+        description="Ollama model used by the P-CHR judge for hit auditing.",
+    )
+    verify_judge_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Per-request timeout for the P-CHR judge, in seconds.",
+    )
 
 
 class BudgetConfig(BaseModel):
