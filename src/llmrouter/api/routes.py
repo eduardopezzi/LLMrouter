@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
+from llmrouter.config import get_settings
 from llmrouter.core.budget import (
     DEFAULT_PROJECT_ID,
     DEFAULT_USER_ID,
@@ -35,7 +36,7 @@ from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter, NoModelsAvailableError
 from llmrouter.core.scorer import PromptScorer
-from llmrouter.core.semantic_cache import SemanticCache
+from llmrouter.core.semantic_cache import OllamaJudge, SemanticCache
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatMessage,
@@ -111,6 +112,12 @@ class SemanticInspectPayload(BaseModel):
 
     prompt: str = ""
     model: str | None = None
+
+
+class CacheVerifyPayload(BaseModel):
+    """Body for POST /v1/llmrouter/cache/verify — P-CHR judge run."""
+
+    sample_size: int | None = Field(default=None, gt=0)
 
 
 class BudgetLimitsPayload(BaseModel):
@@ -604,6 +611,42 @@ def create_app(
         if semantic is not None:
             payload.update(semantic.stats())
         return payload
+
+    @app.post("/v1/llmrouter/cache/verify")
+    async def verify_cache_hits(
+        request: Request,
+        payload: CacheVerifyPayload | None = None,
+    ) -> dict[str, object]:
+        """Audit pending semantic-cache hit-log rows with the local LLM judge.
+
+        Runs :meth:`SemanticCache.verify_pending` on up to ``sample_size``
+        pending rows (default: ``settings.semantic_cache.verify_sample_size``)
+        using an :class:`OllamaJudge` built from the verify-judge settings.
+        Returns the ``{checked, ok, mismatch, error, buckets}`` summary.
+        """
+        _require_api_key(request, app.state.api_key)
+        semantic: SemanticCache | None = getattr(app.state, "semantic_cache", None)
+        if semantic is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Semantic cache is not configured",
+            )
+        settings = get_settings()
+        body_sample = payload.sample_size if payload is not None else None
+        sample_size = body_sample or settings.semantic_cache.verify_sample_size
+        judge = OllamaJudge(
+            base_url=settings.semantic_cache.verify_judge_base_url,
+            model=settings.semantic_cache.verify_judge_model,
+            timeout_seconds=settings.semantic_cache.verify_judge_timeout_seconds,
+        )
+        try:
+            return await semantic.verify_pending(sample_size, judge)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client as 500
+            _logger.error("P-CHR verify run failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Verify run failed: {exc}",
+            ) from exc
 
     @app.post("/admin/evaluator/run-cycle")
     async def run_evaluator_cycle(request: Request, limit: int = 50) -> dict[str, object]:

@@ -523,6 +523,7 @@ def _build_semantic_cache(
         adapter,
         threshold=cache_config.threshold,
         ttl_seconds=cache_config.ttl_seconds,
+        hit_log_enabled=cache_config.hit_log_enabled,
     )
 
 

@@ -268,6 +268,28 @@ def test_contract_snapshot_includes_rollout_endpoints() -> None:
     assert "/v1/llmrouter/rollout/{model_name}" in paths
 
 
+def test_contract_snapshot_includes_cache_verify_endpoint() -> None:
+    snapshot = Path("contracts/llmrouter.contract.json")
+    data = json.loads(snapshot.read_text(encoding="utf-8"))
+
+    endpoints = [
+        endpoint
+        for endpoint in data["endpoints"]
+        if endpoint["path"] == "/v1/llmrouter/cache/verify"
+    ]
+    assert len(endpoints) == 1
+    endpoint = endpoints[0]
+    assert endpoint["auth_required"] is True
+    assert endpoint["method"] == "POST"
+    assert endpoint["response_schema"] == {
+        "buckets": "object",
+        "checked": "int",
+        "error": "int",
+        "mismatch": "int",
+        "ok": "int",
+    }
+
+
 def test_build_app_semantic_disabled_keeps_proxy_clean(tmp_path: Path) -> None:
     settings = Settings()
     settings.semantic_cache.enabled = False
