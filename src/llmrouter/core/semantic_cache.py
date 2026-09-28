@@ -171,12 +171,14 @@ class SemanticCache:
         threshold: float = 0.95,
         ttl_seconds: float = _DEFAULT_TTL_SECONDS,
         hit_log_enabled: bool = False,
+        hit_log_retention_days: int = 45,
     ) -> None:
         self._db_path = Path(db_path)
         self._embedder = embedder
         self._threshold = threshold
         self._ttl_seconds = ttl_seconds
         self._hit_log_enabled = hit_log_enabled
+        self._hit_log_retention_days = max(0, int(hit_log_retention_days))
         self._lock = asyncio.Lock()
         self._semantic_hits = 0
         self._semantic_misses = 0
@@ -425,6 +427,7 @@ class SemanticCache:
         }
         try:
             await self._ensure_table()
+            await asyncio.to_thread(self.purge_expired_hit_log)
             rows = await asyncio.to_thread(self._fetch_pending_rows, sample_size)
         except Exception as exc:
             _logger.warning("P-CHR verify: could not read pending rows: %s", exc)
@@ -662,6 +665,25 @@ class SemanticCache:
                 ),
             )
             conn.commit()
+
+    def purge_expired_hit_log(self) -> int:
+        """Delete hit-log rows older than ``hit_log_retention_days`` (R2).
+
+        Returns the number of rows removed.  ``hit_log_retention_days=0``
+        disables retention (no-op).  Best-effort by design: called at the
+        start of ``verify_pending``; a failure raises only to the caller
+        there, which already guards the whole block.
+        """
+        if self._hit_log_retention_days <= 0:
+            return 0
+        cutoff = time.time() - self._hit_log_retention_days * 86400.0
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM semantic_cache_hit_log WHERE ts < ?",
+                (cutoff,),
+            )
+            conn.commit()
+            return int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
 
     def _fetch_pending_rows(
         self, sample_size: int

@@ -350,6 +350,16 @@ class SemanticCacheConfig(BaseModel):
         gt=0,
         description="Per-request timeout for the P-CHR judge, in seconds.",
     )
+    hit_log_retention_days: int = Field(
+        default=45,
+        ge=0,
+        description=(
+            "Days of retention for semantic_cache_hit_log rows (R2 privacy "
+            "decision: prompts/responses are purged after this window). "
+            "0 disables retention (rows are kept forever). Purge runs at "
+            "the start of each verify_pending cycle (daily job)."
+        ),
+    )
 
 
 class BudgetConfig(BaseModel):

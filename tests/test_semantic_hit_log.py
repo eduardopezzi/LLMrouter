@@ -659,3 +659,82 @@ class TestOllamaJudge:
         assert payload["messages"][-1]["role"] == "user"
         assert "question text" in payload["messages"][-1]["content"]
         assert "response text" in payload["messages"][-1]["content"]
+
+
+class TestHitLogRetention:
+    """R2: hit-log rows older than ``hit_log_retention_days`` are purged."""
+
+    @pytest.fixture
+    def db_path(self, tmp_path: Path) -> str:
+        return str(tmp_path / "retention.db")
+
+    @pytest.mark.asyncio
+    async def test_purge_deletes_old_rows_keeps_recent(self, db_path: str) -> None:
+        cache = SemanticCache(
+            db_path, embedder=FakeHashEmbedder(), hit_log_enabled=True,
+            hit_log_retention_days=45,
+        )
+        await _store_default(cache, _PROMPT_A)
+        await _hit_lookup(cache)
+
+        # backdate the single row to 60 days ago
+        import time as _time
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE semantic_cache_hit_log SET ts = ?",
+                (_time.time() - 60 * 86400,),
+            )
+            conn.commit()
+        assert _count_rows(db_path) == 1
+
+        purged = cache.purge_expired_hit_log()
+        assert purged == 1
+        assert _count_rows(db_path) == 0
+
+    @pytest.mark.asyncio
+    async def test_purge_keeps_rows_within_window(self, db_path: str) -> None:
+        cache = SemanticCache(
+            db_path, embedder=FakeHashEmbedder(), hit_log_enabled=True,
+            hit_log_retention_days=45,
+        )
+        await _store_default(cache, _PROMPT_A)
+        await _hit_lookup(cache)
+        # row ts is "now" — within 45d window
+        assert _count_rows(db_path) == 1
+        purged = cache.purge_expired_hit_log()
+        assert purged == 0
+        assert _count_rows(db_path) == 1
+
+    @pytest.mark.asyncio
+    async def test_purge_zero_retention_is_noop(self, db_path: str) -> None:
+        cache = SemanticCache(
+            db_path, embedder=FakeHashEmbedder(), hit_log_enabled=True,
+            hit_log_retention_days=0,
+        )
+        await _store_default(cache, _PROMPT_A)
+        await _hit_lookup(cache)
+        purged = cache.purge_expired_hit_log()
+        assert purged == 0
+        assert _count_rows(db_path) == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_pending_triggers_purge(self, db_path: str) -> None:
+        cache = SemanticCache(
+            db_path, embedder=FakeHashEmbedder(), hit_log_enabled=True,
+            hit_log_retention_days=45,
+        )
+        await _store_default(cache, _PROMPT_A)
+        await _hit_lookup(cache)
+
+        import time as _time
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE semantic_cache_hit_log SET ts = ?",
+                (_time.time() - 60 * 86400,),
+            )
+            conn.commit()
+
+        # verify_pending should purge before selecting
+        result = await cache.verify_pending(10, QueueJudge([]))
+        assert result["checked"] == 0  # row was purged, nothing to verify
+        assert _count_rows(db_path) == 0
