@@ -75,10 +75,23 @@ observabilidade de qualidade (não só volume).
    `embeddinggemma` produz similaridades 0.85–0.95 para paráfrases
    legítimas e ≤0.73 para inversões — threshold 0.85 discrimina
    corretamente para este embedder.**
-3. **Métrica P-CHR artesanal** (`2606.19719`): job diário que re-gera
-   (chamada real) uma amostra de N hits e compara; reportar `precision`
-   por bucket de threshold. Endpoint `GET /v1/llmrouter/cache/stats` já
-   expõe `semantic_hits/misses`; adicionar os contadores de verificação.
+3. **Métrica P-CHR artesanal** (`2606.19719`) — **IMPLEMENTADO (E1, onda 2)**:
+   hit-log persistido (`semantic_cache_hit_log`) + verificação por juiz LLM
+   local (`OllamaJudge`, POST `/api/chat` do Ollama, `temperature=0`,
+   veredicto yes/no na 1ª palavra) acionado via
+   `POST /v1/llmrouter/cache/verify` (body opcional `{sample_size}`,
+   default `verify_sample_size=20`; requer API key; 503 sem cache semântico).
+   Contadores de verificação (`pchr_pending`, `pchr_verified_ok`,
+   `pchr_verified_mismatch`, `pchr_precision`, `pchr_last_verified_ts`)
+   ficam no `GET /v1/llmrouter/cache/stats` (derivados do log, sobrevivem a
+   restart); o detalhamento por bucket de similaridade
+   ([0.80,0.85)/[0.85,0.90)/[0.90,0.95)/[0.95,1.01]) volta no payload do
+   endpoint de verify. Erros de juiz (`verified=2`) são re-tentados na
+   execução seguinte (só ok/mismatch são finais), então um outage do Ollama
+   não queima a amostra. **Nota:** o re-gen com chamada real ao provider
+   (replay do prompt contra o modelo e comparação com a resposta servida)
+   ficou como opt-in futuro — hoje o juiz avalia prompt×resposta do log,
+   sem gastar tokens de provider.
 4. **Critério de aceite:** ≥1 semana de operação com precision de hits
    ≥99% e hit-rate estável; qualquer resposta errada detectada → threshold
    sobe para 0.98 ou flag desliga sem redeploy.

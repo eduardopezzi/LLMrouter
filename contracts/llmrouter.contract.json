@@ -142,6 +142,24 @@
     },
     {
       "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/cache/verify",
+      "request_schema": {
+        "properties": [
+          "sample_size"
+        ],
+        "required": []
+      },
+      "response_schema": {
+        "buckets": "object",
+        "checked": "int",
+        "error": "int",
+        "mismatch": "int",
+        "ok": "int"
+      }
+    },
+    {
+      "auth_required": true,
       "method": "GET",
       "path": "/v1/llmrouter/rollout",
       "response_schema": {
