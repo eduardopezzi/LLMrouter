@@ -10,7 +10,7 @@ CONTRACT ?= contracts/llmrouter.contract.json
 PREVIOUS_CONTRACT ?= contracts/previous.llmrouter.contract.json
 CONTRACTS_REPO ?= https://github.com/Vieli-Tech/phoenix_versions.git
 
-.PHONY: help install install-dev run run-reload run-debug panel panel-stats contracts-export contracts-check contracts-diff contracts-publish benchmarks-refresh benchmarks-check benchmarks-research providers-sync providers-update test lint format typecheck clean docker-build docker-run
+.PHONY: help install install-dev run run-reload run-debug panel tui panel-stats contracts-export contracts-check contracts-diff contracts-publish benchmarks-refresh benchmarks-check benchmarks-research providers-sync providers-update test lint format typecheck clean docker-build docker-run
 
 help: ## Mostra os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -32,6 +32,9 @@ run-debug: ## Inicia o servidor com debug logging (mostra roteamento, scoring, f
 
 panel: ## Abre painel CLI de roteamento e estatisticas
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main panel
+
+tui: ## Abre a interface interativa Textual do LLMrouter
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m llmrouter.main tui
 
 panel-stats: ## Mostra estatisticas do painel CLI e sai
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main panel --stats

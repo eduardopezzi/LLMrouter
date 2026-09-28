@@ -89,7 +89,14 @@ llmrouter catalog-sync # inventaria modelos locais do Ollama e gera propostas
 make providers-sync # verifica docs/modelos oficiais e recalcula prioridades
 make providers-update # adiciona/retira modelos do catálogo ativo
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
+llmrouter tui # abre a interface interativa em tela cheia
 ```
+
+O `llmrouter tui` usa uma interface em abas inspirada no `precog-tui`: `1`–`4`
+alternam Overview, Routing, Models e Usage. Na aba `Models`, as setas
+selecionam o modelo; `q`/`k` sobem, `a`/`j` descem, `e` alterna
+`enabled`/`disabled`, `s` salva e `r` recarrega. `Ctrl+Q` sai e `?` mostra a
+ajuda.
 
 O painel informa a cobertura total e quantos modelos participaram de cada
 benchmark. Quando existe apenas um candidato, o resultado aparece como

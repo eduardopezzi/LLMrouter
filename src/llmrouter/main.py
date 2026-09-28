@@ -180,6 +180,11 @@ def _parse_args() -> argparse.Namespace:
         help="Open the routing configuration and statistics CLI panel.",
     )
     panel_parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Open the full-screen Textual interface instead of the line CLI.",
+    )
+    panel_parser.add_argument(
         "--models-file",
         type=str,
         default=None,
@@ -242,6 +247,23 @@ def _parse_args() -> argparse.Namespace:
         metavar=("MODEL", "PCT"),
         default=None,
         help="Set rollout percentage for a model (0-100), e.g. glm-5.2 25.",
+    )
+
+    tui_parser = subparsers.add_parser(
+        "tui",
+        help="Open the full-screen interactive Textual operator console.",
+    )
+    tui_parser.add_argument(
+        "--models-file",
+        type=str,
+        default=None,
+        help="Model catalog path (default: from config).",
+    )
+    tui_parser.add_argument(
+        "--env-file",
+        type=str,
+        default=".env",
+        help="Environment file updated by configuration actions.",
     )
 
     health_parser = subparsers.add_parser(
@@ -431,6 +453,24 @@ def main() -> None:
         print(format_contract_changes(result))
         if args.command == "check-contracts" and not result.is_compatible:
             sys.exit(1)
+        return
+
+    if args.command == "tui" or (args.command == "panel" and args.tui):
+        try:
+            from llmrouter.tui import run_tui
+        except ModuleNotFoundError as exc:
+            if exc.name == "textual":
+                print(
+                    "The Textual TUI is not installed. "
+                    "Install it with: pip install textual"
+                )
+                return
+            raise
+        run_tui(
+            settings,
+            models_file=args.models_file,
+            env_file=args.env_file,
+        )
         return
 
     if args.command == "publish-contracts":
