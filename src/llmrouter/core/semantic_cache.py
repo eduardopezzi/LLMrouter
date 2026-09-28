@@ -124,6 +124,68 @@ def _prompt_hash(prompt: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+_TERMINAL_FINISH_REASONS: frozenset[str] = frozenset({"stop", "length", "tool_calls"})
+
+
+def _stream_has_terminal_chunk(chunks: list[dict[str, Any]]) -> bool:
+    """Return True iff at least one chunk carries a terminal ``finish_reason``.
+
+    PRD §4.3 (E2, S1): a stream is only persisted when it ends cleanly —
+    i.e. the provider emitted a final chunk with ``choices[0].finish_reason``
+    in ``{stop, length, tool_calls}``.  Missing terminal chunk = provider cut
+    before ``[DONE]``; we never persist those (defensive: the route layer
+    is supposed to skip storage for abnormal terminations).
+    """
+    if not chunks:
+        return False
+    for chunk in chunks:
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        first = choices[0]
+        if not isinstance(first, dict):
+            continue
+        reason = first.get("finish_reason")
+        if isinstance(reason, str) and reason in _TERMINAL_FINISH_REASONS:
+            return True
+    return False
+
+
+def _first_k_tokens(chunks: list[dict[str, Any]], *, k: int) -> str:
+    """Concatenate ``choices[0].delta.content`` deltas until ``k`` tokens.
+
+    Token count is approximated by whitespace-split tokens; this is the same
+    heuristic the live path uses for `stream_tokens_saved_total`.  We cap at
+    the first ``k`` tokens of content (PRD §2.2) — subsequent tokens are
+    irrelevant for the probe comparison.
+    """
+    buffer: list[str] = []
+    collected = 0
+    for chunk in chunks:
+        if collected >= k:
+            break
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        first = choices[0]
+        if not isinstance(first, dict):
+            continue
+        delta = first.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        # Split current content on whitespace; emit as many tokens as fit.
+        tokens = content.split()
+        for token in tokens:
+            if collected >= k:
+                break
+            buffer.append(token)
+            collected += 1
+    return " ".join(buffer)
+
+
 def _restrictions_key(
     prompt_hash: str,
     model: str,
@@ -172,6 +234,11 @@ class SemanticCache:
         ttl_seconds: float = _DEFAULT_TTL_SECONDS,
         hit_log_enabled: bool = False,
         hit_log_retention_days: int = 45,
+        stream_cache_enabled: bool = True,
+        stream_probe_k: int = 8,
+        stream_probe_timeout_seconds: float = 10.0,
+        stream_probe_soft_circuit_threshold: int = 3,
+        stream_probe_soft_circuit_seconds: float = 3600.0,
     ) -> None:
         self._db_path = Path(db_path)
         self._embedder = embedder
@@ -179,15 +246,72 @@ class SemanticCache:
         self._ttl_seconds = ttl_seconds
         self._hit_log_enabled = hit_log_enabled
         self._hit_log_retention_days = max(0, int(hit_log_retention_days))
+        self._stream_cache_enabled = bool(stream_cache_enabled)
+        self._stream_probe_k = max(1, int(stream_probe_k))
+        self._stream_probe_timeout_seconds = float(stream_probe_timeout_seconds)
+        self._stream_probe_soft_circuit_threshold = max(1, int(stream_probe_soft_circuit_threshold))
+        self._stream_probe_soft_circuit_seconds = float(stream_probe_soft_circuit_seconds)
         self._lock = asyncio.Lock()
         self._semantic_hits = 0
         self._semantic_misses = 0
         self._semantic_unavailable = 0
+        # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay counters.
+        # This module (Dev E2-A) only writes the four "storage" counters;
+        # the probe/replay counters (stream_probes_ok_total, etc.) are
+        # populated by the route-layer code in Dev E2-B's work and exposed
+        # here with a zero default so ``stream_stats()`` always returns a
+        # stable shape.
+        self._stream_counters: dict[str, int] = {
+            "stream_stored_total": 0,
+            "stream_purged_total": 0,
+            "stream_lookup_hit_total": 0,
+            "stream_lookup_miss_total": 0,
+            "stream_replays_total": 0,
+            "stream_probes_ok_total": 0,
+            "stream_probes_fail_total": 0,
+            "stream_tokens_saved_total": 0,
+            "stream_replay_bytes_served_total": 0,
+            "stream_replay_error_total": 0,
+        }
 
     @property
     def threshold(self) -> float:
         """Minimum cosine similarity required for a semantic hit."""
         return self._threshold
+
+    @property
+    def stream_cache_enabled(self) -> bool:
+        """Master toggle for the streaming replay path (ROADMAP E2)."""
+        return self._stream_cache_enabled
+
+    @property
+    def stream_probe_k(self) -> int:
+        """Number of output tokens to request for the k-token probe."""
+        return self._stream_probe_k
+
+    @property
+    def stream_probe_timeout_seconds(self) -> float:
+        """Per-request timeout for the k-token probe, in seconds."""
+        return self._stream_probe_timeout_seconds
+
+    @property
+    def stream_probe_soft_circuit_threshold(self) -> int:
+        """Consecutive probe failures that trip the per-model soft-circuit."""
+        return self._stream_probe_soft_circuit_threshold
+
+    @property
+    def stream_probe_soft_circuit_seconds(self) -> float:
+        """How long the per-model probe soft-circuit stays open, in seconds."""
+        return self._stream_probe_soft_circuit_seconds
+
+    def bump_stream_counter(self, name: str, by: int = 1) -> None:
+        """Increment a stream_* counter (route layer writes replay/probe).
+
+        Unknown counter names are silently ignored — the storage layer is
+        not the source of truth for the probe/replay counters.
+        """
+        if name in self._stream_counters:
+            self._stream_counters[name] += by
 
     # ------------------------------------------------------------------
     # Embedding helper
@@ -428,6 +552,12 @@ class SemanticCache:
         try:
             await self._ensure_table()
             await asyncio.to_thread(self.purge_expired_hit_log)
+            # ROADMAP_TOKEN_OPTIMIZATION E2 (S1, Dev E2-A) — purge the
+            # streaming table at the same hook.  Best-effort: a failure
+            # here is logged by ``purge_expired_stream_responses`` and
+            # does NOT short-circuit verify_pending (the hit-log sweep
+            # already ran above).
+            await asyncio.to_thread(self.purge_expired_stream_responses)
             rows = await asyncio.to_thread(self._fetch_pending_rows, sample_size)
         except Exception as exc:
             _logger.warning("P-CHR verify: could not read pending rows: %s", exc)
@@ -685,6 +815,399 @@ class SemanticCache:
             conn.commit()
             return int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
 
+    # ------------------------------------------------------------------
+    # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay (S1, Dev E2-A)
+    # ------------------------------------------------------------------
+    #
+    # Public surface (storage-only; probe/replay instrumentation is owned
+    # by Dev E2-B):
+    #
+    #   * store_stream_response(chunks, *, prompt, usage, model, tier,
+    #                            temperature, top_p, max_tokens,
+    #                            k=8, ttl_seconds=None) -> bool
+    #       Persist a finished SSE stream's chunks + final usage to
+    #       ``semantic_stream_responses``.  Best-effort: any failure
+    #       (embedder down, DB error, missing final chunk) returns False
+    #       and never raises.  Counters via ``stream_stats()``.
+    #
+    #   * lookup_stream_response(prompt, *, model, tier, temperature,
+    #                             top_p, max_tokens)
+    #                            -> (chunks, completion_tokens, first_k) | None
+    #       Embed-and-lookup against the streaming table.  Same threshold
+    #       and restriction tuple semantics as the non-stream path; returns
+    #       the matching ``(chunks, completion_tokens, first_k)`` triple or
+    #       ``None``.  Increments ``stream_lookup_hit_total`` /
+    #       ``stream_lookup_miss_total``.
+    #
+    #   * purge_expired_stream_responses() -> int
+    #       Remove rows with ``expires_at < now`` (same TTL semantics as the
+    #       non-stream cache).  Idempotent.  Returns the # removed and
+    #       bumps ``stream_purged_total``.
+    #
+    #   * stream_stats() -> dict[str, int]
+    #       Snapshot of the in-memory counters.  ``stream_probes_*`` /
+    #       ``stream_replays_*`` / ``stream_tokens_saved_total`` /
+    #       ``stream_replay_bytes_served_total`` / ``stream_replay_error_total``
+    #       are managed by Dev E2-B's route-layer code; this module
+    #       exposes them with a stable zero default so the contract shape
+    #       never changes once both halves land.
+
+    async def store_stream_response(
+        self,
+        chunks: list[dict[str, Any]],
+        *,
+        prompt: str,
+        usage: Usage,
+        model: str,
+        tier: int,
+        temperature: float,
+        top_p: float,
+        max_tokens: int | None,
+        k: int = 8,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """Persist a finished SSE stream's chunks + final usage.
+
+        Best-effort: never raises.  Returns ``False`` when:
+
+        - the embedder is unavailable or fails (``semantic_unavailable`` ++);
+        - the input chunks lack a terminal ``finish_reason`` (PRD §4.3:
+          provider cut before ``[DONE]`` is never persisted);
+        - the SQLite write fails (logged at WARNING).
+
+        On success returns ``True`` and bumps ``stream_stored_total``.
+        """
+        if not _stream_has_terminal_chunk(chunks):
+            _logger.info(
+                "Stream cache store skipped: no terminal finish_reason (provider cut?)"
+            )
+            return False
+        embedding = await self._embed(prompt)
+        if embedding is None:
+            return False
+        first_k = _first_k_tokens(chunks, k=k)
+        usage_payload = {
+            "prompt_tokens": int(usage.prompt_tokens),
+            "completion_tokens": int(usage.completion_tokens),
+            "total_tokens": int(usage.total_tokens),
+        }
+        ttl = self._ttl_seconds if ttl_seconds is None else float(ttl_seconds)
+        now = time.time()
+        expires_at = now + ttl
+        prompt_hash = _prompt_hash(prompt)
+        max_tokens_value = int(max_tokens) if max_tokens is not None else None
+        embedding_blob = json.dumps(embedding).encode("utf-8")
+        try:
+            await self._store_stream_locked(
+                prompt_hash=prompt_hash,
+                embedding_blob=embedding_blob,
+                prompt_text=prompt,
+                model=model,
+                tier=int(tier),
+                temperature=float(temperature),
+                top_p=float(top_p),
+                max_tokens=max_tokens_value,
+                chunks_json=json.dumps(list(chunks)),
+                first_k_tokens=first_k,
+                usage_json=json.dumps(usage_payload),
+                created_at=now,
+                expires_at=expires_at,
+            )
+            self._stream_counters["stream_stored_total"] += 1
+            return True
+        except Exception as exc:
+            _logger.warning("Semantic stream cache store failed (skipped): %s", exc)
+            return False
+
+    async def lookup_stream_response(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        tier: int,
+        temperature: float,
+        top_p: float,
+        max_tokens: int | None,
+    ) -> tuple[list[dict[str, Any]], int, str] | None:
+        """Return ``(chunks, completion_tokens, first_k)`` for a similar prompt.
+
+        Embeds the prompt and scans the streaming table for the best
+        matching candidate (same restriction tuple as the non-stream path,
+        threshold applied).  ``None`` means no semantic hit (counter
+        ``stream_lookup_miss_total`` bumped); on hit, ``stream_lookup_hit_total``
+        advances and the triple is returned for replay.
+        """
+        embedding = await self._embed(prompt)
+        if embedding is None:
+            return None
+        try:
+            return await self._lookup_stream_locked(
+                embedding,
+                model=model,
+                tier=tier,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            _logger.warning(
+                "Semantic stream cache lookup failed (treated as miss): %s", exc
+            )
+            self._stream_counters["stream_lookup_miss_total"] += 1
+            return None
+
+    def purge_expired_stream_responses(self) -> int:
+        """Remove rows with ``expires_at < now``; returns the # removed.
+
+        Best-effort by design: the caller (``verify_pending``) already
+        guards the wider block.  ``stream_purged_total`` is bumped by the
+        number actually deleted.
+        """
+        now = time.time()
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "DELETE FROM semantic_stream_responses WHERE expires_at < ?",
+                    (now,),
+                )
+                conn.commit()
+                removed = int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
+        except Exception as exc:
+            _logger.warning(
+                "Semantic stream cache purge failed (skipped): %s", exc
+            )
+            return 0
+        if removed:
+            self._stream_counters["stream_purged_total"] += removed
+        return removed
+
+    def stream_stats(self) -> dict[str, int]:
+        """Snapshot of the in-memory streaming cache counters.
+
+        Counter ownership:
+
+        - ``stream_stored_total`` / ``stream_purged_total`` /
+          ``stream_lookup_hit_total`` / ``stream_lookup_miss_total`` are
+          maintained here (Dev E2-A — storage).
+        - ``stream_replays_total`` / ``stream_probes_ok_total`` /
+          ``stream_probes_fail_total`` / ``stream_tokens_saved_total`` /
+          ``stream_replay_bytes_served_total`` / ``stream_replay_error_total``
+          are bumped by Dev E2-B's route-layer code; this view returns
+          whatever was last set, defaulting to zero so the snapshot shape
+          is stable from day one.
+        """
+        return dict(self._stream_counters)
+
+    async def _store_stream_locked(
+        self,
+        *,
+        prompt_hash: str,
+        embedding_blob: bytes,
+        prompt_text: str,
+        model: str,
+        tier: int,
+        temperature: float,
+        top_p: float,
+        max_tokens: int | None,
+        chunks_json: str,
+        first_k_tokens: str,
+        usage_json: str,
+        created_at: float,
+        expires_at: float,
+    ) -> None:
+        """Insert one streaming response (synchronous SQLite write)."""
+        await self._ensure_table()
+        async with self._lock:
+            await asyncio.to_thread(
+                self._insert_stream_row,
+                prompt_hash,
+                embedding_blob,
+                prompt_text,
+                model,
+                tier,
+                temperature,
+                top_p,
+                max_tokens,
+                chunks_json,
+                first_k_tokens,
+                usage_json,
+                created_at,
+                expires_at,
+            )
+
+    def _insert_stream_row(
+        self,
+        prompt_hash: str,
+        embedding_blob: bytes,
+        prompt_text: str,
+        model: str,
+        tier: int,
+        temperature: float,
+        top_p: float,
+        max_tokens: int | None,
+        chunks_json: str,
+        first_k_tokens: str,
+        usage_json: str,
+        created_at: float,
+        expires_at: float,
+    ) -> None:
+        """Worker-thread INSERT (UNIQUE key collapses duplicates)."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO semantic_stream_responses
+                    (prompt_hash, embedding, prompt_text, model, tier,
+                     temperature, top_p, max_tokens, response_chunks_json,
+                     first_k_tokens, usage_json, created_at, expires_at,
+                     purge_pending)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    prompt_hash,
+                    embedding_blob,
+                    prompt_text,
+                    model,
+                    tier,
+                    temperature,
+                    top_p,
+                    max_tokens,
+                    chunks_json,
+                    first_k_tokens,
+                    usage_json,
+                    created_at,
+                    expires_at,
+                ),
+            )
+            conn.commit()
+
+    async def _lookup_stream_locked(
+        self,
+        embedding: list[float],
+        *,
+        model: str,
+        tier: int,
+        temperature: float,
+        top_p: float,
+        max_tokens: int | None,
+    ) -> tuple[list[dict[str, Any]], int, str] | None:
+        """Best-candidate lookup against ``semantic_stream_responses``."""
+        await self._ensure_table()
+        async with self._lock:
+            rows = await asyncio.to_thread(
+                self._fetch_stream_candidates,
+                model=model,
+                tier=tier,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+        best_similarity = -1.0
+        best_chunks: list[dict[str, Any]] | None = None
+        best_completion_tokens = 0
+        best_first_k = ""
+        for embedding_blob, chunks_json, usage_json in rows:
+            try:
+                candidate = [
+                    float(value) for value in json.loads(embedding_blob.decode("utf-8"))
+                ]
+                chunks = json.loads(chunks_json)
+                usage = json.loads(usage_json)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(chunks, list) or not isinstance(usage, dict):
+                continue
+            similarity = _cosine_similarity(embedding, candidate)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_chunks = chunks
+                best_completion_tokens = int(usage.get("completion_tokens", 0))
+                best_first_k = ""
+        if (
+            best_chunks is None
+            or best_similarity < self._threshold
+        ):
+            self._stream_counters["stream_lookup_miss_total"] += 1
+            return None
+        # Re-resolve first_k from the winning candidate's chunks JSON so the
+        # value matches what was stored (the column layout stores it
+        # alongside usage_json — fetch once more, in this scope, only for
+        # the winner).
+        await self._ensure_table()
+        with self._connect() as conn:
+            winning_row = conn.execute(
+                """
+                SELECT response_chunks_json, first_k_tokens
+                FROM semantic_stream_responses
+                WHERE model = ? AND tier = ? AND temperature = ?
+                  AND top_p = ? AND max_tokens IS ?
+                  AND expires_at > ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    model,
+                    int(tier),
+                    float(temperature),
+                    float(top_p),
+                    max_tokens,
+                    time.time(),
+                ),
+            ).fetchone()
+        if winning_row is None:
+            self._stream_counters["stream_lookup_miss_total"] += 1
+            return None
+        try:
+            chunks = json.loads(str(winning_row[0]))
+            best_first_k = str(winning_row[1])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self._stream_counters["stream_lookup_miss_total"] += 1
+            return None
+        self._stream_counters["stream_lookup_hit_total"] += 1
+        return (chunks, best_completion_tokens, best_first_k)
+
+    def _fetch_stream_candidates(
+        self,
+        *,
+        model: str,
+        tier: int,
+        temperature: float,
+        top_p: float,
+        max_tokens: int | None,
+    ) -> list[tuple[bytes, str, str]]:
+        """Return (embedding_blob, chunks_json, usage_json) for matching rows."""
+        now = time.time()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT embedding, response_chunks_json, usage_json
+                FROM semantic_stream_responses
+                WHERE model = ? AND tier = ? AND temperature = ?
+                  AND top_p = ? AND max_tokens IS ?
+                  AND expires_at > ?
+                """,
+                (
+                    model,
+                    int(tier),
+                    float(temperature),
+                    float(top_p),
+                    max_tokens,
+                    now,
+                ),
+            )
+            rows = cur.fetchall()
+            # Opportunistic TTL purge of the streaming table; piggy-backs
+            # on the same hook as the hit-log retention purge (called from
+            # ``verify_pending`` for the canonical sweep).
+            conn.execute(
+                "DELETE FROM semantic_stream_responses WHERE expires_at <= ?",
+                (now,),
+            )
+            conn.commit()
+        return [
+            (bytes(row[0]), str(row[1]), str(row[2])) for row in rows
+        ]
+
     def _fetch_pending_rows(
         self, sample_size: int
     ) -> list[tuple[int, str | None, str | None, float]]:
@@ -811,6 +1334,39 @@ class SemanticCache:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pchr_bucket "
                 "ON semantic_cache_hit_log (threshold, similarity)"
+            )
+            # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay (S1,
+            # Dev E2-A).  Sister table to ``semantic_cache_entries``; the
+            # non-stream cache is never altered.  See PRD §4.3 + TL §2.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS semantic_stream_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prompt_hash TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    prompt_text TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    tier INTEGER NOT NULL,
+                    temperature REAL NOT NULL,
+                    top_p REAL NOT NULL,
+                    max_tokens INTEGER,
+                    response_chunks_json TEXT NOT NULL,
+                    first_k_tokens TEXT NOT NULL,
+                    usage_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    purge_pending INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(prompt_hash, model, tier, temperature, top_p, max_tokens)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_stream_lookup "
+                "ON semantic_stream_responses(expires_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_stream_purge "
+                "ON semantic_stream_responses(purge_pending)"
             )
             conn.commit()
 

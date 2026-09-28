@@ -150,6 +150,92 @@ class OpenAICompatibleProvider(BaseProvider):
                 provider=self._name,
             ) from exc
 
+    async def first_tokens(
+        self,
+        request: ChatRequest,
+        model: str,
+        k: int,
+    ) -> str:
+        """Probe the provider for the first ``k`` tokens of a response.
+
+        Non-streaming POST with ``max_tokens=k``; returns
+        ``choices[0].message.content`` (text only).  Used by the
+        semantic-cache replay path (E2) to verify a cached stream
+        candidate still matches the live provider.  Network/timeout
+        failures surface as :class:`RetryableProviderError`; HTTP errors
+        as :class:`ProviderError`.
+
+        The probe runs with ``stream=False`` and forces ``max_tokens=k``
+        regardless of the caller's ``request.max_tokens`` value, so the
+        prefix returned is deterministic and small enough to compare
+        against the cached ``first_k_tokens``.
+        """
+        # Build a payload that mirrors chat_completion but caps output at k.
+        # The original request's max_tokens (if set) is overridden; this
+        # is by design — the probe is a tiny diagnostic call, never a full
+        # completion.
+        probe_request = ChatRequest(
+            model=request.model,
+            messages=request.messages,
+            stream=False,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=k,
+            stop=request.stop,
+            extra=request.extra,
+        )
+        payload = self._build_payload(probe_request, model, stream=False)
+        # Force ``max_tokens=k`` even if the caller passed a higher value.
+        payload["max_tokens"] = k
+        url = f"{self._base_url}/chat/completions"
+        _logger.debug(
+            "%s → POST (probe) %s | model=%s k=%d",
+            self._name,
+            url,
+            model,
+            k,
+        )
+        try:
+            response = await self.client.post(
+                url,
+                json=payload,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+        except httpx.ConnectError as exc:
+            raise RetryableProviderError(
+                f"Could not connect to {self._name} at {self._base_url}: {exc}",
+                status_code=503,
+                provider=self._name,
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise RetryableProviderError(
+                f"Probe to {self._name} timed out after {self._timeout}s: {exc}",
+                status_code=504,
+                provider=self._name,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"{self._name} returned HTTP {exc.response.status_code}: {exc.response.text[:500]}",
+                status_code=exc.response.status_code,
+                provider=self._name,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RetryableProviderError(
+                f"Transport error probing {self._name}: {exc}",
+                status_code=502,
+                provider=self._name,
+            ) from exc
+        body = response.json()
+        choices = body.get("choices", []) if isinstance(body, dict) else []
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        message = choices[0].get("message", {})
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content", "")
+        return content if isinstance(content, str) else ""
+
     def _build_payload(
         self, request: ChatRequest, model: str, *, stream: bool
     ) -> dict[str, object]:

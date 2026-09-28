@@ -137,6 +137,18 @@
         "semantic_hits": "int",
         "semantic_misses": "int",
         "semantic_unavailable": "int",
+        "stream": {
+          "stream_lookup_hit_total": "int",
+          "stream_lookup_miss_total": "int",
+          "stream_purged_total": "int",
+          "stream_replay_bytes_served_total": "int",
+          "stream_replay_error_total": "int",
+          "stream_replays_total": "int",
+          "stream_stored_total": "int",
+          "stream_tokens_saved_total": "int",
+          "stream_probes_fail_total": "int",
+          "stream_probes_ok_total": "int"
+        },
         "tokens_saved": "int"
       }
     },

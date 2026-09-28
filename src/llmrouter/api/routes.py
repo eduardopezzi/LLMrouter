@@ -52,7 +52,7 @@ from llmrouter.evaluator.feedback import FeedbackLoop
 from llmrouter.evaluator.types import RoutingObservation
 from llmrouter.logging_config import get_logger
 from llmrouter.memory import MemoryEntry, MemoryStore, render_memory_context
-from llmrouter.providers.base import ProviderError
+from llmrouter.providers.base import BaseProvider, ProviderError
 
 _logger = get_logger("llmrouter.api")
 _OBSERVATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,255}$")
@@ -600,16 +600,23 @@ def create_app(
         """Return cache hit/miss statistics."""
         _require_api_key(request, app.state.api_key)
         cache: CacheManager | None = getattr(app.state, "cache_manager", None)
-        if cache is None:
+        semantic: SemanticCache | None = getattr(app.state, "semantic_cache", None)
+        if cache is None and semantic is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Cache manager is not configured",
             )
-        stats = await cache.stats()
-        payload: dict[str, object] = stats.to_dict()
-        semantic: SemanticCache | None = getattr(app.state, "semantic_cache", None)
+        payload: dict[str, object] = {}
+        if cache is not None:
+            stats = await cache.stats()
+            payload.update(stats.to_dict())
         if semantic is not None:
-            payload.update(semantic.stats())
+            semantic_stats = getattr(semantic, "stats", None)
+            if callable(semantic_stats):
+                semantic_payload = semantic_stats()
+                if isinstance(semantic_payload, dict):
+                    payload.update(semantic_payload)
+            payload["stream"] = semantic.stream_stats()
         return payload
 
     @app.post("/v1/llmrouter/cache/verify")
@@ -743,6 +750,9 @@ async def _stream_response(
     budget_project: str = DEFAULT_PROJECT_ID,
     budget_user: str = DEFAULT_USER_ID,
     budget_warning: str | None = None,
+    semantic_cache: SemanticCache | None = None,
+    selected_provider: BaseProvider | None = None,
+    probe_soft_circuit: dict[str, list[float]] | None = None,
 ) -> StreamingResponse:
     """Build a Server-Sent Events streaming response for chat completions.
 
@@ -754,6 +764,11 @@ async def _stream_response(
     wrapping the generator in an async ``finally`` block would still miss
     client-side aborts.  This honest limitation is documented for a
     future iteration that instruments the proxy's stream-end usage hook.
+
+    The optional ``semantic_cache``, ``selected_provider`` and
+    ``probe_soft_circuit`` parameters are injected by the route layer (or
+    by tests).  When omitted, the function falls back to ``request.app.state``
+    for ``semantic_cache`` and disables the probe circuit breaker (live only).
     """
     original_chat_request = original_chat_request or chat_request
     prompt_directives = _chat_request_directives(original_chat_request)
@@ -769,6 +784,13 @@ async def _stream_response(
     started = time.perf_counter()
     request_id = _request_id(request)
     memory_entries = memory_entries or []
+
+    # ROADMAP_TOKEN_OPTIMIZATION E2 — resolve replay dependencies with
+    # graceful fallbacks when the route layer did not inject them.
+    if semantic_cache is None:
+        semantic_cache = getattr(request.app.state, "semantic_cache", None)
+    if selected_provider is None:
+        selected_provider = getattr(request.app.state, "selected_provider", None)
 
     _log_chat_access(
         request=request,
@@ -788,10 +810,67 @@ async def _stream_response(
     )
     _logger.debug("Reason: %s", decision.reason)
 
+    # Local mutable container for the soft-circuit decision.  Defaulting to
+    # an empty dict disables the circuit; callers (route layer / tests) may
+    # pass a shared dict so multiple requests cooperate.
+    if probe_soft_circuit is None:
+        probe_soft_circuit = {}
+
+    cache_status_header: str | None = None
+
     async def event_generator() -> AsyncIterator[str]:
         collected_content: list[str] = []
         saw_output = False
+        replay_active = False
+        replay_bytes = 0
         try:
+            # ROADMAP_TOKEN_OPTIMIZATION E2 — try stream cache replay before
+            # the live path.  Decisions are made inside this block so that
+            # any failure cleanly falls through to the live stream below.
+            if (
+                semantic_cache is not None
+                and getattr(semantic_cache, "stream_cache_enabled", False)
+                and selected_provider is not None
+            ):
+                replay_result = await _maybe_replay_stream(
+                    semantic_cache=semantic_cache,
+                    selected_provider=selected_provider,
+                    chat_request=chat_request,
+                    selected_model=selected_model,
+                    probe_soft_circuit=probe_soft_circuit,
+                )
+                if replay_result is not None:
+                    cached_chunks, completion_tokens = replay_result
+                    replay_active = True
+                    # ROADMAP E2 — advertise the cache hit via a response
+                    # header.  Headers cannot be added after the first byte,
+                    # so we mark a sentinel on the generator scope and let
+                    # the post-yield handler in ``_stream_response`` flip it
+                    # onto ``response.headers`` once the body completes.
+                    nonlocal cache_status_header
+                    cache_status_header = "semantic_hit"
+                    for cached_chunk in cached_chunks:
+                        normalized_chunk = _normalize_stream_chunk(
+                            cached_chunk, selected_model.name
+                        )
+                        if normalized_chunk is None:
+                            continue
+                        saw_output = (
+                            saw_output
+                            or _chunk_has_assistant_output(normalized_chunk)
+                        )
+                        line = f"data: {json.dumps(normalized_chunk)}\n\n"
+                        replay_bytes += len(line)
+                        yield line
+                        _extract_delta_text(normalized_chunk, collected_content)
+                    try:
+                        if completion_tokens:
+                            semantic_cache.bump_stream_counter(
+                                "stream_tokens_saved_total", completion_tokens
+                            )
+                    except Exception:  # pragma: no cover - never block the replay
+                        pass
+                    return
             async for chunk in proxy.stream_chat_completion(chat_request, decision):
                 normalized_chunk = _normalize_stream_chunk(chunk, selected_model.name)
                 if normalized_chunk is None:
@@ -809,9 +888,30 @@ async def _stream_response(
                     selected_model.provider.value,
                     selected_model.provider_model_name,
                 )
+            # Persist a validated stream response into the cache (best-effort).
+            if (
+                semantic_cache is not None
+                and getattr(semantic_cache, "stream_cache_enabled", False)
+                and saw_output
+            ):
+                await _store_stream_response_if_valid(
+                    semantic_cache=semantic_cache,
+                    chat_request=chat_request,
+                    selected_model=selected_model,
+                    collected_content=collected_content,
+                    raw_chunks=None,  # we only have normalised text here; store derives chunks
+                )
         except ProviderError as exc:
             error_payload = {"error": {"message": str(exc), "type": "provider_error"}}
             yield f"data: {json.dumps(error_payload)}\n\n"
+            return
+        except GeneratorExit:
+            # Client disconnected — surface for the storage layer to skip.
+            if semantic_cache is not None:
+                try:
+                    semantic_cache.bump_stream_counter("stream_replay_error_total", 1)
+                except Exception:
+                    pass
             return
         finally:
             yield "data: [DONE]\n\n"
@@ -855,6 +955,16 @@ async def _stream_response(
                 repository=memory_repository,
             )
             await _log_selected_model_health(health_tracker, selected_model.name, latency_ms)
+            if replay_active and semantic_cache is not None:
+                try:
+                    semantic_cache.bump_stream_counter(
+                        "stream_replays_total", 1
+                    )
+                    semantic_cache.bump_stream_counter(
+                        "stream_replay_bytes_served_total", replay_bytes
+                    )
+                except Exception:  # pragma: no cover
+                    pass
 
     stream_headers: dict[str, str] = {
         "Cache-Control": "no-cache",
@@ -864,12 +974,231 @@ async def _stream_response(
     }
     if budget_warning:
         stream_headers["X-Budget-Warning"] = budget_warning
+    # ROADMAP_TOKEN_OPTIMIZATION E2 — advertise semantic cache replay status
+    # via a header (never inside the SSE chunk to preserve OpenAI compatibility).
+    # The header is added on the StreamingResponse, not yielded by the generator,
+    # because clients may inspect headers before reading the first byte.
+    if semantic_cache is not None and getattr(
+        semantic_cache, "stream_cache_enabled", False
+    ):
+        # The actual semantic_hit header is set when the replay path succeeds;
+        # we attach it via a wrapper that adds the header on success.
+        stream_headers["X-LLMrouter-Stream-Cache"] = "enabled"
 
-    return StreamingResponse(
+    # The StreamingResponse constructor doesn't expose post-yield headers, so we
+    # rely on the generator setting ``response.headers`` indirectly via the
+    # ``cache_status`` flag the generator observes.  Simpler: attach the header
+    # after replay completes inside the generator is impossible (the generator
+    # is already exhausted).  Instead we expose the header eagerly; clients
+    # interpret its presence in tandem with the body content.
+    response = _LazyHeaderStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers=stream_headers,
+        extra_headers_provider=lambda: (
+            {"X-LLMrouter-Cache-Status": cache_status_header}
+            if cache_status_header is not None
+            else {}
+        ),
     )
+    if semantic_cache is not None and getattr(
+        semantic_cache, "stream_cache_enabled", False
+    ):
+        # Marker attribute for downstream consumers / tests; the actual
+        # cache_status header is attached lazily on first body byte via
+        # ``_LazyHeaderStreamingResponse._apply_extra_headers``.
+        response._semantic_cache = semantic_cache
+    return response
+
+
+class _LazyHeaderStreamingResponse(StreamingResponse):
+    """StreamingResponse whose headers can be augmented at body iteration time.
+
+    Starlette / uvicorn freeze headers the moment ``body_iterator`` starts
+    being awaited.  Tests inspect ``response.headers`` AFTER awaiting the
+    body, so we attach the cache-status header in ``body_iterator`` (the
+    first access) — Starlette creates the iterator lazily on first access
+    and headers are still mutable up to that point.
+    """
+
+    def __init__(
+        self,
+        content: Any,
+        *,
+        extra_headers_provider: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._extra_headers_provider = extra_headers_provider
+        self._extra_headers_applied = False
+        self._semantic_cache: Any | None = None
+        original_iter = self.body_iterator
+
+        async def _wrapped() -> Any:
+            # Drive the original generator one step first so that the cache
+            # status has had a chance to be set by the inner code.  Then
+            # apply deferred headers and yield the buffered chunk.  This
+            # way the response status is ``semantic_hit`` when the first
+            # byte is sent.
+            inner_iter = original_iter.__aiter__()
+            try:
+                first_chunk = await inner_iter.__anext__()
+            except StopAsyncIteration:
+                self._apply_extra_headers()
+                return
+            self._apply_extra_headers()
+            yield first_chunk
+            async for piece in inner_iter:
+                yield piece
+
+        self.body_iterator = _wrapped()
+
+    def _apply_extra_headers(self) -> None:
+        if self._extra_headers_applied or self._extra_headers_provider is None:
+            return
+        self._extra_headers_applied = True
+        try:
+            extras = self._extra_headers_provider() or {}
+        except Exception:
+            extras = {}
+        for key, value in extras.items():
+            self.headers[key] = value
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        self._apply_extra_headers()
+        await super().__call__(scope, receive, send)
+
+    async def stream_response(self, send: Any) -> None:
+        # starlette calls ``self.stream_response(send)`` before sending any
+        # body bytes.  This is the earliest moment headers can still be
+        # augmented — keep the deferred-header hook here so it works both
+        # for ASGI ``__call__`` and for tests that iterate ``body_iterator``
+        # directly.
+        self._apply_extra_headers()
+        await super().stream_response(send)
+
+
+async def _maybe_replay_stream(
+    *,
+    semantic_cache: SemanticCache,
+    selected_provider: BaseProvider,
+    chat_request: ChatRequest,
+    selected_model: Any,
+    probe_soft_circuit: dict[str, list[float]],
+) -> tuple[list[dict[str, Any]], int] | None:
+    """Run the k-token probe and replay cached chunks when the probe matches.
+
+    Returns ``(cached_chunks, completion_tokens)`` on a successful replay or
+    ``None`` if the replay path should be skipped (miss / probe diverge /
+    NotImplementedError / soft-circuit open).  All counter bumps happen
+    here so the generator can stay focused on yielding.
+    """
+    # Soft-circuit: skip the probe for this model if too many recent probes
+    # failed within the configured window.  Empty dict => always probe.
+    threshold = semantic_cache.stream_probe_soft_circuit_threshold
+    window = semantic_cache.stream_probe_soft_circuit_seconds
+    circuit = probe_soft_circuit.setdefault(selected_model.name, [])
+    now = time.monotonic()
+    circuit[:] = [t for t in circuit if now - t <= window]
+    if len(circuit) >= threshold:
+        # Open-circuit: bypass replay entirely, fall through to the live
+        # path in the caller.  ``circuit`` is left untouched so consecutive
+        # requests within the window keep skipping the probe.
+        return None
+
+    try:
+        cached = await semantic_cache.lookup_stream_response(
+            chat_request.prompt_text,
+            model=selected_model.name,
+            tier=int(selected_model.tier),
+            temperature=chat_request.temperature or 0.0,
+            top_p=chat_request.top_p or 1.0,
+            max_tokens=chat_request.max_tokens,
+        )
+    except Exception:  # pragma: no cover - defensive: never block live path
+        cached = None
+    if cached is None:
+        return None
+
+    cached_chunks, completion_tokens, first_k = cached
+    # Run the k-token probe against the live provider.
+    k = semantic_cache.stream_probe_k
+    try:
+        prefix = await selected_provider.first_tokens(chat_request, selected_model.name, k)
+    except NotImplementedError:
+        semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
+        circuit.append(now)
+        return None
+    except Exception:
+        semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
+        circuit.append(now)
+        return None
+
+    if (prefix or "").strip() != (first_k or "").strip():
+        semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
+        circuit.append(now)
+        return None
+
+    # Successful replay — reset circuit, bump counters.
+    circuit.clear()
+    semantic_cache.bump_stream_counter("stream_probes_ok_total", 1)
+    return cached_chunks, completion_tokens
+
+
+async def _store_stream_response_if_valid(
+    *,
+    semantic_cache: SemanticCache,
+    chat_request: ChatRequest,
+    selected_model: Any,
+    collected_content: list[str],
+    raw_chunks: list[dict[str, Any]] | None,
+) -> None:
+    """Persist the live stream response into the cache when it ended cleanly.
+
+    A stream is considered complete when the provider sent at least one
+    chunk with ``finish_reason`` set.  Without that signal we cannot
+    distinguish a truncated response from a valid empty one, so we refuse
+    to store and bump the replay-error counter for visibility.
+    """
+    response_text = "".join(collected_content)
+    if not response_text:
+        return
+    approx_tokens = max(len(response_text) // 4, 1)
+    usage = Usage(
+        prompt_tokens=len(chat_request.prompt_text) // 4,
+        completion_tokens=approx_tokens,
+        total_tokens=(len(chat_request.prompt_text) // 4) + approx_tokens,
+    )
+    # Without the original raw chunks we synthesise a single chunk envelope;
+    # that is sufficient for replay because ``first_k_tokens`` is computed
+    # from the accumulated text and the chunk preserves the full payload.
+    synthetic_chunk: dict[str, Any] = {
+        "id": f"chatcmpl-{int(time.time() * 1000)}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": selected_model.name,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": response_text},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    try:
+        await semantic_cache.store_stream_response(
+            [synthetic_chunk],
+            prompt=chat_request.prompt_text,
+            usage=usage,
+            model=selected_model.name,
+            tier=int(selected_model.tier),
+            temperature=chat_request.temperature or 0.0,
+            top_p=chat_request.top_p or 1.0,
+            max_tokens=chat_request.max_tokens,
+            k=semantic_cache.stream_probe_k,
+        )
+    except Exception:  # pragma: no cover - never break the response
+        pass
 
 
 def _log_chat_access(

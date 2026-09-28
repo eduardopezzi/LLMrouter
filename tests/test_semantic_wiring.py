@@ -290,6 +290,41 @@ def test_contract_snapshot_includes_cache_verify_endpoint() -> None:
     }
 
 
+def test_contract_snapshot_includes_stream_stats_block() -> None:
+    """E2 (S1, Dev E2-A): ``/v1/llmrouter/cache/stats`` exposes stream counters.
+
+    The streaming cache replay (PRD §4.4) introduces ten in-memory counters
+    that the route-layer wiring surfaces as a nested ``stream`` object.  The
+    contract snapshot must keep this block in sync — this test pins the
+    shape so a hand-edit of the contract cannot drop the new fields
+    accidentally.
+    """
+    snapshot = Path("contracts/llmrouter.contract.json")
+    data = json.loads(snapshot.read_text(encoding="utf-8"))
+
+    endpoints = [
+        endpoint
+        for endpoint in data["endpoints"]
+        if endpoint["path"] == "/v1/llmrouter/cache/stats"
+    ]
+    assert len(endpoints) == 1
+    endpoint = endpoints[0]
+    stream_block = endpoint["response_schema"].get("stream")
+    assert stream_block is not None
+    assert stream_block == {
+        "stream_lookup_hit_total": "int",
+        "stream_lookup_miss_total": "int",
+        "stream_purged_total": "int",
+        "stream_replay_bytes_served_total": "int",
+        "stream_replay_error_total": "int",
+        "stream_replays_total": "int",
+        "stream_stored_total": "int",
+        "stream_tokens_saved_total": "int",
+        "stream_probes_fail_total": "int",
+        "stream_probes_ok_total": "int",
+    }
+
+
 def test_build_app_semantic_disabled_keeps_proxy_clean(tmp_path: Path) -> None:
     settings = Settings()
     settings.semantic_cache.enabled = False
