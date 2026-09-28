@@ -406,8 +406,10 @@ class SemanticCache:
         ``(verdict, score, note)``.  Each checked row is updated in place:
         verdict True -> ``verified=1``, False -> ``verified=-1``; a raising
         judge marks the row ``verified=2`` (verify_error) with the exception
-        name in ``verify_note``.  Rows with ``verified != 0`` are never
-        re-checked (idempotent).  Returns ``{checked, ok, mismatch, error,
+        name in ``verify_note``.  Rows with a final verdict (ok/mismatch) are
+        never re-checked; ``verify_error`` rows are re-selected on the next
+        run (orchestrator amendment — a judge outage must not burn the
+        sample permanently).  Returns ``{checked, ok, mismatch, error,
         buckets}`` where ``buckets`` groups results by similarity range.
         """
         buckets: dict[str, dict[str, int]] = {
@@ -664,17 +666,22 @@ class SemanticCache:
     def _fetch_pending_rows(
         self, sample_size: int
     ) -> list[tuple[int, str | None, str | None, float]]:
-        """Select up to ``sample_size`` most-recent pending rows for audit."""
+        """Select up to ``sample_size`` most-recent pending/erroneous rows for audit.
+
+        Per the orchestrator amendment, ``verify_error`` rows (verified=2) are
+        re-selected on the next run — only ok (1) and mismatch (-1) are final.
+        This prevents a judge outage from permanently burning the sample.
+        """
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT id, prompt_text, response_text, similarity
                 FROM semantic_cache_hit_log
-                WHERE verified = ?
+                WHERE verified IN (?, ?)
                 ORDER BY ts DESC, id DESC
                 LIMIT ?
                 """,
-                (_VERIFIED_PENDING, int(sample_size)),
+                (_VERIFIED_PENDING, _VERIFIED_ERROR, int(sample_size)),
             ).fetchall()
         return [
             (int(row[0]), row[1], row[2], float(row[3] if row[3] is not None else 0.0))
@@ -689,14 +696,20 @@ class SemanticCache:
         score: float | None,
         note: str | None,
     ) -> None:
-        """Persist one judge verdict onto a hit-log row (worker thread)."""
+        """Persist one judge verdict onto a hit-log row (worker thread).
+
+        The ``WHERE verified IN (?, ?)`` guard keeps the write idempotent
+        against rows that reached a final verdict concurrently, while still
+        allowing the orchestrator's verify_error (2) rows to be overwritten
+        by the retry.
+        """
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE semantic_cache_hit_log
                 SET verified = ?, verify_ts = ?, verify_method = ?,
                     verify_score = ?, verify_note = ?
-                WHERE id = ? AND verified = ?
+                WHERE id = ? AND verified IN (?, ?)
                 """,
                 (
                     verified,
@@ -706,6 +719,7 @@ class SemanticCache:
                     note,
                     row_id,
                     _VERIFIED_PENDING,
+                    _VERIFIED_ERROR,
                 ),
             )
             conn.commit()
