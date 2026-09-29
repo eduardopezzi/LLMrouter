@@ -895,7 +895,10 @@ class SemanticCache:
         now = time.time()
         expires_at = now + ttl
         prompt_hash = _prompt_hash(prompt)
-        max_tokens_value = int(max_tokens) if max_tokens is not None else None
+        # QA MEDIUM-8: SQLite treats NULLs as distinct in UNIQUE constraints,
+        # so an absent max_tokens would never collapse duplicate rows.  Use a
+        # sentinel of -1 in the UNIQUE key while storing NULL in the column.
+        max_tokens_key = int(max_tokens) if max_tokens is not None else -1
         embedding_blob = json.dumps(embedding).encode("utf-8")
         try:
             await self._store_stream_locked(
@@ -906,7 +909,7 @@ class SemanticCache:
                 tier=int(tier),
                 temperature=float(temperature),
                 top_p=float(top_p),
-                max_tokens=max_tokens_value,
+                max_tokens=max_tokens_key,
                 chunks_json=json.dumps(list(chunks)),
                 first_k_tokens=first_k,
                 usage_json=json.dumps(usage_payload),
@@ -1093,6 +1096,9 @@ class SemanticCache:
     ) -> tuple[list[dict[str, Any]], int, str] | None:
         """Best-candidate lookup against ``semantic_stream_responses``."""
         await self._ensure_table()
+        # QA MEDIUM-8: mirror the store-side sentinel so lookups match rows
+        # persisted with an absent max_tokens (-1 instead of NULL).
+        max_tokens_key = int(max_tokens) if max_tokens is not None else -1
         async with self._lock:
             rows = await asyncio.to_thread(
                 self._fetch_stream_candidates,
@@ -1100,13 +1106,14 @@ class SemanticCache:
                 tier=tier,
                 temperature=temperature,
                 top_p=top_p,
-                max_tokens=max_tokens,
+                max_tokens=max_tokens_key,
             )
         best_similarity = -1.0
         best_chunks: list[dict[str, Any]] | None = None
         best_completion_tokens = 0
         best_first_k = ""
-        for embedding_blob, chunks_json, usage_json in rows:
+        best_row_id = -1
+        for row_id, embedding_blob, chunks_json, usage_json in rows:
             try:
                 candidate = [
                     float(value) for value in json.loads(embedding_blob.decode("utf-8"))
@@ -1123,34 +1130,29 @@ class SemanticCache:
                 best_chunks = chunks
                 best_completion_tokens = int(usage.get("completion_tokens", 0))
                 best_first_k = ""
+                best_row_id = row_id
         if (
             best_chunks is None
             or best_similarity < self._threshold
+            or best_row_id < 0
         ):
             self._stream_counters["stream_lookup_miss_total"] += 1
             return None
-        # Re-resolve first_k from the winning candidate's chunks JSON so the
-        # value matches what was stored (the column layout stores it
-        # alongside usage_json — fetch once more, in this scope, only for
-        # the winner).
+        # Re-resolve first_k from the winning row **by id** so the value and
+        # the chunks provably belong to the same stored candidate (QA HIGH-3:
+        # an ``ORDER BY id DESC`` fallback could pair chunks of the newest
+        # row with usage of the similarity winner).
         await self._ensure_table()
         with self._connect() as conn:
             winning_row = conn.execute(
                 """
                 SELECT response_chunks_json, first_k_tokens
                 FROM semantic_stream_responses
-                WHERE model = ? AND tier = ? AND temperature = ?
-                  AND top_p = ? AND max_tokens IS ?
+                WHERE id = ?
                   AND expires_at > ?
-                ORDER BY id DESC
-                LIMIT 1
                 """,
                 (
-                    model,
-                    int(tier),
-                    float(temperature),
-                    float(top_p),
-                    max_tokens,
+                    best_row_id,
                     time.time(),
                 ),
             ).fetchone()
@@ -1174,16 +1176,16 @@ class SemanticCache:
         temperature: float,
         top_p: float,
         max_tokens: int | None,
-    ) -> list[tuple[bytes, str, str]]:
-        """Return (embedding_blob, chunks_json, usage_json) for matching rows."""
+    ) -> list[tuple[int, bytes, str, str]]:
+        """Return (id, embedding_blob, chunks_json, usage_json) for matching rows."""
         now = time.time()
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                SELECT embedding, response_chunks_json, usage_json
+                SELECT id, embedding, response_chunks_json, usage_json
                 FROM semantic_stream_responses
                 WHERE model = ? AND tier = ? AND temperature = ?
-                  AND top_p = ? AND max_tokens IS ?
+                  AND top_p = ? AND max_tokens = ?
                   AND expires_at > ?
                 """,
                 (
@@ -1205,7 +1207,7 @@ class SemanticCache:
             )
             conn.commit()
         return [
-            (bytes(row[0]), str(row[1]), str(row[2])) for row in rows
+            (int(row[0]), bytes(row[1]), str(row[2]), str(row[3])) for row in rows
         ]
 
     def _fetch_pending_rows(
