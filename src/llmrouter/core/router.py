@@ -22,8 +22,9 @@ from llmrouter.config import RolloutConfig
 from llmrouter.core.benchmark_scorer import score_model
 from llmrouter.core.cooldown import ProviderCooldownStore
 from llmrouter.core.health import ModelHealthTracker
+from llmrouter.core.peak_pricing import PeakPricingPriorityPolicy
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.scorer import ScoringResult
+from llmrouter.core.scorer import PromptScorer, ScoringResult
 from llmrouter.core.types import (
     ChatRequest,
     ModelInfo,
@@ -36,6 +37,7 @@ from llmrouter.core.types import (
 from llmrouter.logging_config import get_logger
 
 _logger = get_logger("llmrouter.router")
+_SCORING_TIMEOUT_ERRORS = tuple({TimeoutError, asyncio.TimeoutError})
 
 # Per-process counters for routing metrics
 _RoutingMetrics: dict[str, int] = {
@@ -50,6 +52,10 @@ _RoutingMetrics: dict[str, int] = {
 _RoutingMetrics_lock: asyncio.Lock | None = None
 _last_metrics_log: float = 0.0
 _METRICS_LOG_INTERVAL: float = 120.0  # seconds
+
+
+class NoModelsAvailableError(RuntimeError):
+    """Raised when no configured model is currently available for routing."""
 
 
 async def _log_routing_metrics() -> None:
@@ -333,6 +339,10 @@ class MultiModelRouter:
         client_provider_affinity: bool = True,
         dynamic_benchmark_routing: bool = True,
         intent_routing: bool = True,
+        peak_pricing_policy: PeakPricingPriorityPolicy | None = None,
+        routing_context_chars: int = 12_000,
+        scoring_timeout_ms: int = 750,
+        fallback_scorer: PromptScoringStrategy | None = None,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
@@ -347,12 +357,25 @@ class MultiModelRouter:
         self._client_provider_affinity = client_provider_affinity
         self._dynamic_benchmark_routing = dynamic_benchmark_routing
         self._intent_routing = intent_routing
+        self._peak_pricing_policy = peak_pricing_policy
+        if routing_context_chars <= 0:
+            raise ValueError("routing_context_chars must be positive")
+        self._routing_context_chars = routing_context_chars
+        if scoring_timeout_ms < 1:
+            raise ValueError("scoring_timeout_ms must be positive")
+        self._scoring_timeout_seconds = scoring_timeout_ms / 1000
+        self._fallback_scorer = fallback_scorer or PromptScorer()
         if health_tracker is not None:
             self._strategy.set_health_tracker(health_tracker)
 
     def set_rollout_config(self, config: RolloutConfig | None) -> None:
         """Inject canary/blue-green rollout configuration."""
         self._rollout_config = config
+
+    @property
+    def routing_strategy(self) -> RoutingStrategy:
+        """Return the strategy currently used to order eligible models."""
+        return self._routing_strategy
 
     def set_provider_cooldowns(self, cooldowns: ProviderCooldownStore | None) -> None:
         """Inject provider/model cooldown memory."""
@@ -397,6 +420,7 @@ class MultiModelRouter:
             primary = self._registry.get(request.model)
             assert primary is not None
             fallbacks = self._build_fallbacks(primary, constraints)
+            probe_models = self._claim_due_probe_models()
             _route_elapsed = (time.monotonic() - _route_start) * 1000
             _logger.debug(
                 "Explicit model selection: %s | fallbacks=%s (decision=%.1fms)",
@@ -412,11 +436,22 @@ class MultiModelRouter:
                 score=0.0,
                 tier=primary.tier,
                 reason=f"Explicit model selection: {request.model}",
+                probe_models=probe_models,
             )
 
         # Score the prompt
-        prompt_text = request.prompt_text
-        scoring = self._scorer.score(prompt_text)
+        prompt_text = request.routing_prompt_text(self._routing_context_chars)
+        try:
+            scoring = await asyncio.wait_for(
+                asyncio.to_thread(self._scorer.score, prompt_text),
+                timeout=self._scoring_timeout_seconds,
+            )
+        except _SCORING_TIMEOUT_ERRORS:
+            _logger.warning(
+                "Routing scorer timed out after %.0fms; using rule fallback",
+                self._scoring_timeout_seconds * 1000,
+            )
+            scoring = self._fallback_scorer.score(prompt_text)
 
         # Debug: log scoring details
         _logger.debug(
@@ -437,21 +472,39 @@ class MultiModelRouter:
         # Get candidate models for the recommended tier
         candidates = self._get_candidates(scoring.tier, constraints)
         candidates = self._augment_inferred_task_candidates(candidates, scoring, constraints)
+        available = self._available_models(self._registry.all())
+        candidates = self._augment_provider_family_candidates(
+            candidates,
+            available,
+            constraints,
+        )
 
         # Apply canary/blue-green rollout filter (pre-strategy eligibility)
         candidates = self._apply_rollout(candidates, request)
+        emergency_models = self._rollout_zero_models(available, constraints)
 
         if not candidates:
-            # Fallback: try any model available (safety net — bypasses rollout filter).
-            candidates = self._available_models(self._registry.all())
+            # Search the full catalog when the recommended tier has no
+            # available models, while still honoring each model's rollout.
+            candidates = self._apply_rollout(available, request)
             _logger.debug(
-                "No candidates after rollout filter in tier %s, using all %d models",
+                "No candidates after rollout filter in tier %s; checked %d available models",
                 scoring.tier.name,
-                len(candidates),
+                len(available),
             )
 
         if not candidates:
-            raise RuntimeError("No models available for routing")
+            if emergency_models:
+                candidates = emergency_models
+                _logger.warning(
+                    "No rollout-eligible models are available; using rollout=0 models "
+                    "as last-resort candidates: %s",
+                    [model.name for model in emergency_models],
+                )
+            else:
+                raise NoModelsAvailableError(
+                    "No models are currently available after provider and rollout filtering"
+                )
 
         # Debug: log candidates
         _logger.debug(
@@ -466,8 +519,35 @@ class MultiModelRouter:
         ordered = self._apply_dynamic_benchmark_ranking(ordered, scoring)
         ordered = self._apply_inferred_task_affinity(ordered, scoring)
         ordered = self._apply_client_provider_affinity(ordered, request, constraints)
+        ordered = self._apply_peak_pricing_priority(ordered)
+        ordered = self._apply_provider_family_preference(ordered)
         primary = ordered[0]
-        fallbacks = ordered[1 : 1 + self._fallback_count]
+        fallbacks = _provider_diverse_fallbacks(
+            primary,
+            ordered[1:],
+            self._fallback_count,
+        )
+
+        # Rollout 0% models stay out of normal selection, but remain available
+        # after every rollout-eligible fallback has failed. Keep this emergency
+        # chain bounded while guaranteeing one emergency slot when one exists.
+        if emergency_models and primary.rollout_percentage > 0.0:
+            emergency_ordered = _unique_models(
+                self._strategy.select(emergency_models, constraints)
+            )
+            emergency_ordered = self._apply_client_provider_affinity(
+                emergency_ordered,
+                request,
+                constraints,
+            )
+            emergency_ordered = self._apply_peak_pricing_priority(emergency_ordered)
+            emergency_ordered = self._apply_provider_family_preference(emergency_ordered)
+            emergency_fallbacks = _provider_diverse_fallbacks(
+                primary,
+                emergency_ordered,
+                max(1, self._fallback_count),
+            )
+            fallbacks = _unique_models([*fallbacks, *emergency_fallbacks])
 
         # Debug: log final selection
         _logger.debug(
@@ -508,9 +588,20 @@ class MultiModelRouter:
             fallbacks=fallbacks,
             score=scoring.score,
             tier=scoring.tier,
-            reason=self._build_reason(scoring, primary),
+            reason=(
+                f"Last-resort rollout=0 model selected; {self._build_reason(scoring, primary)}"
+                if primary.rollout_percentage <= 0.0
+                else self._build_reason(scoring, primary)
+            ),
             rollout_sampled=rollout_sampled,
+            probe_models=self._claim_due_probe_models(),
         )
+
+    def _claim_due_probe_models(self) -> tuple[ModelInfo, ...]:
+        """Claim half-open canaries that the proxy should run in background."""
+        if self._provider_cooldowns is None:
+            return ()
+        return self._provider_cooldowns.claim_due_probes(self._registry.all())
 
     def _get_candidates(self, tier: Tier, constraints: RoutingConstraints) -> list[ModelInfo]:
         """Get candidate models for a tier, filtered by constraints."""
@@ -551,12 +642,12 @@ class MultiModelRouter:
         primary: ModelInfo,
         constraints: RoutingConstraints,
     ) -> list[ModelInfo]:
-        """Build fallback chain excluding the primary model."""
+        """Build a provider-diverse fallback chain excluding the primary model."""
         all_models = self._available_models(self._registry.all())
         if primary in all_models:
             all_models = [m for m in all_models if m.name != primary.name]
         ordered = _unique_models(self._strategy.select(all_models, constraints))
-        return ordered[: self._fallback_count]
+        return _provider_diverse_fallbacks(primary, ordered, self._fallback_count)
 
     def _augment_inferred_task_candidates(
         self,
@@ -574,6 +665,35 @@ class MultiModelRouter:
             [model for model in self._registry.all() if task_type in model.capabilities]
         )
         return _unique_models([*specialists, *candidates]) if specialists else candidates
+
+    @staticmethod
+    def _augment_provider_family_candidates(
+        candidates: list[ModelInfo],
+        available: list[ModelInfo],
+        constraints: RoutingConstraints,
+    ) -> list[ModelInfo]:
+        """Include eligible provider variants of already selected model families.
+
+        A provider catalog may assign different operational tiers to the same
+        underlying model (for example, a subscription offer optimized for
+        simple prompts versus a cloud offer with a larger rollout). Once one
+        variant is a task candidate, all eligible variants of that explicit
+        family must be compared before the provider preference is applied.
+        """
+        families = {model.model_family for model in candidates if model.model_family}
+        if not families:
+            return candidates
+
+        family_variants = [
+            model
+            for model in available
+            if model.model_family in families
+            and (
+                not constraints.required_capabilities
+                or constraints.required_capabilities <= model.capabilities
+            )
+        ]
+        return _unique_models([*candidates, *family_variants])
 
     def _apply_inferred_task_affinity(
         self,
@@ -674,6 +794,57 @@ class MultiModelRouter:
             )
         return [*preferred_models, *other_models]
 
+    def _apply_peak_pricing_priority(self, ordered: list[ModelInfo]) -> list[ModelInfo]:
+        """Demote peak-priced providers while retaining them as fallbacks."""
+        if not ordered or self._peak_pricing_policy is None:
+            return ordered
+        reprioritized = self._peak_pricing_policy.prioritize(ordered)
+        if reprioritized != ordered:
+            _logger.debug(
+                "Peak pricing priority changed model order: %s -> %s",
+                [model.name for model in ordered],
+                [model.name for model in reprioritized],
+            )
+        return reprioritized
+
+    def _apply_provider_family_preference(self, ordered: list[ModelInfo]) -> list[ModelInfo]:
+        """Choose the most cost-effective provider within equivalent models.
+
+        Task quality and capability ranking happen before this step. Only
+        models with an explicit ``model_family`` are reordered, so a cheap
+        model from a different family cannot displace a better model for the
+        task. Numeric catalog cost wins first; ``provider_cost_order`` is the
+        deterministic tie-break for equal or zero prices (normally Zhipu,
+        then Ollama).
+        """
+        if len(ordered) < 2:
+            return ordered
+
+        provider_rank = _provider_cost_rank(self._provider_cost_order)
+        family_positions: dict[str, list[int]] = {}
+        for position, model in enumerate(ordered):
+            if model.model_family:
+                family_positions.setdefault(model.model_family, []).append(position)
+
+        if not family_positions:
+            return ordered
+
+        result = list(ordered)
+        for positions in family_positions.values():
+            if len(positions) < 2:
+                continue
+            members = [(result[position], position) for position in positions]
+            members.sort(
+                key=lambda pair: (
+                    pair[0].cost_ratio,
+                    provider_rank.get(pair[0].provider, 99),
+                    pair[1],
+                )
+            )
+            for position, (model, _) in zip(positions, members):
+                result[position] = model
+        return result
+
     @staticmethod
     def _client_affinity_provider(
         models: list[ModelInfo],
@@ -708,9 +879,11 @@ class MultiModelRouter:
         percentage of prompts (based on SHA-256 hash of prompt + model name).
         Models with ``rollout_percentage == 100`` are always eligible.
 
-        Returns the filtered candidate list. When all candidates are removed
-        (safety net) an empty list is returned so downstream fallback logic
-        can activate.
+        When the global rollout setting is disabled, all percentages are ignored
+        and every otherwise-available candidate remains eligible.
+
+        Returns the filtered candidate list. When all candidates are removed,
+        route() searches the full catalog and applies this filter again.
         """
         if self._rollout_config and not self._rollout_config.enabled:
             return candidates
@@ -771,6 +944,21 @@ class MultiModelRouter:
                 continue
             available.append(model)
         return available
+
+    def _rollout_zero_models(
+        self,
+        models: list[ModelInfo],
+        constraints: RoutingConstraints,
+    ) -> list[ModelInfo]:
+        """Return available 0% models for emergency use after normal candidates."""
+        if self._rollout_config and not self._rollout_config.enabled:
+            return []
+        return [
+            model
+            for model in models
+            if model.rollout_percentage <= 0.0
+            and constraints.required_capabilities <= model.capabilities
+        ]
 
     @staticmethod
     def _build_reason(scoring: ScoringResult, model: ModelInfo) -> str:
@@ -835,12 +1023,57 @@ def _unique_models(models: list[ModelInfo]) -> list[ModelInfo]:
     return unique
 
 
+def _provider_diverse_fallbacks(
+    primary: ModelInfo,
+    candidates: list[ModelInfo],
+    limit: int,
+) -> list[ModelInfo]:
+    """Prefer fallbacks from providers not already present in the chain.
+
+    Candidate quality order is retained within each pass. Once every available
+    provider is represented, remaining slots are filled from the original order.
+    This prevents an account-wide outage from consuming a short fallback chain
+    with several models hosted by the same provider.
+    """
+    if limit <= 0:
+        return []
+
+    candidates = [
+        model
+        for model in _unique_models(candidates)
+        if model.name != primary.name
+    ]
+    selected: list[ModelInfo] = []
+    selected_names: set[str] = set()
+    represented_providers = {primary.provider}
+
+    for model in candidates:
+        if model.provider in represented_providers:
+            continue
+        selected.append(model)
+        selected_names.add(model.name)
+        represented_providers.add(model.provider)
+        if len(selected) == limit:
+            return selected
+
+    for model in candidates:
+        if model.name in selected_names:
+            continue
+        selected.append(model)
+        if len(selected) == limit:
+            break
+
+    return selected
+
+
 def _inferred_task_type(scoring: ScoringResult) -> str | None:
     task_type = scoring.signals.get("task_type")
     if isinstance(task_type, str) and task_type != "general":
         return task_type
     semantic_role = scoring.signals.get("semantic_role")
     semantic_confidence = scoring.signals.get("semantic_confidence", 0.0)
+    if scoring.signals.get("semantic_reliable") is False:
+        return None
     if (
         isinstance(semantic_role, str)
         and semantic_role not in {"none", "unknown"}

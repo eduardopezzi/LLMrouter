@@ -6,46 +6,52 @@ import json
 import sqlite3
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from llmrouter.cli_panel import (
-    RoutingPanelConfig,
     ModelPriority,
-    routing_panel_config,
-    set_routing_strategy,
-    set_fallback_count,
-    set_provider_cost_order,
-    model_priorities,
-    render_model_priorities,
-    promote_model_priority,
-    set_model_priority_order,
-    reset_model_priorities_to_catalog_order,
-    demote_model_priority,
-    update_env_file,
-    catalog_stats,
-    render_panel_summary,
-    render_current_settings,
-    observation_stats,
+    RoutingPanelConfig,
     _build_llm_priority_prompt,
-    _response_text,
-    _parse_llm_priority_order,
     _extract_json_object,
-    _validate_model_order,
-    _parse_provider_selection,
-    _normalize_provider_order,
-    _model_blocks,
-    _strip_yaml_scalar,
-    _line_indent,
-    _table_exists,
     _format_mapping,
-    _read_log_tail,
-    follow_log_file,
-    _journalctl_follow_command,
     _journalctl_available,
+    _journalctl_follow_command,
+    _line_indent,
+    _model_blocks,
+    _models_submenu,
+    _normalize_provider_order,
+    _parse_llm_priority_order,
+    _parse_provider_selection,
+    _read_log_tail,
+    _reload_registry,
+    _response_text,
+    _strip_yaml_scalar,
+    _table_exists,
+    _validate_model_order,
+    catalog_stats,
+    demote_model_priority,
+    follow_log_file,
+    model_priorities,
+    observation_stats,
+    promote_model_priority,
+    render_current_settings,
+    render_model_health,
+    render_model_priorities,
+    render_panel_summary,
+    reset_model_priorities_to_catalog_order,
+    routing_panel_config,
+    set_fallback_count,
+    set_model_enabled,
+    set_model_priority_order,
+    set_provider_cost_order,
+    set_routing_strategy,
+    update_env_file,
 )
 from llmrouter.config import Settings
+from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ModelInfo, Provider, Tier
 
@@ -148,12 +154,142 @@ def test_render_model_priorities() -> None:
     result = render_model_priorities(reg, limit=10)
     assert "Top" in result
     assert "m1" in result
+    assert "rollout=100%" in result
+
+
+def test_render_model_priorities_shows_zero_rollout() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="new-model",
+                provider=Provider.OPENAI,
+                tier=Tier.T1,
+                rollout_percentage=0,
+            ),
+        )
+    )
+
+    assert "rollout=0%" in render_model_priorities(registry)
 
 
 def test_render_model_priorities_empty() -> None:
     reg = ModelRegistry()
     result = render_model_priorities(reg)
     assert "(catalog is empty)" in result
+
+
+def test_render_all_model_priorities_identifies_every_catalog_provider() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="local", provider=Provider.OLLAMA, tier=Tier.T1, priority=1),
+            ModelInfo(name="zai/model", provider=Provider.ZAI, tier=Tier.T1, priority=2),
+            ModelInfo(
+                name="deepseek/model",
+                provider=Provider.DEEPSEEK,
+                tier=Tier.T2,
+                priority=3,
+            ),
+        )
+    )
+
+    output = render_model_priorities(registry, limit=None)
+
+    assert "All 3 model priorities" in output
+    assert "Catalog providers: deepseek=1, ollama=1, zai=1" in output
+    assert "zai/model provider=zai" in output
+    assert "deepseek/model provider=deepseek" in output
+
+
+def test_render_model_health_explains_empty_window_with_catalog() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(name="local", provider=Provider.OLLAMA, tier=Tier.T1),
+            ModelInfo(name="zai/model", provider=Provider.ZAI, tier=Tier.T1),
+        )
+    )
+    tracker = ModelHealthTracker(log_health_summary=False)
+
+    output = render_model_health(tracker, registry)
+
+    assert "no traffic recorded" in output
+    assert "Configured catalog: 2 models (ollama=1, zai=1)" in output
+    assert "first routed request" in output
+
+
+def test_models_menu_runs_provider_catalog_sync_and_reloads_registry(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import builtins
+
+    import llmrouter.provider_catalog as provider_catalog
+
+    settings = Settings(
+        models_file=str(tmp_path / "models.yaml"),
+        benchmarks={
+            "catalog_path": str(tmp_path / "benchmarks.yaml"),
+            "provider_sources_path": str(tmp_path / "sources.yaml"),
+            "provider_snapshot_path": str(tmp_path / "snapshot.yaml"),
+            "provider_report_path": str(tmp_path / "report.json"),
+        },
+    )
+    registry = _registry()
+    calls: list[dict[str, Any]] = []
+    report = SimpleNamespace(
+        sources_checked=3,
+        sources_changed=1,
+        new_models=({"model": "zhipu/new-model"},),
+        reactivated_models=(),
+        removed_models=({"model": "zhipu/old-model"},),
+        source_errors=(),
+        report_path=tmp_path / "report.json",
+    )
+    monkeypatch.setattr(
+        provider_catalog,
+        "refresh_provider_catalog",
+        lambda *args, **kwargs: calls.append(kwargs) or report,
+    )
+    monkeypatch.setattr("llmrouter.cli_panel._reload_registry", lambda *args, **kwargs: registry)
+    monkeypatch.setattr("llmrouter.cli_panel._pause_for_enter", lambda: None)
+    choices = iter(["5", "0"])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(choices))
+
+    result = _models_submenu(settings, registry, health_tracker=None)
+
+    assert result is registry
+    assert len(calls) == 1
+    assert calls[0]["apply_catalog"] is True
+    assert calls[0]["strategy"] == settings.routing.strategy.value
+    output = capsys.readouterr().out
+    assert "e) Update model catalog" in output
+    assert "1 added" in output
+    assert "1 retired" in output
+    assert "Added: zhipu/new-model" in output
+    assert "Retired: zhipu/old-model" in output
+
+
+def test_reload_registry_preserves_benchmark_catalog(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    catalog_file = tmp_path / "benchmarks.yaml"
+    models_file.write_text(
+        "models:\n"
+        "  - name: 'zai/model'\n"
+        "    provider: zai\n"
+        "    tier: 1\n"
+        "    priority: 1\n",
+        encoding="utf-8",
+    )
+    catalog_file.write_text(
+        "models:\n"
+        "  zai/model:\n"
+        "    benchmark_scores:\n"
+        "      MMLU-Pro:\n"
+        "        value: 84.5\n",
+        encoding="utf-8",
+    )
+
+    registry = _reload_registry(models_file, benchmark_catalog_path=catalog_file)
+
+    assert dict(registry.all()[0].benchmark_scores) == {"MMLU-Pro": 84.5}
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +332,49 @@ def test_set_model_priority_order_wrong_count(tmp_path: Path) -> None:
     models_file = _models_file(tmp_path)
     with pytest.raises(ValueError):
         set_model_priority_order(models_file, ["model-a"])
+
+
+def test_priority_order_can_include_disabled_models(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        "models:\n"
+        "  - name: active\n"
+        "    provider: ollama\n"
+        "    priority: 1\n"
+        "  - name: disabled\n"
+        "    provider: zai\n"
+        "    enabled: false\n"
+        "    priority: 2\n",
+        encoding="utf-8",
+    )
+
+    set_model_priority_order(
+        models_file,
+        ["disabled", "active"],
+        include_disabled=True,
+    )
+
+    complete = _model_blocks(models_file, include_disabled=True)
+    assert {block.name: block.priority for block in complete} == {
+        "disabled": 1,
+        "active": 2,
+    }
+
+
+def test_set_model_enabled_preserves_catalog_entry(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        "models:\n"
+        "  - name: model-a\n"
+        "    provider: ollama\n"
+        "    enabled: false\n"
+        "    priority: 1\n",
+        encoding="utf-8",
+    )
+
+    set_model_enabled(models_file, "model-a", True)
+
+    assert "enabled: true" in models_file.read_text(encoding="utf-8")
 
 
 def test_set_model_priority_order_unknown_model(tmp_path: Path) -> None:
@@ -357,9 +536,39 @@ def test_render_current_settings() -> None:
 
 def test_build_llm_priority_prompt() -> None:
     models = list(_registry().all())
-    prompt = _build_llm_priority_prompt(models, strategy="cost", provider_cost_order=["zai", "ollama"])
+    prompt = _build_llm_priority_prompt(
+        models,
+        strategy="cost",
+        provider_cost_order=["zai", "ollama"],
+    )
     assert "cost" in prompt
+    assert "Provider preference, highest to lowest: zai > ollama" in prompt
+    assert "When costs are equal or close" in prompt
     assert "json" in prompt.lower()
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected_guidance"),
+    [
+        ("cost", "When costs are equal or close"),
+        ("quality", "When models have similar quality and capability"),
+        ("balanced", "When strategy_scores are close"),
+        ("latency", "When latency and quality are similar"),
+    ],
+)
+def test_build_llm_priority_prompt_uses_provider_order_for_every_strategy(
+    strategy: str, expected_guidance: str
+) -> None:
+    prompt = _build_llm_priority_prompt(
+        list(_registry().all()),
+        strategy=strategy,
+        provider_cost_order=["deepseek", "zai", "ollama"],
+    )
+
+    assert "Provider preference, highest to lowest: deepseek > zai > ollama" in prompt
+    assert "meaningful secondary preference in every strategy" in prompt
+    assert "Providers absent from the list come after listed providers" in prompt
+    assert expected_guidance in prompt
 
 
 def test_build_llm_priority_prompt_unknown_strategy() -> None:

@@ -32,6 +32,10 @@ O catálogo carregado pelo LLMrouter fica em `config/models.yaml` (ou no caminho
 definido por `LLMROUTER_MODELS_FILE`). Para adicionar, remover ou atualizar um
 modelo, edite a lista `models` desse arquivo. Exemplo:
 
+`config/models.yaml` é uma configuração local ignorada pelo Git. O exemplo
+versionado fica em `config/models.example.yaml`; atualize-o quando quiser mudar
+os padrões compartilhados do projeto.
+
 ```yaml
 models:
   - name: "ollama/exemplo:latest"
@@ -81,8 +85,18 @@ mas não influenciam o roteamento sem uma nota validada.
 make benchmarks-refresh # baixa, valida e atualiza o catálogo local
 make benchmarks-check   # verifica se há mudança sem gravar arquivos
 make benchmarks-research # pesquisa na web e gera propostas para revisão humana
+llmrouter catalog-sync # inventaria modelos locais do Ollama e gera propostas
+make providers-sync # verifica docs/modelos oficiais e recalcula prioridades
+make providers-update # adiciona/retira modelos do catálogo ativo
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
+llmrouter tui # abre a interface interativa em tela cheia
 ```
+
+O `llmrouter tui` usa uma interface em abas inspirada no `precog-tui`: `1`–`4`
+alternam Overview, Routing, Models e Usage. Na aba `Models`, as setas
+selecionam o modelo; `q`/`k` sobem, `a`/`j` descem, `e` alterna
+`enabled`/`disabled`, `s` salva e `r` recarrega. `Ctrl+Q` sai e `?` mostra a
+ajuda.
 
 O painel informa a cobertura total e quantos modelos participaram de cada
 benchmark. Quando existe apenas um candidato, o resultado aparece como
@@ -106,7 +120,8 @@ web de descoberta e entrega os resultados ao LLM para avaliação. Um alias clou
 results`. A busca e o LLM apenas criam propostas; eles não podem atribuir notas
 nem aprovar equivalência entre variantes. Agregadores como LangDB servem para
 descoberta, enquanto a promoção exige uma fonte oficial, identidade exata do
-modelo e revisão humana.
+modelo e revisão humana. O arquivo de propostas é gerado localmente e ignorado
+pelo Git.
 
 Controle essa descoberta com
 `LLMROUTER_BENCHMARKS__RESEARCH_INTERNET_SEARCH_ENABLED` e limite os resultados
@@ -114,11 +129,55 @@ por modelo com `LLMROUTER_BENCHMARKS__RESEARCH_INTERNET_SEARCH_MAX_RESULTS`
 (padrão: 5). Essas sugestões **nunca** alteram automaticamente as fontes, notas
 ou catálogo.
 
+### Verificação semanal dos provedores
+
+O workflow `.github/workflows/weekly-provider-catalog.yml` roda toda segunda-feira
+e consulta as fontes oficiais listadas em `data/provider_sources.yaml`. Ele registra
+hashes das páginas, inventaria modelos disponíveis quando a API do provedor permite,
+gera propostas para modelos novos/retirados e recalcula as prioridades usando os
+benchmarks locais. O workflow abre um Pull Request para revisão; nenhum modelo novo
+é ativado automaticamente. Para consultar as APIs diretas, configure os secrets
+`OLLAMA_API_KEY` e `DEEPSEEK_API_KEY` quando aplicável.
+
+No painel interativo, abra `Models > Update model catalog` para reconciliar o
+catálogo ativo com as fontes oficiais. `providers-update` faz a mesma operação
+pela linha de comando. Modelos encontrados são adicionados com configuração
+conservadora; modelos ausentes são desativados (`enabled: false`) após duas
+consultas completas bem-sucedidas. Uma falha de rede limpa a sequência de
+ausências daquele provedor. Se um modelo voltar a aparecer, ele é reativado.
+Modelos excluídos por `model_allowlist` ou `model_denylist` são desativados na
+sincronização, mesmo que continuem aparecendo na fonte do provedor.
+Entradas desativadas e comentários permanecem no YAML para preservar o histórico.
+Novos modelos recebem limites e papéis genéricos; revise preço, contexto e papéis
+do provedor antes de depender deles em produção. Eles entram com
+`rollout_percentage: 0`, então o roteamento automático não os seleciona até você
+promovê-los. No painel, use `Routing > Rollout %` para iniciar um canary (por
+exemplo, 5%) e aumentar o percentual depois de validar o modelo.
+Mantenha `LLMROUTER_ROLLOUT__ENABLED=true` no servidor: com essa opção em
+`false`, o filtro inteiro é ignorado, inclusive para modelos com rollout `0`.
+
+No painel interativo, em `Models > Promote model`, a lista de prioridade mostra
+todo o catálogo, inclusive entradas com `enabled: false`. Escolha `Reorder`
+para editar com `↑`/`↓` (ou `j`/`k`); pressione `e` para alternar o status do
+modelo selecionado, `Enter` para salvar e `q` para cancelar. Pela linha de
+comando, o mesmo status pode ser alterado diretamente no `config/models.yaml`:
+
+```yaml
+- name: ollama/glm-5.3-flash:cloud
+  enabled: true
+```
+
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 
 ```bash
 ollama pull exemplo:latest
 ```
+
+`llmrouter catalog-sync` consulta somente `/api/tags` do Ollama e grava
+`data/model_catalog_proposals.json`. Ele sugere a inclusão de modelos locais
+descobertos com rollout inicial `0` e pede verificação para modelos locais
+configurados que não aparecem mais. Modelos Cloud não são tratados como locais;
+o comando nunca altera `config/models.yaml`.
 
 Valide o YAML e o catálogo sem iniciar o servidor:
 
@@ -191,7 +250,7 @@ LLMrouter também aceita diretivas curtas no começo do prompt. Elas devem apare
 nas primeiras 5 linhas de uma mensagem:
 
 ```text
-{{project:PRecog}} {{task:deep_research}} {{model:zhipu/glm-5.1}}
+{{project:PRecog}} {{task:deep_research}}
 
 Investigue como melhorar o pipeline de memória/RAG.
 ```
@@ -485,6 +544,14 @@ desempate segue a ordem comercial atual:
 Zhipu -> Ollama -> NVIDIA
 ```
 
+Para variantes do mesmo modelo hospedadas por mais de um provedor, o catalogo
+aceita `model_family`. O roteador primeiro classifica a capacidade para a
+tarefa e depois escolhe, dentro da mesma familia, a menor oferta de custo;
+quando os custos empatam, aplica `provider_cost_order`. Assim,
+`zhipu/glm-5.3-flash` pode ter prioridade sobre
+`ollama/glm-5.3-flash:cloud` sem permitir que um modelo barato de outra
+familia desloque um modelo mais adequado para a tarefa.
+
 Para trocar a estrategia:
 
 ```env
@@ -496,6 +563,12 @@ Tambem existe um painel CLI para configurar a priorizacao e ver estatisticas:
 ```bash
 make panel
 ```
+
+No menu `Logs & Stats` selecione `Usage report` para consultar as ultimas 6
+horas, incluindo requisicoes por modelo, estrategia/tier de roteamento,
+latencia, tokens, custo e uso de RAG/memoria. O relatorio usa as observacoes
+persistidas em `data/llmrouter.db`; registros antigos sem esses metadados sao
+exibidos como `unknown`.
 
 Ver somente o resumo atual:
 
@@ -517,6 +590,57 @@ O painel grava essas preferencias no `.env`:
 LLMROUTER_ROUTING__STRATEGY=cost
 LLMROUTER_ROUTING__FALLBACK_COUNT=3
 LLMROUTER_ROUTING__PROVIDER_COST_ORDER=["nvidia", "zai", "ollama"]
+```
+
+### Prioridade por horário de preço do DeepSeek
+
+Em rotas `auto`, o DeepSeek é mantido como fallback, mas passa para depois dos
+outros provedores durante o horário de pico em Pequim. A faixa padrão considera
+`00:30–08:30` como off-peak nos dias úteis. Desde `2026-08-23`, sábado e domingo
+são off-peak durante o dia inteiro. Escolhas explícitas de modelo não são
+alteradas.
+
+Todos os valores podem ser sobrescritos no `.env`:
+
+```env
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__ENABLED=true
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__TIMEZONE=Asia/Shanghai
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__OFF_PEAK_START=00:30
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__OFF_PEAK_END=08:30
+LLMROUTER_ROUTING__DEEPSEEK_PRICING__WEEKEND_OFF_PEAK_FROM=2026-08-23
+```
+
+### Cooldown por provedor, nuvem e modelo
+
+Falhas de saldo, créditos ou limite de tokens usam o escopo da conta que
+realmente foi afetada:
+
+| Origem da falha | Escopo bloqueado |
+| --- | --- |
+| API direta (DeepSeek, Z.AI, OpenAI ou Gemini) | Todos os modelos daquele provider |
+| Modelo `ollama/*:cloud` | Todos os modelos Ollama Cloud; modelos Ollama locais continuam disponíveis |
+| Modelo Ollama local | Somente aquele modelo local |
+| Modelo ausente (`404`) | Somente o modelo, temporariamente |
+| Modelo retirado (`410` ou resposta explícita de retirada) | Somente o modelo, removido do roteamento até reiniciar o processo |
+
+Rate limits e limites de uso usam 10 minutos por padrão; se a resposta informar
+um horário ou duração de reset, esse prazo é respeitado. Depois do prazo, a
+requisição continua sendo respondida pelo fallback enquanto um canário curto
+verifica o provider em segundo plano. Se falhar, o cooldown padrão do novo
+canário é de 60 minutos.
+
+Erros de saldo/créditos insuficientes (`402` ou mensagem explícita de créditos
+em uma resposta `429`) usam no mínimo 1 hora antes do primeiro canário e no
+mínimo 6 horas depois de um canário que confirme que o saldo continua insuficiente.
+Um prazo de recuperação posterior informado pelo provider prevalece. Esses
+tempos têm configuração própria:
+
+```env
+LLMROUTER_ROUTING__QUOTA_COOLDOWN_SECONDS=600
+LLMROUTER_ROUTING__QUOTA_PROBE_RETRY_SECONDS=3600
+LLMROUTER_ROUTING__CREDIT_COOLDOWN_SECONDS=3600
+LLMROUTER_ROUTING__CREDIT_PROBE_RETRY_SECONDS=21600
+LLMROUTER_ROUTING__QUOTA_PROBE_MAX_TOKENS=32
 ```
 
 ## Local Server

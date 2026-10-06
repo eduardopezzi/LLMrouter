@@ -448,6 +448,8 @@ class HybridScorer:
         rule_weight: float = 0.3,
         semantic_weight: float = 0.7,
         semantic_confidence_threshold: float = 0.35,
+        semantic_min_confidence: float = 0.50,
+        semantic_margin_threshold: float = 0.10,
     ) -> None:
         self._rule_scorer = rule_scorer or PromptScorer()
         self._semantic_scorer = semantic_scorer or SemanticPromptScorer()
@@ -456,6 +458,8 @@ class HybridScorer:
         self._rule_weight = rule_weight / total
         self._semantic_weight = semantic_weight / total
         self._semantic_threshold = semantic_confidence_threshold
+        self._semantic_min_confidence = semantic_min_confidence
+        self._semantic_margin_threshold = semantic_margin_threshold
 
     def score(self, prompt: str) -> ScoringResult:
         """Score the prompt using both rule-based and semantic signals."""
@@ -471,6 +475,17 @@ class HybridScorer:
         benchmark_confidence = float(benchmark_result.signals.get("benchmark_confidence", 0.0))
         semantic_confidence = max(role_confidence, benchmark_confidence)
         use_semantic = semantic_confidence >= self._semantic_threshold
+        role_margin = float(semantic_result.signals.get("semantic_margin", 0.0))
+        benchmark_margin = float(benchmark_result.signals.get("benchmark_margin", 0.0))
+        role_reliable = (
+            role_confidence >= self._semantic_min_confidence
+            and role_margin >= self._semantic_margin_threshold
+        )
+        benchmark_reliable = (
+            benchmark_confidence >= self._semantic_min_confidence
+            and benchmark_margin >= self._semantic_margin_threshold
+        )
+        semantic_reliable = role_reliable or benchmark_reliable
 
         if use_semantic:
             blended_score = min(
@@ -478,12 +493,12 @@ class HybridScorer:
                 self._rule_weight * rule_result.score + self._semantic_weight * semantic_confidence,
             )
             # Choose the higher tier (more conservative) between rule and semantic.
-            final_tier = max(
-                rule_result.tier,
-                semantic_result.tier,
-                benchmark_result.tier,
-                key=lambda t: t.value,
-            )
+            promoted_tiers = [rule_result.tier]
+            if role_reliable:
+                promoted_tiers.append(semantic_result.tier)
+            if benchmark_reliable:
+                promoted_tiers.append(benchmark_result.tier)
+            final_tier = max(promoted_tiers, key=lambda t: t.value)
         else:
             blended_score = rule_result.score
             final_tier = rule_result.tier
@@ -496,6 +511,9 @@ class HybridScorer:
             "rule_weight": round(self._rule_weight, 4),
             "semantic_weight": round(self._semantic_weight, 4),
             "semantic_used": use_semantic,
+            "semantic_reliable": semantic_reliable,
+            "semantic_role_reliable": role_reliable,
+            "benchmark_reliable": benchmark_reliable,
         }
 
         return ScoringResult(score=round(blended_score, 4), tier=final_tier, signals=signals)

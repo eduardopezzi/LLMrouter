@@ -10,16 +10,32 @@ from llmrouter.runtime import build_registry
 def test_load_model_registry_from_catalog() -> None:
     registry = load_model_registry("config/models.example.yaml")
 
-    assert len(registry.models) == 16
+    # 1009017 alinhou o catálogo com o Yoda: 11 modelos ativos (os demais
+    # ficam comentados no YAML aguardando revisão).
+    assert len(registry.models) == 11
     first = registry.models[0]
-    assert first.name == "ollama/kimi-k3:cloud"
+    assert first.name == "ollama/glm-5.3-flash:cloud"
     assert first.provider == Provider.OLLAMA
     assert first.tier == Tier.T3
     assert "architecture" in first.capabilities
     assert first.cost_per_1k_input == 0
     assert first.api_base == "http://localhost:11434"
-    assert first.max_tokens == 128000
+    assert first.max_tokens == 131072
     assert first.context_window == 1000000
+
+    zhipu_flash = registry.get("zhipu/glm-5.3-flash")
+    assert zhipu_flash is not None
+    assert zhipu_flash.model_family == "glm-5.3-flash"
+    assert zhipu_flash.tier == Tier.T1
+
+
+def test_load_model_registry_can_include_disabled_entries() -> None:
+    active = load_model_registry("config/models.example.yaml")
+    complete = load_model_registry("config/models.example.yaml", include_disabled=True)
+
+    assert len(complete.models) > len(active.models)
+    assert all(model.enabled for model in active.models)
+    assert any(not model.enabled for model in complete.models)
 
 
 def test_provider_model_name_removes_catalog_namespace() -> None:
@@ -27,10 +43,10 @@ def test_provider_model_name_removes_catalog_namespace() -> None:
 
     assert registry.get("ollama/qwen2.5-coder:3b").provider_model_name == "qwen2.5-coder:3b"
     assert (
-        registry.get("deepseek/deepseek-chat").provider_model_name
-        == "deepseek-chat"
+        registry.get("deepseek/deepseek-v4-flash").provider_model_name
+        == "deepseek-v4-flash"
     )
-    assert registry.get("zhipu/glm-5.2").provider_model_name == "glm-5.2"
+    assert registry.get("zhipu/glm-5.3").provider_model_name == "glm-5.3"
 
 
 def test_build_registry_creates_local_models_file_from_example(tmp_path) -> None:
@@ -41,4 +57,4 @@ def test_build_registry_creates_local_models_file_from_example(tmp_path) -> None
     registry = build_registry(str(config_dir / "models.yaml"))
 
     assert (config_dir / "models.yaml").exists()
-    assert len(registry.models) == 16
+    assert len(registry.models) == 11

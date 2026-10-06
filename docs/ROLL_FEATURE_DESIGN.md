@@ -25,7 +25,7 @@ A feature **Canary/Blue-Green Model Rollout** permite promoção gradual e segur
 **Decisões de design recomendadas:**
 
 1. **Determinístico (hash-based)** por padrão: mesmo prompt sempre mapeia ao mesmo bucket, facilitando A/B consistente e debugging.
-2. **Safety net**: se após filtragem todos os candidatos forem removidos, retornar à lista original.
+2. **Fallback seguro**: se o tier recomendado não tiver candidatos após filtragem, procurar em outros tiers aplicando o mesmo rollout; nunca reintroduzir modelos excluídos por `0%`.
 3. **Rollback instantâneo**: `rollout_percentage = 0` equivale a remover o modelo do tráfego sem alterar `priority` ou apagar do YAML.
 4. **Sticky bucketing futuro**: via `X-User-ID`/`session_id` no hash.
 
@@ -104,8 +104,12 @@ def _apply_rollout(self, candidates, request):
     # Hash determinístico do prompt + model.name
     # Bucket = hash % 100
     # Se bucket < rollout_percentage, mantém o modelo
-    # Se nenhum sobreviver, retorna lista original
+    # Se nenhum sobreviver, retorna lista vazia
 ```
+
+O fallback de `route()` procura candidatos em todo o catálogo e reaplica o
+filtro. Se nenhum modelo for elegível, a requisição falha em vez de ignorar um
+rollout configurado em `0%`.
 
 Integrar em `route()` entre `_get_candidates` e `_strategy.select`.
 
@@ -208,7 +212,7 @@ Client        API Routes        MultiModelRouter    SelectionStrategy    Provide
 
 | Arquivo | Cobertura |
 |---|---|
-| `tests/test_rollout.py` (novo) | Unidade de `_apply_rollout`: 0%, 100%, 50/50, determinismo, safety net, fallback chain |
+| `tests/test_rollout.py` | Unidade e integração de `_apply_rollout`: 0%, 100%, parcial, determinismo e fallback sem bypass |
 | `tests/test_router.py` (extensão) | Integração rollout no `route()` |
 | `tests/test_registry_loader.py` (extensão) | Parse de `rollout_percentage` do YAML |
 | `tests/test_cli_panel_full.py` (extensão) | `set_model_rollout_percentage`, `--set-rollout` |
@@ -235,7 +239,7 @@ Client        API Routes        MultiModelRouter    SelectionStrategy    Provide
 
 | Risco | Mitigação |
 |---|---|
-| Todos os modelos bloqueados por rollout=0 | Safety net: retorna lista original se `filtered` fica vazio |
+| Todos os modelos bloqueados por rollout=0 | A seleção automática falha claramente em vez de ignorar o percentual configurado |
 | Falha de provider no canary | Rollback instantâneo via CLI/API sem restart |
 | Inconsistência de A/B | Hash determinístico por padrão |
 | Corrupção do YAML ao editar | Reutilizar parser respeitando comentários; testes de YAML round-trip |

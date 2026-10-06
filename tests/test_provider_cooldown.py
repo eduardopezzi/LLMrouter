@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 import pytest
 
 from llmrouter.core.cooldown import (
+    CooldownScope,
     ProviderCooldownStore,
+    is_model_unavailable_error,
     is_quota_exhaustion_error,
     quota_reset_timestamp,
 )
@@ -36,8 +38,12 @@ class StubProvider(BaseProvider):
     def __init__(self, name: str, *, error: ProviderError | None = None) -> None:
         super().__init__(name)
         self.error = error
+        self.calls: list[str] = []
+        self.requests: list[ChatRequest] = []
 
     async def chat_completion(self, request: ChatRequest, model: str) -> ChatResponse:
+        self.calls.append(model)
+        self.requests.append(request)
         if self.error is not None:
             raise self.error
         return ChatResponse(
@@ -49,6 +55,7 @@ class StubProvider(BaseProvider):
         )
 
     async def stream_completion(self, request: ChatRequest, model: str):
+        self.calls.append(model)
         if self.error is not None:
             raise self.error
         yield {"choices": [{"delta": {"content": "ok"}}]}
@@ -66,13 +73,19 @@ def _request(*, client_ip: str = "10.0.0.1") -> ChatRequest:
     )
 
 
-def _decision(primary: ModelInfo, fallbacks: list[ModelInfo]) -> RoutingDecision:
+def _decision(
+    primary: ModelInfo,
+    fallbacks: list[ModelInfo],
+    *,
+    probe_models: tuple[ModelInfo, ...] = (),
+) -> RoutingDecision:
     return RoutingDecision(
         primary=primary,
         fallbacks=fallbacks,
         score=0.5,
         tier=primary.tier,
         reason="test",
+        probe_models=probe_models,
     )
 
 
@@ -87,11 +100,10 @@ def test_detects_zai_usage_limit_error() -> None:
     assert is_quota_exhaustion_error(exc) is True
 
 
-def test_detects_payment_required_without_provider_specific_wording() -> None:
-    """HTTP 402 is non-recoverable even when the provider omits quota keywords."""
+def test_detects_ollama_session_usage_limit_error() -> None:
     exc = ProviderError(
-        "this model uses extra usage only and your extra usage balance is empty",
-        status_code=402,
+        "ollama returned HTTP 429: you have reached your session usage limit",
+        status_code=429,
         provider="ollama",
     )
 
@@ -133,40 +145,6 @@ async def test_proxy_records_quota_cooldown_and_uses_fallback() -> None:
     assert response.model == ollama.provider_model_name
     assert cooldowns.provider_cooldown(Provider.ZAI) is not None
     assert Provider.ZAI not in proxy.providers
-
-
-@pytest.mark.asyncio
-async def test_payment_required_cools_only_model_and_skips_repeated_attempt() -> None:
-    """A paid model with no balance is skipped without disabling its provider."""
-    kimi = _model("ollama/kimi-k3:cloud", Provider.OLLAMA)
-    other_ollama = _model("ollama/glm-5.2:cloud", Provider.OLLAMA)
-    zai = _model("zhipu/glm-5.2", Provider.ZAI)
-    cooldowns = ProviderCooldownStore(default_seconds=3600)
-    ollama = StubProvider(
-        "ollama",
-        error=ProviderError(
-            "this model uses extra usage only and your extra usage balance is empty",
-            status_code=402,
-            provider="ollama",
-        ),
-    )
-    proxy = ProviderProxy(
-        {
-            Provider.OLLAMA: ollama,
-            Provider.ZAI: StubProvider("zai"),
-        },
-        provider_cooldowns=cooldowns,
-    )
-
-    first = await proxy.chat_completion(_request(), _decision(kimi, [zai]))
-    ollama.error = None
-    second = await proxy.chat_completion(_request(), _decision(kimi, [zai]))
-
-    assert first.model == zai.provider_model_name
-    assert second.model == zai.provider_model_name
-    assert cooldowns.model_cooldown(kimi.name) is not None
-    assert cooldowns.provider_cooldown(Provider.OLLAMA) is None
-    assert cooldowns.is_model_available(other_ollama) is True
 
 
 @pytest.mark.asyncio

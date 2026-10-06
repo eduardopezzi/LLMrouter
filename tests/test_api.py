@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import replace
@@ -9,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from llmrouter.api.routes import create_app
+from llmrouter.core.health import ModelHealthTracker, SQLiteHealthStore
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.scorer import ScoringResult
 from llmrouter.core.stats import MetricsCollector
@@ -149,6 +151,9 @@ def test_chat_completions_routes_through_proxy(tmp_path, caplog) -> None:
     assert observation.chosen_model == "cheap"
     assert observation.cost_usd == 0.002
     assert observation.metadata["provider"] == "openai"
+    assert observation.metadata["routing_strategy"] == "cost"
+    assert observation.metadata["rag_used"] == "false"
+    assert observation.metadata["memory_used"] == "false"
     assert 'POST /v1/chat/completions HTTP/1.1" 200 OK' in caplog.text
     assert "selected_model=cheap" in caplog.text
     assert "provider_model=cheap" in caplog.text
@@ -477,6 +482,23 @@ def test_health_reports_model_count() -> None:
     }
 
 
+def test_health_models_returns_events_from_sqlite_store(tmp_path) -> None:
+    tracker = ModelHealthTracker(
+        SQLiteHealthStore(str(tmp_path / "health.db")),
+        log_health_summary=False,
+    )
+    asyncio.run(tracker.record_success("cheap", latency_ms=42, cost_usd=0.01, quality=0))
+    client = TestClient(create_app(health_tracker=tracker))
+
+    response = client.get("/health/models")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["models"][0]["model"] == "cheap"
+    assert body["models"][0]["request_count"] == 1
+    assert body["models"][0]["avg_latency_ms"] == 42
+
+
 def test_semantic_inspect_requires_api_key() -> None:
     app = create_app(router=FakeInspectRouter(), api_key="secret")
     client = TestClient(app)
@@ -599,7 +621,13 @@ def test_chat_completions_respects_task_role() -> None:
     assert body["llmrouter"]["selected_model"] == "reviewer"
 
 
-def test_chat_completions_accepts_prompt_directives() -> None:
+def test_chat_completions_accepts_prompt_directives(tmp_path, monkeypatch) -> None:
+    # Hermetiza o fuzzy-match de projeto: sem chdir, o resolvedor varre
+    # subdiretórios do cwd pai e pode "corrigir" PRecog para um diretório
+    # local com grafia diferente (ex.: precog em /opt/data).
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
     registry = ModelRegistry(
         models=(
             ModelInfo(name="summary", provider=Provider.OPENAI, tier=Tier.T1),
@@ -645,7 +673,13 @@ def test_chat_completions_accepts_prompt_directives() -> None:
     }
 
 
-def test_chat_completions_accepts_prompt_directives_after_context_messages() -> None:
+def test_chat_completions_accepts_prompt_directives_after_context_messages(
+    tmp_path, monkeypatch
+) -> None:
+    # Mesma hermetização do teste irmão acima (fuzzy-match de projeto).
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
     registry = ModelRegistry(
         models=(
             ModelInfo(name="summary", provider=Provider.OPENAI, tier=Tier.T1),
@@ -754,6 +788,17 @@ def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
     assert first.status_code == 200
     assert first.json()["llmrouter"]["memory"]["used"] is False
 
+    original_scorer = app.state.router._scorer
+
+    class SpyScorer:
+        last_prompt = ""
+
+        def score(self, prompt: str) -> ScoringResult:
+            self.last_prompt = prompt
+            return original_scorer.score(prompt)
+
+    app.state.router._scorer = SpyScorer()
+
     second = client.post(
         "/v1/chat/completions",
         json={
@@ -769,6 +814,7 @@ def test_chat_completions_records_and_injects_project_memory(tmp_path) -> None:
 
     assert second.status_code == 200
     assert second.json()["llmrouter"]["memory"]["used"] is True
+    assert "Relevant project memory" not in app.state.router._scorer.last_prompt
     assert proxy.last_request is not None
     assert proxy.last_request.messages[0].role == "system"
     assert "Relevant project memory" in str(proxy.last_request.messages[0].content)

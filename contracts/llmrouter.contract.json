@@ -86,6 +86,47 @@
     {
       "auth_required": true,
       "method": "GET",
+      "path": "/v1/llmrouter/budgets/{project_id}",
+      "response_schema": {
+        "daily_limit_usd": "float|null",
+        "daily_spent_usd": "float",
+        "mode": "str",
+        "monthly_limit_usd": "float|null",
+        "monthly_spent_usd": "float",
+        "period_day": "str",
+        "period_month": "str",
+        "project_id": "str",
+        "user_id": "str"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/budgets",
+      "request_schema": {
+        "properties": [
+          "daily_limit_usd",
+          "mode",
+          "monthly_limit_usd",
+          "project_id",
+          "user_id"
+        ],
+        "required": [
+          "project_id"
+        ]
+      },
+      "response_schema": {
+        "daily_limit_usd": "float|null",
+        "mode": "str",
+        "monthly_limit_usd": "float|null",
+        "ok": "bool",
+        "project_id": "str",
+        "user_id": "str"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
       "path": "/v1/llmrouter/cache/stats",
       "response_schema": {
         "cost_saved_usd": "float",
@@ -93,7 +134,66 @@
         "hit_rate": "float",
         "hits": "int",
         "misses": "int",
+        "semantic_hits": "int",
+        "semantic_misses": "int",
+        "semantic_unavailable": "int",
+        "stream": {
+          "stream_lookup_hit_total": "int",
+          "stream_lookup_miss_total": "int",
+          "stream_purged_total": "int",
+          "stream_replay_bytes_served_total": "int",
+          "stream_replay_error_total": "int",
+          "stream_replays_total": "int",
+          "stream_stored_total": "int",
+          "stream_tokens_saved_total": "int",
+          "stream_probes_fail_total": "int",
+          "stream_probes_ok_total": "int"
+        },
         "tokens_saved": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/cache/verify",
+      "request_schema": {
+        "properties": [
+          "sample_size"
+        ],
+        "required": []
+      },
+      "response_schema": {
+        "buckets": "object",
+        "checked": "int",
+        "error": "int",
+        "mismatch": "int",
+        "ok": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/rollout",
+      "response_schema": {
+        "models": "list[object]"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/rollout/{model_name}",
+      "request_schema": {
+        "properties": [
+          "percentage"
+        ],
+        "required": [
+          "percentage"
+        ]
+      },
+      "response_schema": {
+        "applied": "bool",
+        "model": "str",
+        "rollout_percentage": "float"
       }
     },
     {

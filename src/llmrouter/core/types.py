@@ -82,6 +82,11 @@ class ModelInfo:
         context_window: Maximum input context length in tokens.
         api_base: Optional provider endpoint declared by the model catalog.
         description: Human-facing description from the catalog.
+        enabled: Whether this catalog entry is eligible for routing. Disabled
+            entries remain visible in catalog-management views.
+        model_family: Explicit equivalence group for provider variants of the
+            same underlying model. Provider preference is applied only inside
+            this group, after task-quality ranking.
         rollout_percentage: Traffic percentage this model receives during
             a canary/blue-green rollout (0–100). Defaults to ``100`` (full traffic).
             Set to ``0`` to instantly remove from routing without deleting the entry.
@@ -104,6 +109,8 @@ class ModelInfo:
     context_window: int = 8192
     api_base: str | None = None
     description: str = ""
+    enabled: bool = True
+    model_family: str | None = None
     rollout_percentage: float = 100.0
     benchmark_scores: tuple[tuple[str, float], ...] = ()
     benchmark_sources: tuple[str, ...] = ()
@@ -164,24 +171,70 @@ class ChatRequest:
     max_tokens: int | None = None
     stream: bool = False
     top_p: float = 1.0
+    top_p_explicit: bool = True
     stop: list[str] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    resource_policy: Any | None = None
+    budget_remaining_usd: float | None = None
 
     @property
     def prompt_text(self) -> str:
         """Concatenate all message contents for scoring."""
-        parts: list[str] = []
-        for m in self.messages:
-            if isinstance(m.content, str):
-                if m.content:
-                    parts.append(m.content)
-            elif isinstance(m.content, list):
-                for block in m.content:
-                    if isinstance(block, dict):
-                        text = block.get("text") or block.get("content") or ""
-                        if isinstance(text, str) and text:
-                            parts.append(text)
-        return "\n".join(parts)
+        return "\n".join(filter(None, (self._message_text(message) for message in self.messages)))
+
+    def routing_prompt_text(self, max_chars: int = 12_000) -> str:
+        """Return bounded, current-intent context for routing decisions.
+
+        The provider still receives :attr:`prompt_text`. Routing must not let an
+        old transcript or injected memory dominate the current task classifier.
+        """
+        if max_chars <= 0:
+            raise ValueError("max_chars must be positive")
+
+        system_prefix = next(
+            (self._message_text(message) for message in self.messages if message.role == "system"),
+            "",
+        )[: min(2_000, max_chars)]
+        recent = [message for message in self.messages if message.role != "system"][-4:]
+        recent_text = "\n".join(
+            f"{message.role}: {self._message_text(message)}"
+            for message in recent
+            if self._message_text(message)
+        )
+        if not recent_text:
+            recent_text = system_prefix
+            system_prefix = ""
+        if system_prefix and recent_text:
+            available = max_chars - len(system_prefix) - 1
+            recent_text = self._bounded_text(recent_text, available)
+            return self._bounded_text(f"{system_prefix}\n{recent_text}", max_chars)
+        return self._bounded_text(recent_text, max_chars)
+
+    @staticmethod
+    def _bounded_text(text: str, max_chars: int) -> str:
+        if max_chars <= 0:
+            return ""
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= 32:
+            return text[:max_chars]
+        marker = "\n...[truncated]...\n"
+        budget = max_chars - len(marker)
+        head = budget // 2
+        return f"{text[:head]}{marker}{text[-(budget - head):]}"
+
+    @staticmethod
+    def _message_text(message: ChatMessage) -> str:
+        if isinstance(message.content, str):
+            return message.content
+        if isinstance(message.content, list):
+            return "\n".join(
+                str(block.get("text") or block.get("content") or "")
+                for block in message.content
+                if isinstance(block, dict)
+                and isinstance(block.get("text") or block.get("content") or "", str)
+            )
+        return ""
 
 
 @dataclass(frozen=True)
@@ -245,6 +298,8 @@ class RoutingDecision:
         rollout_sampled: ``"model_name:percentage"`` when the primary was selected
             via rollout filtering (i.e. had ``rollout_percentage < 100``).
             ``None`` when no rollout filtering was applied.
+        probe_models: Half-open cooldown models to canary in the background while
+            this request is served by an available alternative.
     """
 
     primary: ModelInfo
@@ -253,3 +308,4 @@ class RoutingDecision:
     tier: Tier
     reason: str
     rollout_sampled: str | None = None
+    probe_models: tuple[ModelInfo, ...] = ()

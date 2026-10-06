@@ -4,44 +4,46 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from llmrouter.api.routes import (
     ChatCompletionPayload,
-    create_app,
-    _to_chat_request,
+    LLMrouterFeedbackPayload,
     _chat_request_directives,
-    _prompt_directives,
-    _with_prompt_directives,
-    _infer_project_from_prompt,
-    _retrieve_memory,
-    _with_memory_context,
-    _record_memory,
-    _memory_disabled,
-    _memory_project,
-    _memory_default_project,
-    _normalize_stream_chunk,
+    _choice_text,
     _chunk_has_assistant_output,
+    _estimate_cost,
     _extract_delta_text,
+    _infer_project_from_prompt,
+    _memory_default_project,
+    _memory_disabled,
+    _memory_payload,
+    _memory_project,
+    _memory_scope_project,
     _model_payload,
+    _normalize_stream_chunk,
+    _precog_project,
+    _precog_repository,
+    _prompt_directives,
+    _prompt_hash,
+    _rag_metadata,
+    _record_memory,
+    _retrieve_memory,
     _routing_constraints,
     _routing_roles,
-    _estimate_cost,
     _task_role,
-    _precog_project,
-    _rag_metadata,
-    _memory_payload,
-    _prompt_hash,
-    _choice_text,
-    LLMrouterFeedbackPayload,
+    _to_chat_request,
+    _with_memory_context,
+    _with_prompt_directives,
+    create_app,
 )
+from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter
 from llmrouter.core.scorer import PromptScorer
-from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.types import (
     ChatMessage,
     ChatRequest,
@@ -291,6 +293,84 @@ def test_retrieve_memory_no_store() -> None:
     assert _retrieve_memory(None, project="p", chat_request=req, payload=payload) == []
 
 
+def test_retrieve_memory_uses_bounded_routing_query() -> None:
+    config = MemoryConfig(enabled=True, query_max_chars=40)
+    store = SQLiteMemoryStore(config)
+    captured: dict[str, str] = {}
+
+    def retrieve(*, project: str, query: str) -> list[MemoryEntry]:
+        captured.update(project=project, query=query)
+        return []
+
+    store.retrieve = retrieve  # type: ignore[method-assign]
+    payload = ChatCompletionPayload.model_validate({
+        "messages": [{"role": "user", "content": "x" * 200}],
+    })
+    req = _to_chat_request(payload)
+
+    assert _retrieve_memory(store, project="p", chat_request=req, payload=payload) == []
+    assert captured["project"] == "p"
+    assert len(captured["query"]) <= 40
+
+
+def test_memory_scope_project_global_without_repository() -> None:
+    store = SQLiteMemoryStore(
+        MemoryConfig(
+            enabled=True,
+            default_project="shared",
+            no_repository_scope="global",
+        )
+    )
+    assert _memory_scope_project(store, project="client", repository="") == "shared"
+    assert _memory_scope_project(store, project="client", repository="owner/repo") == "client"
+
+
+def test_retrieve_memory_uses_global_project_without_repository() -> None:
+    store = SQLiteMemoryStore(
+        MemoryConfig(enabled=True, default_project="shared", no_repository_scope="global")
+    )
+    captured: dict[str, str] = {}
+
+    def retrieve(*, project: str, query: str) -> list[MemoryEntry]:
+        captured["project"] = project
+        return []
+
+    store.retrieve = retrieve  # type: ignore[method-assign]
+    payload = ChatCompletionPayload.model_validate(
+        {"messages": [{"role": "user", "content": "global query"}]}
+    )
+    req = _to_chat_request(payload)
+
+    _retrieve_memory(
+        store,
+        project=_memory_scope_project(store, project="client", repository=""),
+        chat_request=req,
+        payload=payload,
+    )
+
+    assert captured["project"] == "shared"
+
+
+def test_retrieve_memory_skips_when_no_repository_scope_disabled() -> None:
+    config = MemoryConfig(enabled=True, no_repository_scope="disabled")
+    store = SQLiteMemoryStore(config)
+    called = False
+
+    def retrieve(*, project: str, query: str) -> list[MemoryEntry]:
+        nonlocal called
+        called = True
+        return []
+
+    store.retrieve = retrieve  # type: ignore[method-assign]
+    payload = ChatCompletionPayload.model_validate(
+        {"messages": [{"role": "user", "content": "query"}]}
+    )
+    req = _to_chat_request(payload)
+
+    assert _retrieve_memory(store, project="client", chat_request=req, payload=payload) == []
+    assert called is False
+
+
 def test_with_memory_context_no_store() -> None:
     req = ChatRequest(model=None, messages=[ChatMessage(role="user", content="hi")])
     assert _with_memory_context(req, [], memory_store=None) is req
@@ -499,6 +579,23 @@ def test_precog_project_default() -> None:
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert _precog_project(payload, "default") == "default"
+
+
+def test_precog_repository_reads_supported_metadata() -> None:
+    payload = ChatCompletionPayload.model_validate(
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "metadata": {"repository": "org/project"},
+        }
+    )
+    assert _precog_repository(payload) == "org/project"
+
+
+def test_precog_repository_defaults_to_empty() -> None:
+    payload = ChatCompletionPayload.model_validate(
+        {"messages": [{"role": "user", "content": "hi"}]}
+    )
+    assert _precog_repository(payload) == ""
 
 
 def test_rag_metadata_not_used() -> None:

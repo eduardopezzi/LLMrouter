@@ -9,6 +9,7 @@ import logging
 import sys
 from typing import Any
 
+import httpx
 import uvicorn
 
 from llmrouter.benchmark_catalog import BenchmarkRefreshError, refresh_benchmark_catalog
@@ -35,7 +36,21 @@ from llmrouter.cross_repository import (
     resolve_project_contract_path,
 )
 from llmrouter.logging_config import setup_logging
-from llmrouter.runtime import _build_scorer, build_app, build_registry
+from llmrouter.model_catalog import (
+    configured_models,
+    fetch_ollama_local_inventory,
+    reconcile_ollama_local_models,
+    write_catalog_proposals,
+)
+from llmrouter.provider_catalog import refresh_provider_catalog
+from llmrouter.runtime import (
+    _build_health_tracker as _build_configured_health_tracker,
+)
+from llmrouter.runtime import (
+    _build_scorer,
+    build_app,
+    build_registry,
+)
 from llmrouter.utils import resolve_api_key
 
 
@@ -165,6 +180,11 @@ def _parse_args() -> argparse.Namespace:
         help="Open the routing configuration and statistics CLI panel.",
     )
     panel_parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Open the full-screen Textual interface instead of the line CLI.",
+    )
+    panel_parser.add_argument(
         "--models-file",
         type=str,
         default=None,
@@ -227,6 +247,23 @@ def _parse_args() -> argparse.Namespace:
         metavar=("MODEL", "PCT"),
         default=None,
         help="Set rollout percentage for a model (0-100), e.g. glm-5.2 25.",
+    )
+
+    tui_parser = subparsers.add_parser(
+        "tui",
+        help="Open the full-screen interactive Textual operator console.",
+    )
+    tui_parser.add_argument(
+        "--models-file",
+        type=str,
+        default=None,
+        help="Model catalog path (default: from config).",
+    )
+    tui_parser.add_argument(
+        "--env-file",
+        type=str,
+        default=".env",
+        help="Environment file updated by configuration actions.",
     )
 
     health_parser = subparsers.add_parser(
@@ -306,6 +343,51 @@ def _parse_args() -> argparse.Namespace:
         help="Assess configured sources only; do not search the web for uncovered models.",
     )
 
+    catalog_sync_parser = subparsers.add_parser(
+        "catalog-sync",
+        help="Discover local Ollama model changes and write review-only proposals.",
+    )
+    catalog_sync_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Proposal JSON path (default: from config).",
+    )
+    catalog_sync_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Do not write; return status 1 when proposals are found.",
+    )
+
+    provider_sync_parser = subparsers.add_parser(
+        "providers-sync",
+        help="Check official provider docs/models and optionally rerank priorities.",
+    )
+    provider_sync_parser.add_argument(
+        "--apply-priority",
+        action="store_true",
+        help="Apply the validated deterministic priority order to the model catalog.",
+    )
+    provider_sync_parser.add_argument(
+        "--apply-catalog",
+        action="store_true",
+        help=(
+            "Add discovered models and retire models absent from complete inventories "
+            "or excluded by source allowlists/denylists."
+        ),
+    )
+    provider_sync_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Do not write; return status 1 when source or priority changes are found.",
+    )
+    provider_sync_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Per-source network timeout in seconds.",
+    )
+
     parser.add_argument(
         "--debug",
         "-d",
@@ -373,6 +455,24 @@ def main() -> None:
             sys.exit(1)
         return
 
+    if args.command == "tui" or (args.command == "panel" and args.tui):
+        try:
+            from llmrouter.tui import run_tui
+        except ModuleNotFoundError as exc:
+            if exc.name == "textual":
+                print(
+                    "The Textual TUI is not installed. "
+                    "Install it with: pip install textual"
+                )
+                return
+            raise
+        run_tui(
+            settings,
+            models_file=args.models_file,
+            env_file=args.env_file,
+        )
+        return
+
     if args.command == "publish-contracts":
         registry = build_registry(
             args.models_file or settings.models_file,
@@ -397,7 +497,9 @@ def main() -> None:
             models_file,
             benchmark_catalog_path=settings.benchmarks.catalog_path,
         )
-        health_tracker = _build_health_tracker_from_settings(settings)
+        health_tracker = (
+            _build_health_tracker_from_settings(settings) if settings.health.enabled else None
+        )
         changed = False
         if args.list_model_priorities:
             print(render_model_priorities(registry, limit=args.priority_limit))
@@ -544,6 +646,76 @@ def main() -> None:
         )
         return
 
+    if args.command == "catalog-sync":
+        models = configured_models(settings.models_file)
+        base_url = settings.providers.ollama.base_url or "http://localhost:11434"
+        try:
+            inventory = fetch_ollama_local_inventory(base_url)
+        except httpx.HTTPError as exc:
+            print(f"Ollama inventory failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        proposals = reconcile_ollama_local_models(models, inventory)
+        if args.check:
+            print(
+                f"Catalog inventory: {len(inventory)} local model(s), "
+                f"{len(proposals)} proposal(s)"
+            )
+            if proposals:
+                sys.exit(1)
+            return
+        report = write_catalog_proposals(
+            args.output or settings.benchmarks.model_catalog_proposals_path,
+            configured_models=len(models),
+            inventory=inventory,
+            proposals=proposals,
+        )
+        print(
+            f"Catalog proposals written: {len(report.proposals)} proposal(s) "
+            f"({report.output_path}); active catalog unchanged"
+        )
+        return
+
+    if args.command == "providers-sync":
+        try:
+            report = refresh_provider_catalog(
+                settings.benchmarks.provider_sources_path,
+                settings.models_file,
+                settings.benchmarks.provider_snapshot_path,
+                settings.benchmarks.provider_report_path,
+                strategy=settings.routing.strategy.value,
+                provider_cost_order=settings.routing.provider_cost_order,
+                benchmark_catalog_path=settings.benchmarks.catalog_path,
+                timeout=args.timeout,
+                apply_priority=args.apply_priority and not args.check,
+                apply_catalog=args.apply_catalog and not args.check,
+                write=not args.check,
+            )
+        except Exception as exc:
+            print(f"Provider catalog sync failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        additions_label = (
+            "added" if args.apply_catalog and not args.check else "new model proposal(s)"
+        )
+        print(
+            f"Provider sync: {report.sources_checked} source(s), "
+            f"{report.sources_changed} changed, {len(report.new_models)} {additions_label}, "
+            f"{len(report.reactivated_models)} reactivated, "
+            f"{len(report.removed_models)} retired/possible removal(s), "
+            f"{len(report.priority_changes)} priority change(s)"
+        )
+        for item in report.new_models:
+            label = "Added" if args.apply_catalog and not args.check else "Proposal"
+            print(f"  {label}: {item['model']} (initial rollout 0%)")
+        if report.source_errors:
+            for error in report.source_errors:
+                print(
+                    f"  source error [{error['provider']}]: {error['url']} — {error['error']}",
+                    file=sys.stderr,
+                )
+        if args.check and report.changed:
+            sys.exit(1)
+        return
+
     # Configure logging based on --debug flag
     setup_logging(debug=args.debug)
     if args.debug:
@@ -570,19 +742,8 @@ def main() -> None:
 
 
 def _build_health_tracker_from_settings(settings: Settings) -> ModelHealthTracker:
-    """Build an in-memory tracker reflecting configured health weights."""
-    from llmrouter.core.health import HealthWeights
-
-    return ModelHealthTracker(
-        store=InMemoryHealthStore(),
-        window_minutes=settings.health.window_minutes,
-        weights=HealthWeights(
-            latency=settings.health.latency_weight,
-            error=settings.health.error_weight,
-            quality=settings.health.quality_weight,
-            cost=settings.health.cost_weight,
-        ),
-    )
+    """Build a tracker using the same health backend as the running service."""
+    return _build_configured_health_tracker(settings)
 
 
 def _build_health_tracker(args: argparse.Namespace) -> ModelHealthTracker:
