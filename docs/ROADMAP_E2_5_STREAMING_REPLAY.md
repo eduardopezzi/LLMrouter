@@ -111,7 +111,7 @@ Definição dos contadores: `stream_hits` conta candidatos que passam pelo thres
 - [x] Análise de QA requisito por requisito registrada em [QA_E2_5_STREAMING_REPLAY.md](QA_E2_5_STREAMING_REPLAY.md).
 - [x] Baseline de produção registrado no Yoda pela porta correta (12345): `/health` e `/v1/llmrouter/cache/stats` responderam 200; o processo usa o commit `da9c781` e reportou todos os contadores legados de streaming em zero. Os serviços Prometheus-01 e Prometheus-02 estavam reiniciando.
 - [x] Publicar o código na `main` via [PR #20](https://github.com/eduardopezzi/LLMrouter/pull/20), atualizar a issue #11 e fazer pull fast-forward local; suíte pós-pull passou.
-- [ ] Implantar a versão instrumentada no Yoda e executar a janela do rollout. Uma worktree isolada em `/home/vieli/LLMrouter-release-ee030f7` foi criada no commit `ee030f7`; `data/` e `.env` apontam para os dados/configuração existentes, e os 72 testes focados passaram em Python 3.12.3 com as variáveis de defaults isoladas. O serviço ainda não foi trocado: instalar o drop-in `/home/vieli/llmrouter-e25.service.conf` e reiniciar requer `sudo`, que não está disponível sem senha nesta sessão.
+- [ ] Implantar a versão instrumentada no Yoda e executar a janela do rollout. Uma worktree isolada em `/home/vieli/LLMrouter-release-ee030f7` foi criada no commit `ee030f7`; os 72 testes focados passaram em Python 3.12.3 sem carregar o `.env` de produção. Também confirmei que `PYTHONPATH` resolve o pacote para o `src/` da worktree quando executado do `WorkingDirectory` atual. O drop-in preparado só define esse `PYTHONPATH`, mantendo `.env`, `config/`, `data/` e o `WorkingDirectory` existentes. A troca ainda não foi aplicada: instalar `/home/vieli/llmrouter-e25.service.conf` e reiniciar requer `sudo`, que não está disponível sem senha nesta sessão.
 
 Para ativar a worktree após obter acesso administrativo:
 
@@ -123,7 +123,7 @@ sudo systemctl show llmrouter --property=ActiveState,WorkingDirectory,ExecStart 
 curl -fsS http://127.0.0.1:12345/health
 ```
 
-Para reverter a troca do diretório de execução, remova o drop-in e reinicie o serviço; para desativar somente o replay, use `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false` no `.env` e reinicie.
+Para reverter a versão do código, remova o drop-in e reinicie o serviço; para desativar somente o replay, use `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false` no `.env` e reinicie.
 
 ## Ordem sugerida de entrega
 
