@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
+from llmrouter.config import get_settings
 from llmrouter.core.budget import (
     DEFAULT_PROJECT_ID,
     DEFAULT_USER_ID,
@@ -33,8 +34,9 @@ from llmrouter.core.cache import CacheManager
 from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.router import MultiModelRouter
+from llmrouter.core.router import MultiModelRouter, NoModelsAvailableError
 from llmrouter.core.scorer import PromptScorer
+from llmrouter.core.semantic_cache import OllamaJudge, SemanticCache
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatMessage,
@@ -50,7 +52,7 @@ from llmrouter.evaluator.feedback import FeedbackLoop
 from llmrouter.evaluator.types import RoutingObservation
 from llmrouter.logging_config import get_logger
 from llmrouter.memory import MemoryEntry, MemoryStore, render_memory_context
-from llmrouter.providers.base import ProviderError
+from llmrouter.providers.base import BaseProvider, ProviderError
 
 _logger = get_logger("llmrouter.api")
 _OBSERVATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,255}$")
@@ -112,6 +114,12 @@ class SemanticInspectPayload(BaseModel):
     model: str | None = None
 
 
+class CacheVerifyPayload(BaseModel):
+    """Body for POST /v1/llmrouter/cache/verify — P-CHR judge run."""
+
+    sample_size: int | None = Field(default=None, gt=0)
+
+
 class BudgetLimitsPayload(BaseModel):
     """Body for POST /v1/llmrouter/budgets — set or replace tenant limits."""
 
@@ -120,6 +128,17 @@ class BudgetLimitsPayload(BaseModel):
     daily_limit_usd: float | None = None
     monthly_limit_usd: float | None = None
     mode: str = Field(default="soft", pattern="^(soft|hard)$")
+
+
+class RagQueryPayload(BaseModel):
+    """Body for POST /v1/llmrouter/rag/query — Dify-compatible retrieval."""
+
+    model_config = ConfigDict(extra="allow")
+
+    query: str = Field(min_length=1, max_length=8192)
+    dataset_id: str | None = Field(default=None, min_length=1, max_length=128)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    score_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 def create_app(
@@ -138,8 +157,10 @@ def create_app(
     health_tracker: ModelHealthTracker | None = None,
     metrics_collector: MetricsCollector | None = None,
     cache_manager: CacheManager | None = None,
+    semantic_cache: SemanticCache | None = None,
     budget_manager: BudgetManager | None = None,
     benchmark_scheduler: BenchmarkRefreshScheduler | None = None,
+    ragflow_client: Any | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -193,8 +214,10 @@ def create_app(
     app.state.health_tracker = health_tracker
     app.state.metrics_collector = metrics_collector
     app.state.cache_manager = cache_manager
+    app.state.semantic_cache = semantic_cache
     app.state.budget_manager = budget_manager
     app.state.benchmark_scheduler = benchmark_scheduler
+    app.state.ragflow_client = ragflow_client
 
     @app.get("/health/models")
     async def health_models(request: Request) -> dict[str, object]:
@@ -325,12 +348,8 @@ def create_app(
         request: Request,
     ) -> Any:
         _require_api_key(request, app.state.api_key)
-        # M6: ResourcePolicy do PRecog — header X-Resource-Policy (JSON).
-        # Payload inválido → 422 claro ANTES de qualquer check de proxy;
-        # válido → aplicado no caminho non-stream.
-        raw_policy = request.headers.get("X-Resource-Policy")
         resource_policy = None
-        policy_clamped: int | None = None
+        raw_policy = request.headers.get("X-Resource-Policy")
         if raw_policy:
             from llmrouter.resource_policy import PolicyValidationError, parse_resource_policy
 
@@ -349,23 +368,20 @@ def create_app(
 
         payload = _with_observation_identity(payload, request)
         chat_request = _with_client_identity(_to_chat_request(payload), request)
-        # M6 enforcement (F2): max_output_tokens é hard-limit do router —
-        # clamp de max_tokens ANTES do proxy. Requests acima do limite não
-        # são recusados: são servidos com o teto da política (fail-open de
-        # usabilidade, fail-closed de custo — o custo nunca excede o teto).
+        policy_clamped: int | None = None
         if resource_policy is not None:
             requested_max = chat_request.max_tokens
-            policy_max = resource_policy.max_output_tokens
-            if requested_max is None or requested_max > policy_max:
-                chat_request = replace(chat_request, max_tokens=policy_max)
+            if requested_max is None or requested_max > resource_policy.max_output_tokens:
+                chat_request = replace(
+                    chat_request,
+                    max_tokens=resource_policy.max_output_tokens,
+                )
                 policy_clamped = requested_max if requested_max is not None else 0
-        # Budget pre-flight (B2 + F3): real pre-call USD cost estimation is
-        # infeasible before routing selects a model, so the check runs with an
-        # estimated cost of 0.0 and relies on post-response record_usage to
-        # accumulate actual spend.  A hard-limit breach denies the request
-        # (402) BEFORE the proxy is invoked — this 402 is emitted by the
-        # budget layer, NOT by a provider, and must NOT enter provider
-        # cooldown (see test_402_budget_vs_provider_cooldown.py).  A soft
+            chat_request = replace(chat_request, resource_policy=resource_policy)
+        # Budget pre-flight (B2): real pre-call cost estimation is infeasible
+        # before routing selects a model, so the check runs with an estimated
+        # cost of 0.0 and relies on post-response record_usage to accumulate
+        # actual spend.  A hard-limit breach denies the request (402); a soft
         # breach is surfaced to the client via the X-Budget-Warning header.
         budget_manager = getattr(app.state, "budget_manager", None)
         budget_project, budget_user = _budget_tenant(request)
@@ -378,6 +394,10 @@ def create_app(
                     detail=budget_decision.reason,
                 )
             budget_warning = budget_decision.warning
+            chat_request = replace(
+                chat_request,
+                budget_remaining_usd=budget_decision.remaining_usd,
+            )
         prompt_directives = _chat_request_directives(chat_request)
         prompt_directives = _resolve_prompt_directives(
             prompt_directives,
@@ -400,9 +420,16 @@ def create_app(
             prompt=chat_request.prompt_text,
             directives=prompt_directives,
         )
+        memory_repository = _precog_repository(payload)
+        memory_project = _memory_scope_project(
+            app.state.memory_store,
+            project=memory_project,
+            repository=memory_repository,
+        )
         memory_entries = _retrieve_memory(
             app.state.memory_store,
             project=memory_project,
+            repository=memory_repository,
             chat_request=chat_request,
             payload=payload,
         )
@@ -434,6 +461,7 @@ def create_app(
                 precog_project=app.state.precog_project,
                 memory_store=app.state.memory_store,
                 memory_project=memory_project,
+                memory_repository=memory_repository,
                 original_chat_request=original_chat_request,
                 memory_entries=memory_entries,
                 health_tracker=app.state.health_tracker,
@@ -446,7 +474,13 @@ def create_app(
         started = time.perf_counter()
         request_id = _request_id(request)
         constraints = _routing_constraints(payload, prompt_directives)
-        decision = await app.state.router.route(chat_request, constraints)
+        try:
+            decision = await app.state.router.route(original_chat_request, constraints)
+        except NoModelsAvailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
 
         # Debug: log routing decision
         _logger.debug(
@@ -503,6 +537,7 @@ def create_app(
             scorer_tier=decision.tier.value,
             request_id=request_id,
             payload=payload,
+            routing_strategy=app.state.router.routing_strategy.value,
             precog_publisher=app.state.precog_publisher,
             precog_project=app.state.precog_project,
             memory_entries=memory_entries,
@@ -516,20 +551,19 @@ def create_app(
             request_id=request_id,
             payload=payload,
             memory_entries=memory_entries,
+            repository=memory_repository,
         )
         # Budget post-response recording (B2).  Best-effort only: budget is
         # observability + governance and must never break the chat response.
         response_headers: dict[str, str] = {}
-        # M6: enforcement non-stream da ResourcePolicy (F2/F5) — usage real
-        # pós-resposta; hard limit violado → erro claro (não silêncio).
         if resource_policy is not None:
             response_headers["X-Resource-Policy-Version"] = resource_policy.version
-            spent = response.usage.total_tokens
-            limit = (
-                resource_policy.max_context_tokens
-                + resource_policy.max_output_tokens
+            max_policy_tokens = (
+                resource_policy.max_context_tokens + resource_policy.max_output_tokens
             )
-            response_headers["X-Budget-Remaining"] = str(max(0, limit - spent))
+            response_headers["X-Budget-Remaining"] = str(
+                max(0, max_policy_tokens - response.usage.total_tokens)
+            )
             if policy_clamped is not None:
                 response_headers["X-Resource-Policy-Clamped"] = "max_tokens"
         if budget_warning:
@@ -615,13 +649,130 @@ def create_app(
         """Return cache hit/miss statistics."""
         _require_api_key(request, app.state.api_key)
         cache: CacheManager | None = getattr(app.state, "cache_manager", None)
-        if cache is None:
+        semantic: SemanticCache | None = getattr(app.state, "semantic_cache", None)
+        if cache is None and semantic is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Cache manager is not configured",
             )
-        stats = await cache.stats()
-        return stats.to_dict()
+        payload: dict[str, object] = {}
+        if cache is not None:
+            stats = await cache.stats()
+            payload.update(stats.to_dict())
+        elif semantic is not None:
+            # QA LOW-10 — keep the exact-cache keys present (zeros) so the
+            # response shape matches the contract even without a cache manager.
+            payload.setdefault("hits", 0)
+            payload.setdefault("misses", 0)
+        if semantic is not None:
+            semantic_stats = getattr(semantic, "stats", None)
+            if callable(semantic_stats):
+                semantic_payload = semantic_stats()
+                if isinstance(semantic_payload, dict):
+                    payload.update(semantic_payload)
+            payload["stream"] = semantic.stream_stats()
+        return payload
+
+    @app.get("/v1/llmrouter/rag/health")
+    async def get_ragflow_health(request: Request) -> dict[str, object]:
+        """Report RAGFlow client state (E5-B1)."""
+        _require_api_key(request, app.state.api_key)
+        ragflow = getattr(app.state, "ragflow_client", None)
+        if ragflow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="RAGFlow coupling is disabled (ragflow.enabled=False)",
+            )
+        stats: dict[str, object] = dict(ragflow.stats)
+        return stats
+
+    @app.post("/v1/llmrouter/rag/query")
+    async def rag_query(
+        payload: RagQueryPayload, request: Request
+    ) -> dict[str, object]:
+        """Proxy a retrieval call to RAGFlow (B1 — Cenário Lite).
+
+        Payload is Dify-compatible: ``knowledge_id`` + ``query``. The
+        response carries either ``records`` (200) or ``degraded: true``
+        (HTTP 200, RAGFlow temporarily unavailable) — never 5xx, so callers
+        can attach fallback behavior uniformly.
+        """
+        _require_api_key(request, app.state.api_key)
+        ragflow = getattr(app.state, "ragflow_client", None)
+        if ragflow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="RAGFlow coupling is disabled (ragflow.enabled=False)",
+            )
+
+        result = await ragflow.retrieval(
+            query=payload.query,
+            dataset_id=payload.dataset_id,
+            top_k=payload.top_k,
+            score_threshold=payload.score_threshold,
+        )
+
+        from llmrouter.core.ragflow_client import RagflowUnavailable
+
+        if isinstance(result, RagflowUnavailable):
+            return {
+                "degraded": True,
+                "error": result.error,
+                "retry_after_seconds": result.retry_after_seconds,
+                "records": [],
+                "query": payload.query,
+                "dataset_id": payload.dataset_id,
+            }
+
+        return {
+            "degraded": False,
+            "records": [
+                {
+                    "content": r.content,
+                    "score": r.score,
+                    "title": r.title,
+                    "metadata": r.metadata,
+                }
+                for r in result
+            ],
+            "query": payload.query,
+            "dataset_id": payload.dataset_id,
+        }
+    @app.post("/v1/llmrouter/cache/verify")
+    async def verify_cache_hits(
+        request: Request,
+        payload: CacheVerifyPayload | None = None,
+    ) -> dict[str, object]:
+        """Audit pending semantic-cache hit-log rows with the local LLM judge.
+
+        Runs :meth:`SemanticCache.verify_pending` on up to ``sample_size``
+        pending rows (default: ``settings.semantic_cache.verify_sample_size``)
+        using an :class:`OllamaJudge` built from the verify-judge settings.
+        Returns the ``{checked, ok, mismatch, error, buckets}`` summary.
+        """
+        _require_api_key(request, app.state.api_key)
+        semantic: SemanticCache | None = getattr(app.state, "semantic_cache", None)
+        if semantic is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Semantic cache is not configured",
+            )
+        settings = get_settings()
+        body_sample = payload.sample_size if payload is not None else None
+        sample_size = body_sample or settings.semantic_cache.verify_sample_size
+        judge = OllamaJudge(
+            base_url=settings.semantic_cache.verify_judge_base_url,
+            model=settings.semantic_cache.verify_judge_model,
+            timeout_seconds=settings.semantic_cache.verify_judge_timeout_seconds,
+        )
+        try:
+            return await semantic.verify_pending(sample_size, judge)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client as 500
+            _logger.error("P-CHR verify run failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Verify run failed: {exc}",
+            ) from exc
 
     @app.post("/admin/evaluator/run-cycle")
     async def run_evaluator_cycle(request: Request, limit: int = 50) -> dict[str, object]:
@@ -698,6 +849,12 @@ def create_app(
     return app
 
 
+_STREAM_PROBE_CIRCUIT: dict[str, list[float]] = {}
+# QA MEDIUM-9 — cap on chunks retained for cache storage (memory guard;
+# providers that never emit finish_reason stop accumulating at this bound).
+_STREAM_STORE_MAX_CHUNKS = 2048
+
+
 async def _stream_response(
     *,
     request: Request,
@@ -710,6 +867,7 @@ async def _stream_response(
     precog_project: str = "llmrouter",
     memory_store: MemoryStore | None = None,
     memory_project: str = "default",
+    memory_repository: str = "",
     original_chat_request: ChatRequest | None = None,
     memory_entries: list[MemoryEntry] | None = None,
     health_tracker: ModelHealthTracker | None = None,
@@ -717,11 +875,11 @@ async def _stream_response(
     budget_project: str = DEFAULT_PROJECT_ID,
     budget_user: str = DEFAULT_USER_ID,
     budget_warning: str | None = None,
+    semantic_cache: SemanticCache | None = None,
+    selected_provider: BaseProvider | None = None,
+    probe_soft_circuit: dict[str, list[float]] | None = None,
 ) -> StreamingResponse:
     """Build a Server-Sent Events streaming response for chat completions.
-
-    Routes the request through the multi-model router, then streams chunks
-    from the selected provider proxy in OpenAI SSE format.
 
     Budget enforcement is pre-flight only in the streaming path.  The
     ``X-Budget-Warning`` header (when applicable) is attached to the
@@ -731,15 +889,44 @@ async def _stream_response(
     wrapping the generator in an async ``finally`` block would still miss
     client-side aborts.  This honest limitation is documented for a
     future iteration that instruments the proxy's stream-end usage hook.
+
+    The optional ``semantic_cache``, ``selected_provider`` and
+    ``probe_soft_circuit`` parameters are injected by the route layer (or
+    by tests).  When omitted, the function falls back to ``request.app.state``
+    for ``semantic_cache`` and disables the probe circuit breaker (live only).
     """
     original_chat_request = original_chat_request or chat_request
     prompt_directives = _chat_request_directives(original_chat_request)
     constraints = _routing_constraints(payload, prompt_directives)
-    decision = await app_router.route(chat_request, constraints)
+    try:
+        decision = await app_router.route(original_chat_request, constraints)
+    except NoModelsAvailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     selected_model = decision.primary
     started = time.perf_counter()
     request_id = _request_id(request)
     memory_entries = memory_entries or []
+
+    # ROADMAP_TOKEN_OPTIMIZATION E2 — resolve replay dependencies.
+    # QA CRITICAL-1: the route call-site never injected ``selected_provider``,
+    # so the replay path was dormant in production.  Resolve the provider
+    # from the proxy's registry (keyed by the selected model's provider kind);
+    # fall back to ``app.state`` for tests that inject a custom stub.
+    if semantic_cache is None:
+        semantic_cache = getattr(request.app.state, "semantic_cache", None)
+    if selected_provider is None:
+        selected_provider = getattr(request.app.state, "selected_provider", None)
+    if selected_provider is None:
+        provider_registry = getattr(proxy, "_providers", None)
+        if provider_registry is not None:
+            selected_provider = provider_registry.get(selected_model.provider)
+    # QA CRITICAL-2: a per-call dict could never trip across requests; keep
+    # the circuit state at module level so consecutive requests cooperate.
+    if probe_soft_circuit is None:
+        probe_soft_circuit = _STREAM_PROBE_CIRCUIT
 
     _log_chat_access(
         request=request,
@@ -759,15 +946,99 @@ async def _stream_response(
     )
     _logger.debug("Reason: %s", decision.reason)
 
+    # ROADMAP_TOKEN_OPTIMIZATION E2 / QA HIGH-5 — resolve the replay decision
+    # EAGERLY, before building the StreamingResponse.  Under real ASGI the
+    # headers are serialized when the response starts; a decision made inside
+    # the body generator can never influence them.  Deciding here lets the
+    # ``X-LLMrouter-Cache-Status: semantic_hit`` header be set on the
+    # response constructor, visible to real clients.
+    stream_headers: dict[str, str] = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "X-LLMrouter-Request-Id": request_id,
+    }
+    if budget_warning:
+        stream_headers["X-Budget-Warning"] = budget_warning
+    # ROADMAP_TOKEN_OPTIMIZATION E2 — advertise semantic cache replay status
+    # via a header (never inside the SSE chunk to preserve OpenAI compatibility).
+    if semantic_cache is not None and getattr(
+        semantic_cache, "stream_cache_enabled", False
+    ):
+        stream_headers["X-LLMrouter-Stream-Cache"] = "enabled"
+
+    replay_decision: tuple[list[dict[str, Any]], int] | None = None
+    if (
+        semantic_cache is not None
+        and getattr(semantic_cache, "stream_cache_enabled", False)
+        and selected_provider is not None
+        and probe_soft_circuit is not None
+    ):
+        replay_decision = await _maybe_replay_stream(
+            semantic_cache=semantic_cache,
+            selected_provider=selected_provider,
+            chat_request=chat_request,
+            selected_model=selected_model,
+            probe_soft_circuit=probe_soft_circuit,
+        )
+
+    if replay_decision is not None:
+        stream_headers["X-LLMrouter-Cache-Status"] = "semantic_hit"
+
     async def event_generator() -> AsyncIterator[str]:
         collected_content: list[str] = []
         saw_output = False
+        replay_active = False
+        replay_bytes = 0
+        # QA HIGH-4 — live-path bookkeeping: real normalized chunks plus a
+        # completion signal observed from the provider itself.
+        raw_chunks: list[dict[str, Any]] = []
+        saw_finish_reason = False
         try:
+            # ROADMAP_TOKEN_OPTIMIZATION E2 — replay the cached chunks.  The
+            # decision (lookup + probe) was already made eagerly above; this
+            # branch only iterates the resolved chunks.
+            if replay_decision is not None:
+                cached_chunks, completion_tokens = replay_decision
+                replay_active = True
+                for cached_chunk in cached_chunks:
+                    normalized_chunk = _normalize_stream_chunk(
+                        cached_chunk, selected_model.name
+                    )
+                    if normalized_chunk is None:
+                        continue
+                    saw_output = (
+                        saw_output
+                        or _chunk_has_assistant_output(normalized_chunk)
+                    )
+                    line = f"data: {json.dumps(normalized_chunk)}\n\n"
+                    replay_bytes += len(line)
+                    yield line
+                    _extract_delta_text(normalized_chunk, collected_content)
+                try:
+                    if completion_tokens and semantic_cache is not None:
+                        semantic_cache.bump_stream_counter(
+                            "stream_tokens_saved_total", completion_tokens
+                        )
+                except Exception:  # pragma: no cover - never block the replay
+                    pass
+                yield "data: [DONE]\n\n"
+                return
             async for chunk in proxy.stream_chat_completion(chat_request, decision):
                 normalized_chunk = _normalize_stream_chunk(chunk, selected_model.name)
                 if normalized_chunk is None:
                     continue
                 saw_output = saw_output or _chunk_has_assistant_output(normalized_chunk)
+                # QA HIGH-4/MEDIUM-9 — keep the provider's normalized chunks
+                # (preserving id/created) and note whether a terminal
+                # finish_reason actually arrived; the cache store refuses
+                # truncated streams and replays the real chunk sequence
+                # instead of a single synthetic envelope.
+                if raw_chunks is not None and len(raw_chunks) < _STREAM_STORE_MAX_CHUNKS:
+                    raw_chunks.append(normalized_chunk)
+                for choice in normalized_chunk.get("choices", []):
+                    if choice.get("finish_reason"):
+                        saw_finish_reason = True
                 # Forward a normalized OpenAI-compatible chunk to the client.
                 yield f"data: {json.dumps(normalized_chunk)}\n\n"
                 # Accumulate content for observation recording
@@ -780,13 +1051,38 @@ async def _stream_response(
                     selected_model.provider.value,
                     selected_model.provider_model_name,
                 )
+            # Persist a validated stream response into the cache (best-effort).
+            # QA HIGH-4: only when the provider itself signalled completion.
+            if (
+                semantic_cache is not None
+                and getattr(semantic_cache, "stream_cache_enabled", False)
+                and saw_output
+                and saw_finish_reason
+            ):
+                await _store_stream_response_if_valid(
+                    semantic_cache=semantic_cache,
+                    chat_request=chat_request,
+                    selected_model=selected_model,
+                    collected_content=collected_content,
+                    raw_chunks=raw_chunks,
+                )
+            yield "data: [DONE]\n\n"
+            return
         except ProviderError as exc:
             error_payload = {"error": {"message": str(exc), "type": "provider_error"}}
             yield f"data: {json.dumps(error_payload)}\n\n"
             return
+        except GeneratorExit:
+            # Client disconnected — surface for the storage layer to skip.
+            if semantic_cache is not None:
+                try:
+                    semantic_cache.bump_stream_counter("stream_replay_error_total", 1)
+                except Exception:
+                    pass
+            return
         finally:
-            yield "data: [DONE]\n\n"
-            # Record observation (best-effort)
+            # QA: no yield inside ``finally`` — yielding after GeneratorExit
+            # raises RuntimeError (async generator ignored GeneratorExit).
             latency_ms = (time.perf_counter() - started) * 1000
             response_text = "".join(collected_content)
             # Approximate token count for observation and memory metadata.
@@ -809,6 +1105,7 @@ async def _stream_response(
                     scorer_tier=decision.tier.value,
                     request_id=request_id,
                     payload=payload,
+                    routing_strategy=app_router.routing_strategy.value,
                     precog_publisher=precog_publisher,
                     precog_project=precog_project,
                     memory_entries=memory_entries,
@@ -822,23 +1119,160 @@ async def _stream_response(
                 request_id=request_id,
                 payload=payload,
                 memory_entries=memory_entries,
+                repository=memory_repository,
             )
             await _log_selected_model_health(health_tracker, selected_model.name, latency_ms)
+            if replay_active and semantic_cache is not None:
+                try:
+                    semantic_cache.bump_stream_counter(
+                        "stream_replays_total", 1
+                    )
+                    semantic_cache.bump_stream_counter(
+                        "stream_replay_bytes_served_total", replay_bytes
+                    )
+                except Exception:  # pragma: no cover
+                    pass
 
-    stream_headers: dict[str, str] = {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",
-        "X-LLMrouter-Request-Id": request_id,
-    }
-    if budget_warning:
-        stream_headers["X-Budget-Warning"] = budget_warning
-
-    return StreamingResponse(
+    response = StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers=stream_headers,
     )
+    return response
+
+
+async def _maybe_replay_stream(
+    *,
+    semantic_cache: SemanticCache,
+    selected_provider: BaseProvider,
+    chat_request: ChatRequest,
+    selected_model: Any,
+    probe_soft_circuit: dict[str, list[float]],
+) -> tuple[list[dict[str, Any]], int] | None:
+    """Run the k-token probe and replay cached chunks when the probe matches.
+
+    Returns ``(cached_chunks, completion_tokens)`` on a successful replay or
+    ``None`` if the replay path should be skipped (miss / probe diverge /
+    NotImplementedError / soft-circuit open).  All counter bumps happen
+    here so the generator can stay focused on yielding.
+    """
+    # Soft-circuit: skip the probe for this model if too many recent probes
+    # failed within the configured window.  Empty dict => always probe.
+    threshold = semantic_cache.stream_probe_soft_circuit_threshold
+    window = semantic_cache.stream_probe_soft_circuit_seconds
+    circuit = probe_soft_circuit.setdefault(selected_model.name, [])
+    now = time.monotonic()
+    circuit[:] = [t for t in circuit if now - t <= window]
+    if len(circuit) >= threshold:
+        # Open-circuit: bypass replay entirely, fall through to the live
+        # path in the caller.  ``circuit`` is left untouched so consecutive
+        # requests within the window keep skipping the probe.
+        return None
+
+    try:
+        cached = await semantic_cache.lookup_stream_response(
+            chat_request.prompt_text,
+            model=selected_model.name,
+            tier=int(selected_model.tier),
+            temperature=chat_request.temperature or 0.0,
+            top_p=chat_request.top_p or 1.0,
+            max_tokens=chat_request.max_tokens,
+        )
+    except Exception:  # pragma: no cover - defensive: never block live path
+        cached = None
+    if cached is None:
+        return None
+
+    cached_chunks, completion_tokens, first_k = cached
+    # Run the k-token probe against the live provider.
+    # QA MEDIUM-7 — honour stream_probe_timeout_seconds: a hung provider must
+    # not stall the stream; fall back to live on timeout.
+    k = semantic_cache.stream_probe_k
+    try:
+        prefix = await asyncio.wait_for(
+            selected_provider.first_tokens(chat_request, selected_model.name, k),
+            timeout=semantic_cache.stream_probe_timeout_seconds,
+        )
+    except NotImplementedError:
+        semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
+        circuit.append(now)
+        return None
+    except Exception:
+        semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
+        circuit.append(now)
+        return None
+
+    if (prefix or "").strip() != (first_k or "").strip():
+        semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
+        circuit.append(now)
+        return None
+
+    # Successful replay — reset circuit, bump counters.
+    circuit.clear()
+    semantic_cache.bump_stream_counter("stream_probes_ok_total", 1)
+    return cached_chunks, completion_tokens
+
+
+async def _store_stream_response_if_valid(
+    *,
+    semantic_cache: SemanticCache,
+    chat_request: ChatRequest,
+    selected_model: Any,
+    collected_content: list[str],
+    raw_chunks: list[dict[str, Any]] | None,
+) -> None:
+    """Persist the live stream response into the cache when it ended cleanly.
+
+    QA HIGH-4/MEDIUM-9 — the caller only reaches this point when the provider
+    emitted a terminal ``finish_reason``.  We store the provider's real
+    normalized chunks (preserving ``id``/``created``) so the replay is
+    chunk-by-chunk instead of a single synthetic envelope.  A synthetic
+    envelope is used only as a last-resort fallback when no chunks were
+    captured, and it is never fabricated without the caller's completion
+    guarantee.
+    """
+    response_text = "".join(collected_content)
+    if not response_text:
+        return
+    approx_tokens = max(len(response_text) // 4, 1)
+    usage = Usage(
+        prompt_tokens=len(chat_request.prompt_text) // 4,
+        completion_tokens=approx_tokens,
+        total_tokens=(len(chat_request.prompt_text) // 4) + approx_tokens,
+    )
+    chunks_to_store: list[dict[str, Any]]
+    if raw_chunks:
+        chunks_to_store = raw_chunks
+    else:  # pragma: no cover - defensive fallback
+        chunks_to_store = [
+            {
+                "id": f"chatcmpl-{int(time.time() * 1000)}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": selected_model.name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": response_text},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ]
+    try:
+        await semantic_cache.store_stream_response(
+            chunks_to_store,
+            prompt=chat_request.prompt_text,
+            usage=usage,
+            model=selected_model.name,
+            tier=int(selected_model.tier),
+            temperature=chat_request.temperature or 0.0,
+            top_p=chat_request.top_p or 1.0,
+            max_tokens=chat_request.max_tokens,
+            k=semantic_cache.stream_probe_k,
+        )
+    except Exception:  # pragma: no cover - never break the response
+        pass
 
 
 def _log_chat_access(
@@ -1015,6 +1449,7 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
         max_tokens=payload.max_tokens or payload.max_completion_tokens,
         stream=payload.stream,
         top_p=payload.top_p if payload.top_p is not None else 1.0,
+        top_p_explicit=payload.top_p is not None and "top_p" in payload.model_fields_set,
         stop=_normalize_stop(payload.stop),
         extra=extra,
     )
@@ -1083,6 +1518,21 @@ def _memory_default_project(
     return memory_store.config.default_project or fallback
 
 
+def _memory_scope_project(
+    memory_store: MemoryStore | None,
+    *,
+    project: str,
+    repository: str,
+) -> str:
+    """Resolve the project namespace when repository provenance is absent."""
+    if memory_store is None or repository:
+        return project
+    scope = str(getattr(memory_store.config, "no_repository_scope", "project")).lower()
+    if scope == "global":
+        return memory_store.config.default_project or project
+    return project
+
+
 def _memory_project(
     payload: ChatCompletionPayload,
     request: Request,
@@ -1116,6 +1566,17 @@ def _memory_project(
         _infer_project_from_prompt(prompt) is not None,
     )
     return result
+
+
+def _precog_repository(payload: ChatCompletionPayload) -> str:
+    """Read optional repository provenance from supported request metadata."""
+    for metadata in (payload.llmrouter, payload.metadata, payload.extra):
+        if not isinstance(metadata, dict):
+            continue
+        repository = metadata.get("repository") or metadata.get("repo")
+        if isinstance(repository, str) and repository.strip():
+            return repository.strip()
+    return ""
 
 
 def _chat_request_directives(chat_request: ChatRequest) -> dict[str, str]:
@@ -1173,11 +1634,15 @@ def _resolve_prompt_directives(
     resolved = dict(directives)
     if model := resolved.get("model"):
         model_match = _closest_model_name(model, registry)
-        if model_match and model_match != model:
-            _logger.debug("Prompt directive model fuzzy matched: %s -> %s", model, model_match)
+        if model_match:
+            if model_match != model:
+                _logger.debug("Prompt directive model fuzzy matched: %s -> %s", model, model_match)
             resolved["model"] = model_match
+        elif model.strip().casefold() not in {"auto", "default"}:
+            _logger.debug("Ignoring unmatched prompt model directive: %s", model)
+            resolved.pop("model", None)
     if project := resolved.get("project"):
-        project_match = _closest_word(project, project_candidates)
+        project_match = _closest_word(project, project_candidates, cutoff=0.6)
         if project_match and project_match != project:
             _logger.debug(
                 "Prompt directive project fuzzy matched: %s -> %s",
@@ -1189,23 +1654,33 @@ def _resolve_prompt_directives(
 
 
 def _closest_model_name(term: str, registry: ModelRegistry) -> str | None:
+    normalized_term = term.strip().strip("<>[]{}()").strip()
+    if not normalized_term or normalized_term.casefold() in {
+        "model",
+        "model_id",
+        "model-id",
+        "model name",
+        "model_name",
+        "placeholder",
+    }:
+        return None
     choices: dict[str, str] = {}
     for model in registry.models:
         choices[model.name] = model.name
         choices[model.provider_model_name] = model.name
         choices[model.name.removeprefix(f"{model.provider.value}/")] = model.name
-    matched = _closest_word(term, list(choices))
+    matched = _closest_word(normalized_term, list(choices), cutoff=0.7)
     return choices.get(matched or "")
 
 
-def _closest_word(term: str, words: list[str]) -> str | None:
+def _closest_word(term: str, words: list[str], *, cutoff: float = 0.0) -> str | None:
     unique_words = [word for word in dict.fromkeys(words) if word]
     if not term or not unique_words:
         return None
     exact = {word.casefold(): word for word in unique_words}
     if term.casefold() in exact:
         return exact[term.casefold()]
-    result = difflib.get_close_matches(term, unique_words, n=1, cutoff=0.0)
+    result = difflib.get_close_matches(term, unique_words, n=1, cutoff=cutoff)
     return result[0] if result else None
 
 
@@ -1292,6 +1767,7 @@ def _retrieve_memory(
     memory_store: MemoryStore | None,
     *,
     project: str,
+    repository: str = "",
     chat_request: ChatRequest,
     payload: ChatCompletionPayload,
 ) -> list[MemoryEntry]:
@@ -1303,8 +1779,22 @@ def _retrieve_memory(
             "Memory retrieval skipped: project=%s reason=memory_disabled via payload", project
         )
         return []
-    query_len = len(chat_request.prompt_text)
-    entries = memory_store.retrieve(project=project, query=chat_request.prompt_text)
+    if (
+        not repository
+        and str(getattr(memory_store.config, "no_repository_scope", "project")).lower()
+        == "disabled"
+    ):
+        _logger.debug(
+            "Memory retrieval skipped: project=%s reason=no_repository_scope_disabled",
+            project,
+        )
+        return []
+    query = chat_request.routing_prompt_text(max_chars=memory_store.config.query_max_chars)
+    query_len = len(query)
+    if repository:
+        entries = memory_store.retrieve(project=project, query=query, repository=repository)
+    else:
+        entries = memory_store.retrieve(project=project, query=query)
     if entries:
         _logger.debug(
             "Memory retrieval: project=%s query_len=%d hits=%d ids=%s scores=%s",
@@ -1367,8 +1857,15 @@ def _record_memory(
     request_id: str,
     payload: ChatCompletionPayload,
     memory_entries: list[MemoryEntry],
+    repository: str = "",
 ) -> None:
     if memory_store is None or _memory_disabled(payload):
+        return
+    if (
+        not repository
+        and str(getattr(memory_store.config, "no_repository_scope", "project")).lower()
+        == "disabled"
+    ):
         return
     response_text = "\n".join(_choice_text(choice) for choice in response_payload).strip()
     metadata = {
@@ -1388,12 +1885,15 @@ def _record_memory(
         selected_model.name,
         [entry.id for entry in memory_entries],
     )
-    recorded = memory_store.record_interaction(
-        project=project,
-        prompt=chat_request.prompt_text,
-        response=response_text,
-        metadata=metadata,
-    )
+    record_kwargs: dict[str, Any] = {
+        "project": project,
+        "prompt": chat_request.prompt_text,
+        "response": response_text,
+        "metadata": metadata,
+    }
+    if repository:
+        record_kwargs["repository"] = repository
+    recorded = memory_store.record_interaction(**record_kwargs)
     if recorded:
         _logger.debug(
             "Memory recorded successfully: project=%s model=%s", project, selected_model.name
@@ -1445,6 +1945,7 @@ def _record_observation(
     scorer_tier: int,
     request_id: str | None,
     payload: ChatCompletionPayload,
+    routing_strategy: str = "unknown",
     precog_publisher: Any | None = None,
     precog_project: str = "llmrouter",
     memory_entries: list[MemoryEntry] | None = None,
@@ -1456,11 +1957,31 @@ def _record_observation(
     metadata = {
         "provider": selected_model.provider.value,
         "provider_model": selected_model.provider_model_name,
+        "routing_strategy": routing_strategy,
+        "scorer_tier": str(scorer_tier),
+        "rag_used": str(_rag_metadata(payload)["used"]).lower(),
+        "memory_used": str(bool(memory_entries)).lower(),
     }
+    rag = _rag_metadata(payload)
+    metadata["rag_collection"] = str(rag["collection"] or "")
+    metadata["rag_top_k"] = str(rag["top_k"])
+    metadata["rag_context_tokens"] = str(rag["context_tokens"])
     if request_id:
         metadata["request_id"] = request_id
     if memory_entries:
         metadata["memory_ids"] = ",".join(str(entry.id) for entry in memory_entries)
+    resource_policy = chat_request.resource_policy
+    if resource_policy is not None:
+        policy_id = getattr(resource_policy, "policy_id", None) or getattr(
+            resource_policy, "id", None
+        )
+        if policy_id is not None:
+            metadata["resource_policy_id"] = str(policy_id)
+        policy_version = getattr(resource_policy, "version", None)
+        if policy_version is not None:
+            metadata["resource_policy_version"] = str(policy_version)
+    if chat_request.budget_remaining_usd is not None:
+        metadata["budget_remaining_usd"] = chat_request.budget_remaining_usd
     if collector is not None:
         collector.record(
             RoutingObservation(
@@ -1758,9 +2279,7 @@ async def _record_budget_usage(
             usage.prompt_tokens,
             usage.completion_tokens,
         )
-        cost_known = not (
-            model.cost_per_1k_input == 0.0 and model.cost_per_1k_output == 0.0
-        )
+        cost_known = not (model.cost_per_1k_input == 0.0 and model.cost_per_1k_output == 0.0)
         await budget_manager.record_usage(project, user, cost, cost_known=cost_known)
         _logger.debug(
             "Budget usage recorded: project=%s user=%s model=%s cost=%.6f cost_known=%s",

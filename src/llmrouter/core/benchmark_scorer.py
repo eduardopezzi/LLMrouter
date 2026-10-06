@@ -32,6 +32,30 @@ BENCHMARK_WEIGHTS: dict[str, float] = {
 
 assert math.isclose(sum(BENCHMARK_WEIGHTS.values()), 1.0), "benchmark weights must sum to 1.0"
 
+# Default ranking weights for current agentic/software-engineering model cards.
+# The legacy ``BENCHMARK_WEIGHTS`` remains stable for callers that use the
+# low-level scorer directly.
+RANKING_BENCHMARK_WEIGHTS: dict[str, float] = {
+    "mmlu": 0.10,
+    "humaneval": 0.10,
+    "gpqa": 0.10,
+    "mt_bench": 0.05,
+    "ruler": 0.05,
+    "terminalbench21": 0.10,
+    "terminalbench30": 0.10,
+    "deepswe": 0.10,
+    "nl2repo": 0.05,
+    "toolathlonverified": 0.05,
+    "automationbench": 0.05,
+    "agentslastexam": 0.05,
+    "hlewithtools": 0.05,
+    "cybergym": 0.05,
+}
+
+assert math.isclose(sum(RANKING_BENCHMARK_WEIGHTS.values()), 1.0), (
+    "ranking benchmark weights must sum to 1.0"
+)
+
 _BENCHMARK_ALIASES: dict[str, str] = {
     "mmlu": "MMLU-Pro",
     "mmlupro": "MMLU-Pro",
@@ -51,6 +75,17 @@ _BENCHMARK_ALIASES: dict[str, str] = {
     "corpusqa": "CorpusQA 1M",
     "corpusqa1m": "CorpusQA 1M",
     "terminalbench20": "TerminalBench 2.0",
+    "terminalbench21": "TerminalBench 2.1",
+    "terminalbench30": "TerminalBench 3.0",
+    "deepswe": "DeepSWE v1.1",
+    "deepswev11": "DeepSWE v1.1",
+    "nl2repo": "NL2Repo",
+    "toolathlonverified": "Toolathlon Verified",
+    "automationbench": "AutomationBench v1.0.6",
+    "automationbenchv106": "AutomationBench v1.0.6",
+    "agentslastexam": "Agents Last Exam",
+    "hlewithtools": "HLE with Tools",
+    "cybergym": "CyberGym",
     "swebenchverified": "SWE-Bench Verified",
     "swebenchpro": "SWE-Bench Pro",
     "browsecomp": "BrowseComp",
@@ -190,8 +225,9 @@ def score_model(
 ) -> ModelScore:
     """Compute a full scoring breakdown for a model under a routing strategy."""
     benchmark_scores = dict(model.benchmark_scores) or _lookup_benchmark_scores(model.name)
-    benchmark_score = _benchmark_quality_score(benchmark_scores, benchmark_weights)
-    benchmark_coverage = _benchmark_coverage(benchmark_scores, benchmark_weights)
+    ranking_weights = benchmark_weights or RANKING_BENCHMARK_WEIGHTS
+    benchmark_score = _benchmark_quality_score(benchmark_scores, ranking_weights)
+    benchmark_coverage = _benchmark_coverage(benchmark_scores, ranking_weights)
 
     tier_score = _tier_score(model.tier)
     ctx_score = _context_window_score(model.context_window)
@@ -233,7 +269,7 @@ def score_model(
             "strategy": strategy,
             "provider_cost_order": provider_cost_order,
             "benchmark_breakdown": benchmark_scores,
-            "benchmark_weights": benchmark_weights,
+            "benchmark_weights": ranking_weights,
             "benchmark_coverage": round(benchmark_coverage, 4),
         },
     )

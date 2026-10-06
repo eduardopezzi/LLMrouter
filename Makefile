@@ -2,6 +2,7 @@
 ## Uso: make <alvo>
 
 PYTHONPATH := src
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 HOST ?= 0.0.0.0
 PORT ?= 12345
 WORKERS ?= 1
@@ -9,7 +10,7 @@ CONTRACT ?= contracts/llmrouter.contract.json
 PREVIOUS_CONTRACT ?= contracts/previous.llmrouter.contract.json
 CONTRACTS_REPO ?= https://github.com/Vieli-Tech/phoenix_versions.git
 
-.PHONY: help install install-dev run run-reload run-debug panel panel-stats contracts-export contracts-check contracts-diff contracts-publish benchmarks-refresh benchmarks-check benchmarks-research test lint format typecheck clean docker-build docker-run
+.PHONY: help install install-dev run run-reload run-debug panel tui panel-stats contracts-export contracts-check contracts-diff contracts-publish benchmarks-refresh benchmarks-check benchmarks-research providers-sync providers-update test lint format typecheck clean docker-build docker-run
 
 help: ## Mostra os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -31,6 +32,9 @@ run-debug: ## Inicia o servidor com debug logging (mostra roteamento, scoring, f
 
 panel: ## Abre painel CLI de roteamento e estatisticas
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main panel
+
+tui: ## Abre a interface interativa Textual do LLMrouter
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m llmrouter.main tui
 
 panel-stats: ## Mostra estatisticas do painel CLI e sai
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main panel --stats
@@ -55,6 +59,12 @@ benchmarks-check: ## Verifica atualizações de benchmarks sem alterar arquivos
 
 benchmarks-research: ## Pesquisa fontes para modelos sem notas; gera propostas para revisão
 	PYTHONPATH=$(PYTHONPATH) python -m llmrouter.main benchmarks-research
+
+providers-sync: ## Verifica docs/modelos oficiais e recalcula prioridades
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m llmrouter.main providers-sync --apply-priority
+
+providers-update: ## Sincroniza o catálogo ativo com os inventários oficiais
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m llmrouter.main providers-sync --apply-catalog
 
 test: ## Executa os testes
 	pytest

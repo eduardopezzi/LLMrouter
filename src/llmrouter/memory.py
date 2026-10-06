@@ -28,9 +28,12 @@ class MemoryConfig:
     backend: str = "local"
     db_path: str = "data/llmrouter_memory.db"
     default_project: str = "default"
+    no_repository_scope: str = "project"
     top_k: int = 4
     min_score: float = 0.12
     max_context_chars: int = 2400
+    query_max_chars: int = 6000
+    auth_failure_cooldown_seconds: float = 60.0
     min_prompt_chars: int = 80
     min_response_chars: int = 40
 
@@ -44,9 +47,12 @@ class PrecogMemoryConfig:
     api_key: str | None = None
     timeout: float = 3.0
     default_project: str = "default"
+    no_repository_scope: str = "project"
     top_k: int = 4
     min_score: float = 0.12
     max_context_chars: int = 2400
+    query_max_chars: int = 6000
+    auth_failure_cooldown_seconds: float = 60.0
     query_path: str = "/internal/rag/query"
     record_path: str = "/internal/llmrouter/observations"
 
@@ -77,7 +83,13 @@ class MemoryStore(Protocol):
         """Return runtime config for context rendering and project defaults."""
         ...
 
-    def retrieve(self, *, project: str, query: str) -> list[MemoryEntry]:
+    def retrieve(
+        self,
+        *,
+        project: str,
+        query: str,
+        repository: str | None = None,
+    ) -> list[MemoryEntry]:
         """Return memories relevant to a query within one project."""
         ...
 
@@ -88,6 +100,7 @@ class MemoryStore(Protocol):
         prompt: str,
         response: str,
         metadata: dict[str, Any] | None = None,
+        repository: str | None = None,
     ) -> bool:
         """Persist an interaction when useful for future requests."""
         ...
@@ -104,7 +117,13 @@ class SQLiteMemoryStore:
     def config(self) -> MemoryConfig:
         return self._config
 
-    def retrieve(self, *, project: str, query: str) -> list[MemoryEntry]:
+    def retrieve(
+        self,
+        *,
+        project: str,
+        query: str,
+        repository: str | None = None,
+    ) -> list[MemoryEntry]:
         """Return memories relevant to a query within one project."""
         if not self._config.enabled or not query.strip():
             return []
@@ -119,11 +138,11 @@ class SQLiteMemoryStore:
                 """
                 SELECT id, project, prompt, response, metadata_json, token_json
                 FROM memories
-                WHERE project = ?
+                WHERE project = ? AND repository = ?
                 ORDER BY id DESC
                 LIMIT 400
                 """,
-                (project,),
+                (project, repository or ""),
             ).fetchall()
 
         for row in rows:
@@ -152,6 +171,7 @@ class SQLiteMemoryStore:
         prompt: str,
         response: str,
         metadata: dict[str, Any] | None = None,
+        repository: str | None = None,
     ) -> bool:
         """Persist an interaction when it is substantial enough to be useful later."""
         if not self._config.enabled:
@@ -174,11 +194,12 @@ class SQLiteMemoryStore:
             db.execute(
                 """
                 INSERT INTO memories (
-                    project, prompt, response, metadata_json, token_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    project, repository, prompt, response, metadata_json, token_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
+                    repository or "",
                     prompt,
                     response,
                     json.dumps(metadata or {}, sort_keys=True),
@@ -199,6 +220,7 @@ class SQLiteMemoryStore:
                 CREATE TABLE IF NOT EXISTS memories (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project TEXT NOT NULL,
+                    repository TEXT NOT NULL DEFAULT '',
                     prompt TEXT NOT NULL,
                     response TEXT NOT NULL,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -206,9 +228,20 @@ class SQLiteMemoryStore:
                     created_at INTEGER NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_memories_project_id
-                    ON memories(project, id DESC);
                 """
+            )
+            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(memories)")}
+            if "repository" not in columns:
+                db.execute(
+                    "ALTER TABLE memories ADD COLUMN repository TEXT NOT NULL DEFAULT ''"
+                )
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_memories_project_repository_id "
+                    "ON memories(project, repository, id DESC)"
+                )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_project_id "
+                "ON memories(project, repository, id DESC)"
             )
             db.commit()
         self._initialized = True
@@ -220,13 +253,20 @@ class PrecogMemoryStore:
     def __init__(self, config: PrecogMemoryConfig, *, raise_on_error: bool = False) -> None:
         self._config = config
         self._raise_on_error = raise_on_error
+        self._auth_blocked_until = 0.0
 
     @property
     def config(self) -> PrecogMemoryConfig:
         return self._config
 
-    def retrieve(self, *, project: str, query: str) -> list[MemoryEntry]:
-        if not self._config.enabled or not query.strip():
+    def retrieve(
+        self,
+        *,
+        project: str,
+        query: str,
+        repository: str | None = None,
+    ) -> list[MemoryEntry]:
+        if not self._config.enabled or not query.strip() or self._auth_blocked():
             return []
         payload = {
             "project": project,
@@ -236,6 +276,8 @@ class PrecogMemoryStore:
             "max_context_chars": self._config.max_context_chars,
             "source": "llmrouter",
         }
+        if repository:
+            payload["repository"] = repository
         try:
             response = httpx.post(
                 f"{self._config.base_url.rstrip('/')}{self._config.query_path}",
@@ -245,6 +287,13 @@ class PrecogMemoryStore:
             )
             response.raise_for_status()
             body = response.json()
+            self._auth_blocked_until = 0.0
+        except httpx.HTTPStatusError as exc:
+            self._record_auth_failure(exc)
+            _logger.warning("PRecog memory retrieval failed project=%s: %s", project, exc)
+            if self._raise_on_error:
+                raise
+            return []
         except Exception as exc:
             _logger.warning("PRecog memory retrieval failed project=%s: %s", project, exc)
             if self._raise_on_error:
@@ -269,8 +318,9 @@ class PrecogMemoryStore:
         prompt: str,
         response: str,
         metadata: dict[str, Any] | None = None,
+        repository: str | None = None,
     ) -> bool:
-        if not self._config.enabled:
+        if not self._config.enabled or self._auth_blocked():
             return False
         prompt = prompt.strip()
         response = response.strip()
@@ -283,6 +333,8 @@ class PrecogMemoryStore:
             "response": _compact(response, _MAX_STORED_TEXT_CHARS),
             "metadata": metadata or {},
         }
+        if repository:
+            payload["repository"] = repository
         request_id = (metadata or {}).get("request_id")
         if request_id:
             payload["request_id"] = request_id
@@ -294,6 +346,13 @@ class PrecogMemoryStore:
                 timeout=self._config.timeout,
             )
             response_obj.raise_for_status()
+            self._auth_blocked_until = 0.0
+        except httpx.HTTPStatusError as exc:
+            self._record_auth_failure(exc)
+            _logger.warning("PRecog memory record failed project=%s: %s", project, exc)
+            if self._raise_on_error:
+                raise
+            return False
         except Exception as exc:
             _logger.warning("PRecog memory record failed project=%s: %s", project, exc)
             if self._raise_on_error:
@@ -306,6 +365,14 @@ class PrecogMemoryStore:
         if self._config.api_key:
             headers["Authorization"] = f"Bearer {self._config.api_key}"
         return headers
+
+    def _auth_blocked(self) -> bool:
+        return self._auth_blocked_until > time.monotonic()
+
+    def _record_auth_failure(self, exc: httpx.HTTPStatusError) -> None:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code in {401, 403}:
+            self._auth_blocked_until = time.monotonic() + self._config.auth_failure_cooldown_seconds
 
 
 class HybridMemoryStore:
@@ -329,13 +396,23 @@ class HybridMemoryStore:
         """Return the primary (PRecog) config for context rendering."""
         return self._precog.config
 
-    def retrieve(self, *, project: str, query: str) -> list[MemoryEntry]:
+    def retrieve(
+        self,
+        *,
+        project: str,
+        query: str,
+        repository: str | None = None,
+    ) -> list[MemoryEntry]:
         """Try PRecog first, fall back to local SQLite on failure."""
         if not query.strip():
             return []
         # Try PRecog
         try:
-            precog_entries = self._precog.retrieve(project=project, query=query)
+            precog_entries = self._precog.retrieve(
+                project=project,
+                query=query,
+                repository=repository,
+            )
             if precog_entries:
                 return precog_entries
         except Exception as exc:
@@ -366,12 +443,17 @@ class HybridMemoryStore:
         prompt: str,
         response: str,
         metadata: dict[str, Any] | None = None,
+        repository: str | None = None,
     ) -> bool:
         """Try PRecog first, fall back to local SQLite on failure."""
         # Try PRecog
         try:
             if self._precog.record_interaction(
-                project=project, prompt=prompt, response=response, metadata=metadata
+                project=project,
+                prompt=prompt,
+                response=response,
+                metadata=metadata,
+                repository=repository,
             ):
                 return True
         except Exception as exc:
@@ -384,7 +466,11 @@ class HybridMemoryStore:
         # Fallback to local
         try:
             result = self._local.record_interaction(
-                project=project, prompt=prompt, response=response, metadata=metadata
+                project=project,
+                prompt=prompt,
+                response=response,
+                metadata=metadata,
+                repository=repository,
             )
             if result:
                 _logger.debug("Local memory record success: project=%s", project)

@@ -115,6 +115,42 @@ class BaseProvider(abc.ABC):
         ...
         yield {}  # pragma: no cover
 
+    async def first_tokens(
+        self,
+        request: ChatRequest,
+        model: str,
+        k: int,
+    ) -> str:
+        """Probe the provider for the first ``k`` tokens of a response.
+
+        Used by the streaming-cache replay path (E2) to verify that a
+        cached stream candidate still matches the live provider before
+        serving it.  Subclasses that support a non-streaming probe should
+        override this method to return the textual prefix (after the
+        model's own truncation/limit semantics).
+
+        Default behaviour: raises :class:`NotImplementedError`.  Providers
+        without a probe implementation cannot participate in the
+        semantic-cache replay path; callers must fall back to the live
+        stream and bump ``stream_probes_fail_total``.
+
+        Args:
+            request: Normalized chat request.
+            model: The model name to probe.
+            k: Maximum number of tokens to request from the provider.
+
+        Returns:
+            The textual content of the model's first ``k`` tokens.
+
+        Raises:
+            NotImplementedError: when the provider does not implement
+                the probe.
+            ProviderError: on transport/HTTP failures.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement first_tokens"
+        )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

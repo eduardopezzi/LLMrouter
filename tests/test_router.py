@@ -149,6 +149,87 @@ async def test_cost_strategy_uses_configured_provider_order_on_equal_cost() -> N
 
 
 @pytest.mark.asyncio
+async def test_provider_preference_is_applied_after_quality_within_model_family() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="ollama/glm-5.3-flash:cloud",
+                provider=Provider.OLLAMA,
+                model_family="glm-5.3-flash",
+                tier=Tier.T3,
+                capabilities=frozenset({"review"}),
+                priority=1,
+            ),
+            ModelInfo(
+                name="zhipu/glm-5.3-flash",
+                provider=Provider.ZAI,
+                model_family="glm-5.3-flash",
+                tier=Tier.T1,
+                capabilities=frozenset({"review"}),
+                priority=20,
+            ),
+        )
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this migration architecture.")],
+    )
+    constraints = RoutingConstraints(required_capabilities=frozenset({"review"}))
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        RoutingStrategy.QUALITY,
+        provider_cost_order=["zai", "ollama"],
+        client_provider_affinity=False,
+    )
+
+    decision = await router.route(request, constraints)
+
+    assert decision.primary.name == "zhipu/glm-5.3-flash"
+    assert [model.name for model in decision.fallbacks] == ["ollama/glm-5.3-flash:cloud"]
+
+
+@pytest.mark.asyncio
+async def test_provider_family_preference_uses_catalog_cost_before_provider_order() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="ollama/glm-5.3-flash:cloud",
+                provider=Provider.OLLAMA,
+                model_family="glm-5.3-flash",
+                tier=Tier.T3,
+                cost_per_1k_input=0.01,
+                capabilities=frozenset({"review"}),
+            ),
+            ModelInfo(
+                name="zhipu/glm-5.3-flash",
+                provider=Provider.ZAI,
+                model_family="glm-5.3-flash",
+                tier=Tier.T1,
+                cost_per_1k_input=0.02,
+                capabilities=frozenset({"review"}),
+            ),
+        )
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this migration architecture.")],
+    )
+    constraints = RoutingConstraints(required_capabilities=frozenset({"review"}))
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        RoutingStrategy.QUALITY,
+        provider_cost_order=["zai", "ollama"],
+        client_provider_affinity=False,
+    )
+
+    decision = await router.route(request, constraints)
+
+    assert decision.primary.name == "ollama/glm-5.3-flash:cloud"
+
+
+@pytest.mark.asyncio
 async def test_router_deduplicates_fallback_models_by_name() -> None:
     duplicated = ModelInfo(
         name="zhipu/glm",
@@ -186,6 +267,57 @@ async def test_router_deduplicates_fallback_models_by_name() -> None:
 
     assert decision.primary.name == "zhipu/glm"
     assert [model.name for model in decision.fallbacks] == ["ollama/reviewer"]
+
+
+@pytest.mark.asyncio
+async def test_router_prefers_provider_diversity_in_fallback_chain() -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="ollama/primary",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                priority=1,
+            ),
+            ModelInfo(
+                name="ollama/secondary",
+                provider=Provider.OLLAMA,
+                tier=Tier.T3,
+                priority=2,
+            ),
+            ModelInfo(
+                name="zhipu/fallback",
+                provider=Provider.ZAI,
+                tier=Tier.T3,
+                priority=3,
+            ),
+            ModelInfo(
+                name="deepseek/fallback",
+                provider=Provider.DEEPSEEK,
+                tier=Tier.T3,
+                priority=4,
+            ),
+        )
+    )
+    router = MultiModelRouter(
+        registry,
+        PromptScorer(),
+        RoutingStrategy.QUALITY,
+        fallback_count=2,
+        client_provider_affinity=False,
+    )
+    request = ChatRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="Review this architecture")],
+    )
+
+    decision = await router.route(request)
+
+    assert decision.primary.name == "ollama/primary"
+    assert [model.name for model in decision.fallbacks] == [
+        "zhipu/fallback",
+        "deepseek/fallback",
+    ]
 
 
 @pytest.mark.asyncio

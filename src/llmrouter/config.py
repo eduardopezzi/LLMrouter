@@ -6,6 +6,7 @@ All settings are type-safe and validated at startup.
 
 from __future__ import annotations
 
+from datetime import date, time
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -66,6 +67,16 @@ class ProvidersConfig(BaseModel):
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
+class DeepSeekPricingConfig(BaseModel):
+    """DeepSeek peak/off-peak billing schedule in Beijing time."""
+
+    enabled: bool = True
+    timezone: str = "Asia/Shanghai"
+    off_peak_start: time = time(hour=0, minute=30)
+    off_peak_end: time = time(hour=8, minute=30)
+    weekend_off_peak_from: date = date(2026, 8, 23)
+
+
 class RoutingConfig(BaseModel):
     """Routing engine configuration."""
 
@@ -83,9 +94,32 @@ class RoutingConfig(BaseModel):
         ),
     )
     quota_cooldown_seconds: float = Field(
-        default=5 * 60 * 60,
-        description="Fallback provider cooldown duration when a quota reset time is not reported.",
+        default=10 * 60,
+        gt=0,
+        description="Initial cooldown before a background half-open provider/model probe.",
     )
+    quota_probe_retry_seconds: float = Field(
+        default=60 * 60,
+        gt=0,
+        description="Cooldown after a failed half-open probe.",
+    )
+    credit_cooldown_seconds: float = Field(
+        default=60 * 60,
+        gt=0,
+        description="Minimum initial cooldown after an account credit or balance error.",
+    )
+    credit_probe_retry_seconds: float = Field(
+        default=6 * 60 * 60,
+        gt=0,
+        description="Minimum cooldown after a failed probe caused by depleted account credits.",
+    )
+    quota_probe_max_tokens: int = Field(
+        default=32,
+        ge=1,
+        le=128,
+        description="Maximum output tokens used by the background cooldown probe.",
+    )
+    deepseek_pricing: DeepSeekPricingConfig = Field(default_factory=DeepSeekPricingConfig)
     max_cost_per_request: float | None = None
     dynamic_benchmark_routing: bool = Field(
         default=True,
@@ -100,6 +134,18 @@ class RoutingConfig(BaseModel):
     )
     simple_prompt_threshold: float = Field(default=0.33, ge=0.0, le=1.0)
     complex_prompt_threshold: float = Field(default=0.66, ge=0.0, le=1.0)
+    routing_context_chars: int = Field(
+        default=12_000,
+        ge=1_024,
+        le=32_000,
+        description="Maximum current-intent context sent to the routing scorer.",
+    )
+    scoring_timeout_ms: int = Field(
+        default=750,
+        ge=50,
+        le=5_000,
+        description="Deadline for semantic/benchmark scoring before rule fallback.",
+    )
     scorer_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "length": 0.15,
@@ -168,6 +214,7 @@ class PrecogConfig(BaseModel):
     api_key: str | None = None
     project: str = "llmrouter"
     timeout: float = 3.0
+    auth_failure_cooldown_seconds: float = Field(default=60.0, gt=0)
 
 
 class MemoryConfig(BaseModel):
@@ -177,9 +224,24 @@ class MemoryConfig(BaseModel):
     backend: str = "local"  # local | sqlite | precog | hybrid
     db_path: str = "data/llmrouter_memory.db"
     default_project: str = "default"
+    no_repository_scope: str = Field(
+        default="project",
+        pattern="^(project|global|disabled)$",
+        description=(
+            "Scope used when a request has no repository provenance: project, "
+            "global (default project), or disabled."
+        ),
+    )
     top_k: int = 4
     min_score: float = 0.12
     max_context_chars: int = 2400
+    query_max_chars: int = Field(
+        default=6_000,
+        ge=512,
+        le=20_000,
+        description="Maximum current-intent text sent to the memory backend.",
+    )
+    auth_failure_cooldown_seconds: float = Field(default=60.0, gt=0)
     min_prompt_chars: int = 80
     min_response_chars: int = 40
     query_path: str = "/internal/rag/query"
@@ -200,6 +262,55 @@ class HealthConfig(BaseModel):
     cost_weight: float = 0.10
 
 
+class RagflowConfig(BaseModel):
+    """RAGFlow retrieval coupling configuration (ADR-0001 — Cenário A Lite).
+
+    Strictly opt-in: the :class:`~llmrouter.core.ragflow_client.RagflowClient`
+    is only built (and the ``/v1/llmrouter/rag/query`` route registered) when
+    ``enabled`` is ``True``.  When disabled the route returns 404 and no
+    extra HTTP traffic is generated.
+
+    The retrieval surface is Dify-compatible (``POST /api/v1/dify/retrieval``)
+    — the RAGFlow team ships that endpoint specifically for external
+    integrations, so the request/response payload stays minimal.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Opt-in flag for the RAGFlow retrieval proxy. Default off.",
+    )
+    base_url: str = Field(
+        default="http://127.0.0.1:9380",
+        description="RAGFlow server base URL (no /api/v1 suffix).",
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="RAGFlow API key (Authorization header).",
+    )
+    default_dataset_id: str | None = Field(
+        default=None,
+        description=(
+            "Default dataset_id used when the request omits one. "
+            "Per-project mapping (project_id → dataset_id) is wired by the "
+            "caller via the X-Project-ID header / payload field."
+        ),
+    )
+    default_top_k: int = Field(default=5, ge=1, le=50)
+    default_score_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
+    timeout_seconds: float = Field(default=3.0, gt=0)
+    retries: int = Field(default=1, ge=0, le=5)
+    circuit_breaker_failures: int = Field(
+        default=5,
+        ge=1,
+        description="Open the circuit after this many consecutive failures.",
+    )
+    circuit_breaker_cooldown_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="Stay open for this long before allowing a probe request.",
+    )
+
+
 class SemanticConfig(BaseModel):
     """Semantic prompt scoring configuration."""
 
@@ -218,6 +329,131 @@ class SemanticConfig(BaseModel):
     benchmark_similarity_threshold: float = 0.30
     benchmark_top_k: int = 5
     fallback_to_rule_based: bool = True
+
+
+class SemanticCacheConfig(BaseModel):
+    """Semantic (embedding-similarity) response cache configuration.
+
+    Strictly opt-in: the similarity cache only activates when ``enabled`` is
+    set AND the semantic scorer provides a working embedder.  Without an
+    embedder the runtime keeps serving the exact cache only (no error).
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Opt-in flag for the semantic (similarity) response cache. Default off.",
+    )
+    threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity required for a semantic cache hit.",
+    )
+    ttl_seconds: int = Field(
+        default=3600,
+        gt=0,
+        description="Per-entry TTL for semantic cache entries, in seconds.",
+    )
+    db_path: str = "data/semantic_cache.db"
+    embed_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Deadline for each embedding call.  The synchronous embedder runs in "
+            "a worker thread and is abandoned after this timeout."
+        ),
+    )
+    background_store: bool = Field(
+        default=True,
+        description=(
+            "Store semantic cache entries in a background task so embedding "
+            "latency is never added to the response path."
+        ),
+    )
+    hit_log_enabled: bool = Field(
+        default=True,
+        description=(
+            "Persist one audit row per semantic cache hit into the sibling "
+            "semantic_cache_hit_log table (P-CHR base, E1.3). Best-effort: "
+            "write failures never break the served response."
+        ),
+    )
+    verify_sample_size: int = Field(
+        default=20,
+        gt=0,
+        description=(
+            "Maximum number of pending hit-log rows audited per "
+            "verify_pending run (most recent first)."
+        ),
+    )
+    verify_judge_base_url: str = Field(
+        default="http://127.0.0.1:11434",
+        description="Base URL of the native Ollama endpoint backing the P-CHR judge.",
+    )
+    verify_judge_model: str = Field(
+        default="glm-5.2",
+        description="Ollama model used by the P-CHR judge for hit auditing.",
+    )
+    verify_judge_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Per-request timeout for the P-CHR judge, in seconds.",
+    )
+    hit_log_retention_days: int = Field(
+        default=45,
+        ge=0,
+        description=(
+            "Days of retention for semantic_cache_hit_log rows (R2 privacy "
+            "decision: prompts/responses are purged after this window). "
+            "0 disables retention (rows are kept forever). Purge runs at "
+            "the start of each verify_pending cycle (daily job)."
+        ),
+    )
+    # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay knobs (S1/S2/S3).
+    # Defaults match PRD §4.1: k=8, timeout=10s, soft-circuit after 3
+    # consecutive probe failures for 1h.  All knobs are env-overridable via
+    # the nested-delimiter pattern (LLMROUTER_SEMANTIC_CACHE__STREAM_*).
+    stream_cache_enabled: bool = Field(
+        default=True,
+        description=(
+            "Opt-out flag for the streaming cache replay path. When False, "
+            "the route layer skips lookup_stream_response and the live "
+            "provider is always used. Defaults to True (cache replay is on)."
+        ),
+    )
+    stream_probe_k: int = Field(
+        default=8,
+        ge=4,
+        le=16,
+        description=(
+            "Number of output tokens requested by the k-token probe used to "
+            "validate a streaming cache candidate before replay (PRD §4.1)."
+        ),
+    )
+    stream_probe_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            "Per-request timeout for the k-token probe. A timeout is treated "
+            "as probe_fail (live path; candidate not discarded)."
+        ),
+    )
+    stream_probe_soft_circuit_threshold: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Consecutive probe_fail occurrences for the same model required "
+            "to open the soft-circuit (skip probe for 1h; live path)."
+        ),
+    )
+    stream_probe_soft_circuit_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+        description=(
+            "How long the soft-circuit stays open once tripped.  After this "
+            "window the next request probes again (best-effort recovery)."
+        ),
+    )
 
 
 class BudgetConfig(BaseModel):
@@ -254,6 +490,10 @@ class BenchmarksConfig(BaseModel):
     research_proposals_path: str = "data/benchmark_research_proposals.json"
     research_internet_search_enabled: bool = True
     research_internet_search_max_results: int = Field(default=5, ge=1, le=10)
+    model_catalog_proposals_path: str = "data/model_catalog_proposals.json"
+    provider_sources_path: str = "data/provider_sources.yaml"
+    provider_snapshot_path: str = "data/provider_catalog_snapshot.yaml"
+    provider_report_path: str = "data/provider_catalog_report.json"
 
 
 class HybridScorerConfig(BaseModel):
@@ -262,6 +502,8 @@ class HybridScorerConfig(BaseModel):
     rule_weight: float = 0.30
     semantic_weight: float = 0.70
     semantic_confidence_threshold: float = 0.35
+    semantic_min_confidence: float = Field(default=0.50, ge=0.0, le=1.0)
+    semantic_margin_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
 class RolloutConfig(BaseModel):
@@ -270,7 +512,13 @@ class RolloutConfig(BaseModel):
     Controls how ``rollout_percentage`` is applied during routing.
     """
 
-    enabled: bool = True
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When false, rollout percentages are ignored and all models, including "
+            "models at 0%, remain eligible for routing."
+        ),
+    )
     deterministic: bool = True
     critical_threshold_pct: float = Field(
         default=5.0,
@@ -337,9 +585,11 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     semantic: SemanticConfig = Field(default_factory=SemanticConfig)
+    semantic_cache: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
     budgets: BudgetConfig = Field(default_factory=BudgetConfig)
     hybrid: HybridScorerConfig = Field(default_factory=HybridScorerConfig)
     rollout: RolloutConfig = Field(default_factory=RolloutConfig)
+    ragflow: RagflowConfig = Field(default_factory=RagflowConfig)
 
     # Model registry file
     models_file: str = "config/models.yaml"

@@ -130,10 +130,12 @@ def _utc_now() -> datetime:
 
 
 def _normalize_tenant(project_id: str | None, user_id: str | None) -> tuple[str, str]:
-    """Map missing tenant identifiers to the shared default tenant."""
+    """Map missing or blank tenant identifiers to the shared default tenant."""
+    clean_project = project_id.strip() if project_id else ""
+    clean_user = user_id.strip() if user_id else ""
     return (
-        project_id if project_id else DEFAULT_PROJECT_ID,
-        user_id if user_id else DEFAULT_USER_ID,
+        clean_project or DEFAULT_PROJECT_ID,
+        clean_user or DEFAULT_USER_ID,
     )
 
 

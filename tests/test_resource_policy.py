@@ -14,7 +14,6 @@ from llmrouter.resource_policy import (
     parse_resource_policy,
 )
 
-
 # ---------------------------------------------------------------------------
 # 1. Schema (F2: enforced vs advisory)
 # ---------------------------------------------------------------------------
@@ -43,7 +42,12 @@ class TestResourcePolicySchema:
     def test_invalid_values_rejected(self) -> None:
         with pytest.raises(PolicyValidationError):
             parse_resource_policy(
-                {"version": "1", "model_class": "x", "max_context_tokens": 10, "max_output_tokens": 5}
+                {
+                    "version": "1",
+                    "model_class": "x",
+                    "max_context_tokens": 10,
+                    "max_output_tokens": 5,
+                }
             )  # max_context < floor 256
 
     def test_output_exceeding_context_rejected(self) -> None:
@@ -152,6 +156,46 @@ class TestProxyResourcePolicy:
             assert response.headers.get("X-Resource-Policy-Version") == "1"
             assert "X-Budget-Remaining" in response.headers
 
+    def test_policy_clamps_proxy_request_and_records_observation(self, tmp_path) -> None:
+        from llmrouter.api.routes import create_app
+        from llmrouter.core.registry import ModelRegistry
+        from llmrouter.core.types import ModelInfo, Provider, Tier
+        from llmrouter.evaluator.collector import ObservationCollector
+        from tests.test_api import FakeProxy
+
+        registry = ModelRegistry(
+            models=(ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),)
+        )
+        proxy = FakeProxy()
+        collector = ObservationCollector(db_path=str(tmp_path / "observations.db"))
+        client = TestClient(
+            create_app(registry=registry, proxy=proxy, collector=collector)
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            headers={
+                "X-Resource-Policy": json.dumps(
+                    {
+                        "version": "1",
+                        "model_class": "standard",
+                        "max_context_tokens": 16000,
+                        "max_output_tokens": 256,
+                    }
+                )
+            },
+        )
+
+        assert response.status_code == 200
+        assert proxy.last_request.max_tokens == 256
+        assert response.headers["X-Resource-Policy-Version"] == "1"
+        assert response.headers["X-Resource-Policy-Clamped"] == "max_tokens"
+        assert collector._buffer[0].metadata["resource_policy_version"] == "1"
+
 
 # ---------------------------------------------------------------------------
 # 3. Contrato F3: 402 de budget ≠ 402 de provider (cooldown)
@@ -190,9 +234,9 @@ class TestBudget402VsProvider402:
         — cooldown pertence a falha de provider (ProviderError), não a
         governança de budget.
         """
+        from llmrouter.api.routes import create_app
         from llmrouter.core.budget import BudgetDecision
         from llmrouter.core.cooldown import ProviderCooldownStore
-        from llmrouter.api.routes import create_app
 
         class _DeniedManager:
             async def check(self, *args: Any, **kwargs: Any) -> BudgetDecision:

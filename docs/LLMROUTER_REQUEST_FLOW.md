@@ -38,9 +38,11 @@ flowchart TD
     Q --> R[Se não houver especialista da intenção\nno tier, acrescenta especialistas elegíveis]
     R --> S[Aplica rollout/canary\npercentual por modelo]
     S --> T{Há candidatos?}
-    T -->|não| U[Safety net: modelos disponíveis\nde qualquer tier]
+    T -->|não| U[Busca modelos de qualquer tier\ne reaplica rollout]
     T -->|sim| V[Ordena candidatos]
-    U --> V
+    U --> U1{Há modelo elegível?}
+    U1 -->|sim| V
+    U1 -->|não| W[Erro: nenhum modelo respeita\no rollout configurado]
 
     V --> V1[Estratégia: custo, qualidade,\nbalanceada ou latência]
     V1 --> V2[Ranking dinâmico por benchmarks\nquando houver cobertura]
@@ -205,7 +207,7 @@ tier do prompt
   -> ranking por benchmarks, se houver afinidade e cobertura
   -> afinidade com intenção/tarefa
   -> afinidade de provider por cliente
-  -> primeiro = primary; próximos N = fallbacks
+  -> primeiro = primary; próximos N = fallbacks com diversidade de provider
 ```
 
 ### 1. Elegibilidade: quem pode concorrer
@@ -216,10 +218,11 @@ o tier mais próximo disponível. Se a requisição exigir capacidades explícit
 como `vision` ou `code`, mantém somente modelos que possuem **todas** elas; se
 não encontrar nenhum no tier, procura essas capacidades em todo o catálogo.
 
-Depois aplica rollout: `0%` exclui o modelo; entre 0% e 100%, um hash estável do
-prompt e do nome do modelo decide a elegibilidade; 100% sempre é elegível. Se o
-rollout remover todos os candidatos, há uma rede de segurança que volta a todos
-os modelos disponíveis. Custo máximo está presente na estrutura de constraints,
+Depois aplica rollout: `0%` exclui o modelo da seleção automática; entre 0% e
+100%, um hash estável do prompt e do nome do modelo decide a elegibilidade; 100%
+sempre é elegível. Se não houver candidatos no tier, o router procura em outros
+tiers e aplica o mesmo filtro. Se nenhum modelo passar, a requisição falha em
+vez de ignorar o rollout. Custo máximo está presente na estrutura de constraints,
 mas no fluxo atual não é usado como filtro rígido; custo influencia o ranking.
 
 ### 2. Ordenação inicial: estratégia configurada
@@ -288,10 +291,32 @@ que já estão na lista. Essa afinidade distribui clientes de forma estável, ma
 não cria candidatos nem ultrapassa indisponibilidade, cooldown ou capacidades
 obrigatórias.
 
-O primeiro modelo da lista final é o primary. Os próximos
-`routing.fallback_count` modelos formam a cadeia de fallback. O proxy somente
-os chama quando o primary falha com erro recuperável ou está indisponível no
+O primeiro modelo da lista final é o primary. A cadeia de fallback usa até
+`routing.fallback_count` modelos e primeiro escolhe o candidato mais bem
+classificado de cada provider ainda não representado. Se ainda houver vagas,
+completa a cadeia na ordem original. Assim, um limite de conta não consome toda
+a cadeia com modelos hospedados pelo mesmo provider. O proxy somente chama os
+fallbacks quando o primary falha com erro recuperável ou está indisponível no
 momento da tentativa.
+
+Erros de quota, saldo ou limite de sessão (`402`/`429`) usam o escopo da conta:
+APIs diretas bloqueiam o provider inteiro; Ollama Cloud bloqueia todos os
+modelos `ollama/*:cloud`, mas não os locais; uma falha de Ollama local bloqueia
+somente aquele modelo. Erros de catálogo bloqueiam apenas o modelo e respostas
+de retirada permanente (`410`) o removem do roteamento durante o processo.
+
+Rate limits e limites de uso usam 10 minutos por padrão, ou o horário/duração de
+reset informado pelo provider. Após o prazo, a requisição continua sendo servida
+pelo fallback enquanto um canário curto testa o escopo bloqueado. Se o canário
+falhar por rate limit, o prazo informado pelo provider é respeitado; sem essa
+informação, o novo cooldown usa 60 minutos.
+
+Saldo/créditos insuficientes (`402` ou mensagem explícita de crédito em `429`)
+usam no mínimo 1 hora antes do primeiro canário e 6 horas após um canário que
+confirme a falta de saldo. Um reset posterior informado pelo provider prevalece.
+Os valores são configuráveis por `routing.credit_cooldown_seconds` e
+`routing.credit_probe_retry_seconds`. O claim do canário é atômico para evitar
+testes duplicados em requisições concorrentes.
 
 ## Observações importantes
 

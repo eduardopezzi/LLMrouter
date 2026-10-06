@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -18,7 +21,11 @@ from llmrouter.config import ProviderConfig, Settings, get_settings
 from llmrouter.core.benchmark_affinity import BenchmarkAffinityScorer
 from llmrouter.core.budget import BudgetManager
 from llmrouter.core.cache import CacheManager, SQLiteCacheBackend
-from llmrouter.core.cooldown import ProviderCooldownStore, is_quota_exhaustion_error
+from llmrouter.core.cooldown import (
+    ProviderCooldownStore,
+    is_model_unavailable_error,
+    is_quota_exhaustion_error,
+)
 from llmrouter.core.health import (
     HealthBackend,
     HealthWeights,
@@ -27,10 +34,15 @@ from llmrouter.core.health import (
     ReviewQualitySource,
     SQLiteHealthStore,
 )
+from llmrouter.core.peak_pricing import (
+    PeakPricingPriorityPolicy,
+    ProviderPricingRule,
+)
 from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry, load_model_registry
 from llmrouter.core.router import MultiModelRouter
 from llmrouter.core.scorer import PromptScorer, ScorerWeights
+from llmrouter.core.semantic_cache import SemanticCache
 from llmrouter.core.semantic_scorer import HybridScorer, SemanticPromptScorer
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import ModelInfo, Provider
@@ -57,6 +69,108 @@ from llmrouter.providers import (
 from llmrouter.providers.base import ProviderError
 from llmrouter.utils import resolve_api_key
 
+# Number of consecutive embedding failures after which the semantic cache
+# gives up calling the embedder for the rest of the process lifetime.
+_SEMANTIC_EMBED_FAILURE_LIMIT = 3
+
+_runtime_logger = logging.getLogger("llmrouter.runtime")
+
+
+class _CircuitBrokenEmbedderAdapter:
+    """Async embedding adapter with timeout and a session circuit breaker.
+
+    The production embedder (``OllamaEmbedder`` / sentence-transformers) is
+    synchronous and would block the event loop if called directly.  This
+    adapter wraps every call in :func:`asyncio.to_thread` and enforces a
+    deadline via :func:`asyncio.wait_for`.
+
+    A simple circuit breaker opens after ``failure_limit`` consecutive
+    failures: further calls return ``None`` immediately (no thread, no
+    timeout), the structured warning is logged exactly once, and the
+    ``semantic_unavailable`` counter keeps increasing on the
+    :class:`~llmrouter.core.semantic_cache.SemanticCache` that consumes the
+    ``None`` result.  A success resets the consecutive-failure counter.
+    """
+
+    def __init__(
+        self,
+        embedder: Any,
+        *,
+        timeout_seconds: float,
+        failure_limit: int = _SEMANTIC_EMBED_FAILURE_LIMIT,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._embedder = embedder
+        self._timeout_seconds = timeout_seconds
+        self._failure_limit = failure_limit
+        self._consecutive_failures = 0
+        self._circuit_open = False
+        self._logger = logger or _runtime_logger
+
+    @property
+    def circuit_open(self) -> bool:
+        """Whether the breaker has disabled embedder calls for this session."""
+        return self._circuit_open
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Consecutive embedding failures observed so far."""
+        return self._consecutive_failures
+
+    async def embed(self, texts: list[str]) -> list[list[float]] | None:
+        """Embed ``texts`` off the event loop, or ``None`` when unavailable.
+
+        Never raises: failures (exception, timeout, breaker open, empty
+        result) are logged and surfaced as ``None`` so the semantic cache
+        degrades to a miss instead of failing the request.
+        """
+        if self._circuit_open:
+            return None
+        try:
+            vectors = await asyncio.wait_for(
+                asyncio.to_thread(self._embedder.encode, texts),
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError:
+            self._register_failure(
+                "SemanticCacheEmbedTimeout",
+                "semantic cache embedder timed out after %.2fs",
+                self._timeout_seconds,
+            )
+            return None
+        except Exception as exc:
+            self._register_failure(
+                "SemanticCacheEmbedError",
+                "semantic cache embedder call failed: %s",
+                exc,
+            )
+            return None
+        if not isinstance(vectors, list) or not vectors:
+            self._register_failure(
+                "SemanticCacheEmbedEmpty",
+                "semantic cache embedder returned no vectors",
+            )
+            return None
+        self._consecutive_failures = 0
+        return vectors
+
+    def _register_failure(self, event: str, message: str, *args: Any) -> None:
+        self._consecutive_failures += 1
+        if self._circuit_open:
+            return
+        if self._consecutive_failures >= self._failure_limit:
+            self._circuit_open = True
+            self._logger.warning(
+                "event=%s semantic_cache_embedder_disabled=true "
+                "consecutive_failures=%d limit=%d "
+                "(embeddings disabled for the semantic cache this session)",
+                event,
+                self._consecutive_failures,
+                self._failure_limit,
+            )
+            return
+        self._logger.warning("event=%s detail=%r", event, args[0] if args else None)
+
 
 def build_app(settings: Settings | None = None) -> FastAPI:
     """Create a fully wired FastAPI app from configuration."""
@@ -70,7 +184,10 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         _build_health_tracker(resolved_settings) if resolved_settings.health.enabled else None
     )
     provider_cooldowns = ProviderCooldownStore(
-        default_seconds=resolved_settings.routing.quota_cooldown_seconds
+        default_seconds=resolved_settings.routing.quota_cooldown_seconds,
+        probe_retry_seconds=resolved_settings.routing.quota_probe_retry_seconds,
+        credit_cooldown_seconds=resolved_settings.routing.credit_cooldown_seconds,
+        credit_probe_retry_seconds=resolved_settings.routing.credit_probe_retry_seconds,
     )
     router = MultiModelRouter(
         registry=registry,
@@ -84,13 +201,27 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         client_provider_affinity=resolved_settings.routing.client_provider_affinity,
         dynamic_benchmark_routing=resolved_settings.routing.dynamic_benchmark_routing,
         intent_routing=resolved_settings.routing.intent_routing,
+        peak_pricing_policy=_build_peak_pricing_policy(resolved_settings),
+        routing_context_chars=resolved_settings.routing.routing_context_chars,
+        scoring_timeout_ms=resolved_settings.routing.scoring_timeout_ms,
+        fallback_scorer=PromptScorer(
+            _scorer_weights(resolved_settings.routing.scorer_weights),
+            simple_threshold=resolved_settings.routing.simple_prompt_threshold,
+            complex_threshold=resolved_settings.routing.complex_prompt_threshold,
+        ),
     )
     app_holder: dict[str, FastAPI] = {}
     proxy_holder: dict[str, ProviderProxy] = {}
     metrics_collector = MetricsCollector()
+    budget_manager = (
+        BudgetManager(resolved_settings.budgets.db_path)
+        if resolved_settings.budgets.enabled
+        else None
+    )
     cache_manager = CacheManager(
         SQLiteCacheBackend("data/cache.db"),
     )
+    semantic_cache = _build_semantic_cache(resolved_settings, scorer=router._scorer)
     proxy = ProviderProxy(
         build_providers(resolved_settings, registry),
         on_provider_error=_priority_demoter(
@@ -105,6 +236,9 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         provider_cooldowns=provider_cooldowns,
         metrics_collector=metrics_collector,
         cache_manager=cache_manager,
+        semantic_cache=semantic_cache,
+        semantic_cache_background_store=resolved_settings.semantic_cache.background_store,
+        probe_max_tokens=resolved_settings.routing.quota_probe_max_tokens,
     )
     proxy_holder["proxy"] = proxy
     collector = (
@@ -171,6 +305,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
             base_url=resolved_settings.precog.base_url,
             api_key=precog_api_key,
             timeout=resolved_settings.precog.timeout,
+            auth_failure_cooldown_seconds=resolved_settings.precog.auth_failure_cooldown_seconds,
         )
         if resolved_settings.precog.enabled
         else None
@@ -196,15 +331,30 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         health_tracker=health_tracker,
         metrics_collector=metrics_collector,
         cache_manager=cache_manager,
-        budget_manager=(
-            BudgetManager(resolved_settings.budgets.db_path)
-            if resolved_settings.budgets.enabled
-            else None
-        ),
+        semantic_cache=semantic_cache,
+        budget_manager=budget_manager,
         benchmark_scheduler=benchmark_scheduler,
+        ragflow_client=_build_ragflow_client(resolved_settings),
     )
     app_holder["app"] = app
     return app
+
+
+def _build_peak_pricing_policy(settings: Settings) -> PeakPricingPriorityPolicy | None:
+    """Build the configured DeepSeek weekday peak-pricing priority policy."""
+    pricing = settings.routing.deepseek_pricing
+    if not pricing.enabled:
+        return None
+    rule = ProviderPricingRule(
+        provider=Provider.DEEPSEEK,
+        timezone_name=pricing.timezone,
+        off_peak_start=pricing.off_peak_start,
+        off_peak_end=pricing.off_peak_end,
+        weekend_off_peak_from=pricing.weekend_off_peak_from,
+    )
+    # Resolve the timezone during startup so a bad setting fails immediately.
+    rule.is_peak(datetime.now(timezone.utc))  # noqa: UP017 - Python 3.10 support.
+    return PeakPricingPriorityPolicy([rule])
 
 
 def _resolve_precog_api_key(settings: Settings) -> str | None:
@@ -223,9 +373,12 @@ def _precog_memory_config(
         api_key=api_key if api_key is not None else _resolve_precog_api_key(settings),
         timeout=settings.precog.timeout,
         default_project=settings.memory.default_project,
+        no_repository_scope=settings.memory.no_repository_scope,
         top_k=settings.memory.top_k,
         min_score=settings.memory.min_score,
         max_context_chars=settings.memory.max_context_chars,
+        query_max_chars=settings.memory.query_max_chars,
+        auth_failure_cooldown_seconds=settings.memory.auth_failure_cooldown_seconds,
         query_path=settings.memory.query_path,
         record_path=settings.memory.record_path,
     )
@@ -237,9 +390,12 @@ def _local_memory_config(settings: Settings) -> MemoryConfig:
         backend="local",
         db_path=settings.memory.db_path,
         default_project=settings.memory.default_project,
+        no_repository_scope=settings.memory.no_repository_scope,
         top_k=settings.memory.top_k,
         min_score=settings.memory.min_score,
         max_context_chars=settings.memory.max_context_chars,
+        query_max_chars=settings.memory.query_max_chars,
+        auth_failure_cooldown_seconds=settings.memory.auth_failure_cooldown_seconds,
         min_prompt_chars=settings.memory.min_prompt_chars,
         min_response_chars=settings.memory.min_response_chars,
     )
@@ -308,6 +464,8 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
             rule_weight=settings.hybrid.rule_weight,
             semantic_weight=settings.hybrid.semantic_weight,
             semantic_confidence_threshold=settings.hybrid.semantic_confidence_threshold,
+            semantic_min_confidence=settings.hybrid.semantic_min_confidence,
+            semantic_margin_threshold=settings.hybrid.semantic_margin_threshold,
         )
     except Exception:
         if not settings.semantic.fallback_to_rule_based:
@@ -317,6 +475,78 @@ def _build_scorer(settings: Settings) -> PromptScorer | HybridScorer:
             exc_info=True,
         )
         return rule_scorer
+
+
+def _scorer_embedder(scorer: object) -> Any | None:
+    """Return the shared synchronous embedder behind a hybrid scorer, if any.
+
+    ``semantic_scorer`` is intentionally untouched by this card, so its
+    internals are reached duck-typed: ``HybridScorer._semantic_scorer``
+    (a :class:`~llmrouter.core.semantic_scorer.SemanticPromptScorer`) exposes
+    the shared ``embedder`` property.  Returns ``None`` for rule-based scorers
+    or any scorer without an accessible embedder.
+    """
+    semantic_scorer = getattr(scorer, "_semantic_scorer", None)
+    if semantic_scorer is None:
+        return None
+    embedder = getattr(semantic_scorer, "embedder", None)
+    return embedder if embedder is not None else None
+
+
+def _build_ragflow_client(settings: Settings) -> Any | None:
+    """Build the RAGFlow client when the feature flag is on.
+
+    Returns ``None`` when ``settings.ragflow.enabled`` is ``False`` — the
+    API then returns 404 for ``/v1/llmrouter/rag/*`` and no client exists
+    in the process.
+    """
+    if not settings.ragflow.enabled:
+        return None
+
+    from llmrouter.core.ragflow_client import RagflowClient
+
+    return RagflowClient(settings.ragflow)
+
+
+def _build_semantic_cache(
+    settings: Settings,
+    *,
+    scorer: object,
+) -> SemanticCache | None:
+    """Build the opt-in semantic cache wired to the shared scorer embedder.
+
+    Returns ``None`` when the feature flag is off or when no embedder is
+    available — the proxy then serves the exact cache only, exactly as before
+    (zero regression when the flag is off, no errors when Ollama is down).
+    """
+    cache_config = settings.semantic_cache
+    if not cache_config.enabled:
+        return None
+    embedder = _scorer_embedder(scorer)
+    if embedder is None:
+        _runtime_logger.warning(
+            "event=SemanticCacheDisabled reason=no_embedder_available "
+            "(enable llmrouter.semantic and ensure the hybrid scorer loaded; "
+            "serving the exact cache only)"
+        )
+        return None
+    adapter = _CircuitBrokenEmbedderAdapter(
+        embedder,
+        timeout_seconds=cache_config.embed_timeout_seconds,
+    )
+    return SemanticCache(
+        cache_config.db_path,
+        adapter,
+        threshold=cache_config.threshold,
+        ttl_seconds=cache_config.ttl_seconds,
+        hit_log_enabled=cache_config.hit_log_enabled,
+        hit_log_retention_days=cache_config.hit_log_retention_days,
+        stream_cache_enabled=cache_config.stream_cache_enabled,
+        stream_probe_k=cache_config.stream_probe_k,
+        stream_probe_timeout_seconds=cache_config.stream_probe_timeout_seconds,
+        stream_probe_soft_circuit_threshold=cache_config.stream_probe_soft_circuit_threshold,
+        stream_probe_soft_circuit_seconds=cache_config.stream_probe_soft_circuit_seconds,
+    )
 
 
 def _benchmark_catalog_reloader(
@@ -384,13 +614,13 @@ def _priority_demoter(
     benchmark_catalog_path: str | None = None,
 ) -> Callable[[ModelInfo, ProviderError], None]:
     def demoter(model: ModelInfo, exc: ProviderError) -> None:
-        if not _is_insufficient_balance_error(exc):
+        if not (_is_insufficient_balance_error(exc) or is_model_unavailable_error(exc)):
             return
-        cooldown_entry = (
-            provider_cooldowns.record_quota_error(model, exc)
-            if provider_cooldowns is not None
-            else None
-        )
+        cooldown_entry = None
+        if provider_cooldowns is not None:
+            cooldown_entry = provider_cooldowns.cooldown_for_model(model)
+            if cooldown_entry is None:
+                cooldown_entry = provider_cooldowns.record_error(model, exc)
         if cooldown_entry is None:
             router.mark_provider_unavailable(model.provider)
             proxy = proxy_holder.get("proxy") if proxy_holder is not None else None
@@ -406,15 +636,14 @@ def _priority_demoter(
                 app = app_holder.get("app") if app_holder is not None else None
                 if app is not None:
                     app.state.registry = registry
-        if cooldown_entry is not None:
-            target_kind = "model" if cooldown_entry.model_name is not None else "provider"
-            target_name = cooldown_entry.model_name or model.provider.value
-            action = f"Put {target_kind} '{target_name}' in quota cooldown"
-        else:
-            action = f"Disabled provider '{model.provider.value}'"
         logging.getLogger("llmrouter.runtime").warning(
-            "%s after balance/quota error from model '%s': %s",
-            action,
+            "%s provider '%s' for model '%s' after upstream error: %s",
+            (
+                f"Recorded {cooldown_entry.scope.value} cooldown"
+                if cooldown_entry is not None
+                else "Disabled"
+            ),
+            model.provider.value,
             model.name,
             exc,
         )

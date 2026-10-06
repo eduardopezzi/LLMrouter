@@ -66,29 +66,6 @@
     {
       "auth_required": true,
       "method": "POST",
-      "path": "/v1/llmrouter/budgets",
-      "request_schema": {
-        "limits": "object",
-        "project_id": "str"
-      },
-      "response_schema": {
-        "limits": "object",
-        "project_id": "str"
-      }
-    },
-    {
-      "auth_required": true,
-      "method": "GET",
-      "path": "/v1/llmrouter/budgets/{project_id}",
-      "response_schema": {
-        "limits": "object",
-        "project_id": "str",
-        "usage": "object"
-      }
-    },
-    {
-      "auth_required": true,
-      "method": "POST",
       "path": "/v1/llmrouter/semantic/inspect",
       "request_schema": {
         "properties": [
@@ -98,15 +75,142 @@
         "required": []
       },
       "response_schema": {
-        "benchmark_affinities": "dict[str, float]",
-        "benchmark_top": "str",
-        "benchmark_used": "bool",
         "score": "float",
         "semantic_confidence": "float",
         "semantic_role": "str",
         "semantic_used": "bool",
         "signals": "object",
         "tier": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/budgets/{project_id}",
+      "response_schema": {
+        "daily_limit_usd": "float|null",
+        "daily_spent_usd": "float",
+        "mode": "str",
+        "monthly_limit_usd": "float|null",
+        "monthly_spent_usd": "float",
+        "period_day": "str",
+        "period_month": "str",
+        "project_id": "str",
+        "user_id": "str"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/budgets",
+      "request_schema": {
+        "properties": [
+          "daily_limit_usd",
+          "mode",
+          "monthly_limit_usd",
+          "project_id",
+          "user_id"
+        ],
+        "required": [
+          "project_id"
+        ]
+      },
+      "response_schema": {
+        "daily_limit_usd": "float|null",
+        "mode": "str",
+        "monthly_limit_usd": "float|null",
+        "ok": "bool",
+        "project_id": "str",
+        "user_id": "str"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/cache/stats",
+      "response_schema": {
+        "cost_saved_usd": "float",
+        "entries": "int",
+        "hit_rate": "float",
+        "hits": "int",
+        "misses": "int",
+        "semantic_hits": "int",
+        "semantic_misses": "int",
+        "semantic_unavailable": "int",
+        "stream": {
+          "stream_lookup_hit_total": "int",
+          "stream_lookup_miss_total": "int",
+          "stream_purged_total": "int",
+          "stream_replay_bytes_served_total": "int",
+          "stream_replay_error_total": "int",
+          "stream_replays_total": "int",
+          "stream_stored_total": "int",
+          "stream_tokens_saved_total": "int",
+          "stream_probes_fail_total": "int",
+          "stream_probes_ok_total": "int"
+        },
+        "tokens_saved": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/cache/verify",
+      "request_schema": {
+        "properties": [
+          "sample_size"
+        ],
+        "required": []
+      },
+      "response_schema": {
+        "buckets": "object",
+        "checked": "int",
+        "error": "int",
+        "mismatch": "int",
+        "ok": "int"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/rollout",
+      "response_schema": {
+        "models": "list[object]"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "POST",
+      "path": "/v1/llmrouter/rollout/{model_name}",
+      "request_schema": {
+        "properties": [
+          "percentage"
+        ],
+        "required": [
+          "percentage"
+        ]
+      },
+      "response_schema": {
+        "applied": "bool",
+        "model": "str",
+        "rollout_percentage": "float"
+      }
+    },
+    {
+      "auth_required": true,
+      "method": "GET",
+      "path": "/v1/llmrouter/stats",
+      "response_schema": {
+        "budget": "object",
+        "cache": "object",
+        "errors": "object",
+        "failed_requests": "int",
+        "fallback": "object",
+        "latency": "object",
+        "stream": "object",
+        "tier_distribution": "object",
+        "total_requests": "int",
+        "uptime_seconds": "float"
       }
     },
     {
@@ -133,7 +237,7 @@
       "context_window": 1000000,
       "id": "deepseek/deepseek-chat",
       "max_tokens": 393216,
-      "priority": 14,
+      "priority": 13,
       "provider": "deepseek",
       "provider_model": "deepseek-chat",
       "tier": 3
@@ -149,7 +253,7 @@
       "context_window": 1000000,
       "id": "deepseek/deepseek-reasoner",
       "max_tokens": 65536,
-      "priority": 15,
+      "priority": 14,
       "provider": "deepseek",
       "provider_model": "deepseek-reasoner",
       "tier": 3
@@ -163,7 +267,7 @@
       "context_window": 163840,
       "id": "ollama/deepseek-v3.1:cloud",
       "max_tokens": 128000,
-      "priority": 13,
+      "priority": 12,
       "provider": "ollama",
       "provider_model": "deepseek-v3.1:cloud",
       "tier": 3
@@ -177,7 +281,7 @@
       "context_window": 163840,
       "id": "ollama/deepseek-v3.2:cloud",
       "max_tokens": 128000,
-      "priority": 12,
+      "priority": 11,
       "provider": "ollama",
       "provider_model": "deepseek-v3.2:cloud",
       "tier": 3
@@ -190,25 +294,15 @@
         "test_generation"
       ],
       "context_window": 1000000,
-      "id": "ollama/deepseek-v4-flash:0731-cloud",
+      "id": "ollama/deepseek-v4-flash:cloud",
       "max_tokens": 393216,
-      "priority": 5,
+      "priority": 4,
       "provider": "ollama",
-      "provider_model": "deepseek-v4-flash:0731-cloud",
-      "tier": 2
+      "provider_model": "deepseek-v4-flash:cloud",
+      "tier": 3
     },
     {
       "api_base": "http://localhost:11434",
-      "benchmark_scores": {
-        "GPQA Diamond": 90.1,
-        "HMMT": 95.2,
-        "Humanity's Last Exam (HLE)": 37.7,
-        "MCP Atlas": 73.6,
-        "Program Bench": 47.8,
-        "SWE-Bench Pro": 55.4,
-        "TerminalBench 2.1": 64.0,
-        "Tool Decathlon": 52.8
-      },
       "capabilities": [
         "architecture",
         "fix",
@@ -218,20 +312,13 @@
       "context_window": 1000000,
       "id": "ollama/deepseek-v4-pro:cloud",
       "max_tokens": 393216,
-      "priority": 4,
+      "priority": 3,
       "provider": "ollama",
       "provider_model": "deepseek-v4-pro:cloud",
       "tier": 3
     },
     {
       "api_base": "http://localhost:11434",
-      "benchmark_scores": {
-        "Codeforces": 2150.0,
-        "GPQA Diamond": 84.3,
-        "Humanity's Last Exam (HLE)": 19.5,
-        "LiveCodeBench": 80.0,
-        "MMLU-Pro": 85.2
-      },
       "capabilities": [
         "fix",
         "refactoring",
@@ -240,23 +327,13 @@
       "context_window": 262144,
       "id": "ollama/gemma4:31b",
       "max_tokens": 262144,
-      "priority": 10,
+      "priority": 9,
       "provider": "ollama",
       "provider_model": "gemma4:31b",
-      "tier": 2
+      "tier": 3
     },
     {
       "api_base": "http://localhost:11434",
-      "benchmark_scores": {
-        "GPQA Diamond": 91.2,
-        "HMMT": 92.5,
-        "Humanity's Last Exam (HLE)": 40.5,
-        "MCP Atlas": 76.8,
-        "Program Bench": 63.7,
-        "SWE-Bench Pro": 62.1,
-        "TerminalBench 2.1": 81.0,
-        "Tool Decathlon": 48.2
-      },
       "capabilities": [
         "fix",
         "migration",
@@ -265,21 +342,13 @@
       "context_window": 999424,
       "id": "ollama/glm-5.2:cloud",
       "max_tokens": 131072,
-      "priority": 7,
+      "priority": 6,
       "provider": "ollama",
       "provider_model": "glm-5.2:cloud",
       "tier": 3
     },
     {
       "api_base": "http://localhost:11434",
-      "benchmark_scores": {
-        "Kimi Claw 24/7 Bench": 46.9,
-        "Kimi Code Bench v2": 62.0,
-        "MCP Atlas": 76.0,
-        "MCP Mark Verified": 81.1,
-        "MLS Bench Lite": 35.1,
-        "Program Bench": 53.6
-      },
       "capabilities": [
         "fix",
         "migration",
@@ -288,47 +357,13 @@
       "context_window": 262144,
       "id": "ollama/kimi-k2.7-code:cloud",
       "max_tokens": 128000,
-      "priority": 3,
+      "priority": 2,
       "provider": "ollama",
       "provider_model": "kimi-k2.7-code:cloud",
       "tier": 3
     },
     {
       "api_base": "http://localhost:11434",
-      "benchmark_scores": {
-        "BrowseComp": 91.2,
-        "GPQA Diamond": 93.5,
-        "MCP Atlas": 84.2,
-        "MLS Bench Lite": 48.3,
-        "Program Bench": 77.8,
-        "TerminalBench 2.1": 88.3
-      },
-      "capabilities": [
-        "architecture",
-        "fix",
-        "migration",
-        "refactoring",
-        "review",
-        "test_generation"
-      ],
-      "context_window": 1000000,
-      "id": "ollama/kimi-k3:cloud",
-      "max_tokens": 128000,
-      "priority": 1,
-      "provider": "ollama",
-      "provider_model": "kimi-k3:cloud",
-      "tier": 3
-    },
-    {
-      "api_base": "http://localhost:11434",
-      "benchmark_scores": {
-        "GPQA Diamond": 93.0,
-        "HMMT": 84.4,
-        "Humanity's Last Exam (HLE)": 37.0,
-        "MCP Atlas": 74.2,
-        "SWE-Bench Pro": 59.0,
-        "TerminalBench 2.1": 65.0
-      },
       "capabilities": [
         "documentation",
         "fix",
@@ -340,7 +375,7 @@
       "context_window": 1048576,
       "id": "ollama/minimax-m3:cloud",
       "max_tokens": 393216,
-      "priority": 2,
+      "priority": 1,
       "provider": "ollama",
       "provider_model": "minimax-m3:cloud",
       "tier": 3
@@ -354,10 +389,10 @@
       "context_window": 499712,
       "id": "ollama/north-mini-code-1.0:cloud",
       "max_tokens": 128000,
-      "priority": 8,
+      "priority": 7,
       "provider": "ollama",
       "provider_model": "north-mini-code-1.0:cloud",
-      "tier": 2
+      "tier": 3
     },
     {
       "api_base": "http://localhost:11434",
@@ -368,7 +403,7 @@
       "context_window": 32768,
       "id": "ollama/qwen2.5-coder:3b",
       "max_tokens": 8192,
-      "priority": 11,
+      "priority": 10,
       "provider": "ollama",
       "provider_model": "qwen2.5-coder:3b",
       "tier": 1
@@ -382,10 +417,10 @@
       "context_window": 262144,
       "id": "ollama/qwen3-coder:480b-cloud",
       "max_tokens": 65536,
-      "priority": 6,
+      "priority": 5,
       "provider": "ollama",
       "provider_model": "qwen3-coder:480b-cloud",
-      "tier": 3
+      "tier": 2
     },
     {
       "api_base": "http://localhost:11434",
@@ -396,23 +431,13 @@
       "context_window": 262144,
       "id": "ollama/qwen3.6-27b:cloud",
       "max_tokens": 128000,
-      "priority": 9,
+      "priority": 8,
       "provider": "ollama",
       "provider_model": "qwen3.6-27b:cloud",
-      "tier": 2
+      "tier": 3
     },
     {
       "api_base": null,
-      "benchmark_scores": {
-        "GPQA Diamond": 86.2,
-        "HMMT": 82.6,
-        "Humanity's Last Exam (HLE)": 31.0,
-        "MCP Atlas": 71.8,
-        "Program Bench": 50.9,
-        "SWE-Bench Pro": 58.4,
-        "TerminalBench 2.1": 63.5,
-        "Tool Decathlon": 40.7
-      },
       "capabilities": [
         "documentation",
         "fix",
@@ -423,7 +448,7 @@
       "context_window": 200000,
       "id": "zhipu/glm-5.1",
       "max_tokens": 131072,
-      "priority": 16,
+      "priority": 13,
       "provider": "zai",
       "provider_model": "glm-5.1",
       "tier": 3
@@ -443,46 +468,6 @@
       "priority": 1,
       "provider": "zai",
       "provider_model": "glm-5.2",
-      "tier": 3
-    },
-    {
-      "api_base": null,
-      "capabilities": [
-        "architecture",
-        "fix",
-        "migration",
-        "refactoring",
-        "review",
-        "security_audit",
-        "test_generation"
-      ],
-      "context_window": 1000000,
-      "id": "zhipu/glm-5.3",
-      "max_tokens": 131072,
-      "priority": 1,
-      "provider": "zai",
-      "provider_model": "glm-5.3",
-      "tier": 3
-    },
-    {
-      "api_base": null,
-      "capabilities": [
-        "architecture",
-        "documentation",
-        "fix",
-        "migration",
-        "refactoring",
-        "review",
-        "security_audit",
-        "summarization",
-        "test_generation"
-      ],
-      "context_window": 1000000,
-      "id": "zhipu/glm-5.3-flash",
-      "max_tokens": 131072,
-      "priority": 1,
-      "provider": "zai",
-      "provider_model": "glm-5.3-flash",
       "tier": 3
     }
   ],

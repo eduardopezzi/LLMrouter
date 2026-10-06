@@ -22,6 +22,7 @@ from llmrouter.core.budget import (
     DEFAULT_USER_ID,
     BudgetLimits,
     BudgetManager,
+    _normalize_tenant,
     estimate_cost,
 )
 
@@ -58,6 +59,15 @@ class TestEstimateCost:
     def test_matches_proxy_formula(self) -> None:
         # (input/1000)*in_cost + (output/1000)*out_cost
         assert estimate_cost(0.5, 1.5, 1000, 2000) == pytest.approx(0.5 + 3.0)
+
+    def test_normalize_tenant_strips_whitespace(self) -> None:
+        """Blank/whitespace tenant headers collapse to the shared default
+        tenant instead of creating an untracked per-header tenant (QA wave 2,
+        risco 4)."""
+        assert _normalize_tenant(None, None) == (DEFAULT_PROJECT_ID, DEFAULT_USER_ID)
+        assert _normalize_tenant("", "  ") == (DEFAULT_PROJECT_ID, DEFAULT_USER_ID)
+        assert _normalize_tenant("  ", "alice") == (DEFAULT_PROJECT_ID, "alice")
+        assert _normalize_tenant(" proj ", " alice ") == ("proj", "alice")
 
     def test_zero_tokens_zero_cost(self) -> None:
         assert estimate_cost(10.0, 20.0, 0, 0) == 0.0
@@ -220,12 +230,16 @@ async def test_monthly_reset_on_month_rollover(db_path: str) -> None:
 
 
 async def test_persistence_across_managers(db_path: str) -> None:
-    mgr1 = _manager(db_path, _clock_at(2026, 9, 21))
+    # Both managers share the SAME fake day so the test stays hermetic:
+    # persistence must come from the SQLite store, not from wall-clock
+    # alignment between writer and reader (a real second clock broke the
+    # day-bucket match once the real date drifted past 2026-09-21).
+    write_clock = _clock_at(2026, 9, 21)
+    mgr1 = _manager(db_path, write_clock)
     await mgr1.set_limits("p1", "u1", BudgetLimits(daily_limit_usd=10.0, mode="hard"))
     await mgr1.record_usage("p1", "u1", 9.5)
 
-    # mesma data que mgr1 (relógio real causaria drift de período)
-    mgr2 = _manager(db_path, _clock_at(2026, 9, 21, hour=23))
+    mgr2 = BudgetManager(db_path, clock=write_clock)  # separate manager, same day (UTC)
     usage = await mgr2.get_usage("p1", "u1")
 
     assert usage.project_id == "p1"
