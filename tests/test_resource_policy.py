@@ -158,6 +158,7 @@ class TestProxyResourcePolicy:
 
     def test_policy_clamps_proxy_request_and_records_observation(self, tmp_path) -> None:
         from llmrouter.api.routes import create_app
+        from llmrouter.core.budget import BudgetDecision
         from llmrouter.core.registry import ModelRegistry
         from llmrouter.core.types import ModelInfo, Provider, Tier
         from llmrouter.evaluator.collector import ObservationCollector
@@ -168,8 +169,21 @@ class TestProxyResourcePolicy:
         )
         proxy = FakeProxy()
         collector = ObservationCollector(db_path=str(tmp_path / "observations.db"))
+
+        class _BudgetManager:
+            async def check(self, *args: Any, **kwargs: Any) -> BudgetDecision:
+                return BudgetDecision(allowed=True, remaining_usd=0.42)
+
+            async def record_usage(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
         client = TestClient(
-            create_app(registry=registry, proxy=proxy, collector=collector)
+            create_app(
+                registry=registry,
+                proxy=proxy,
+                collector=collector,
+                budget_manager=_BudgetManager(),  # type: ignore[arg-type]
+            )
         )
         response = client.post(
             "/v1/chat/completions",
@@ -195,6 +209,7 @@ class TestProxyResourcePolicy:
         assert response.headers["X-Resource-Policy-Version"] == "1"
         assert response.headers["X-Resource-Policy-Clamped"] == "max_tokens"
         assert collector._buffer[0].metadata["resource_policy_version"] == "1"
+        assert collector._buffer[0].metadata["budget_remaining_usd"] == 0.42
 
 
 # ---------------------------------------------------------------------------
