@@ -174,6 +174,8 @@ class ChatRequest:
     top_p_explicit: bool = True
     stop: list[str] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    resource_policy: Any | None = None
+    budget_remaining_usd: float | None = None
 
     @property
     def prompt_text(self) -> str:

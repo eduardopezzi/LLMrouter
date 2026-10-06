@@ -348,6 +348,18 @@ def create_app(
         request: Request,
     ) -> Any:
         _require_api_key(request, app.state.api_key)
+        resource_policy = None
+        raw_policy = request.headers.get("X-Resource-Policy")
+        if raw_policy:
+            from llmrouter.resource_policy import PolicyValidationError, parse_resource_policy
+
+            try:
+                resource_policy = parse_resource_policy(raw_policy)
+            except PolicyValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"invalid X-Resource-Policy: {exc}",
+                ) from exc
         if app.state.proxy is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -356,6 +368,16 @@ def create_app(
 
         payload = _with_observation_identity(payload, request)
         chat_request = _with_client_identity(_to_chat_request(payload), request)
+        policy_clamped: int | None = None
+        if resource_policy is not None:
+            requested_max = chat_request.max_tokens
+            if requested_max is None or requested_max > resource_policy.max_output_tokens:
+                chat_request = replace(
+                    chat_request,
+                    max_tokens=resource_policy.max_output_tokens,
+                )
+                policy_clamped = requested_max if requested_max is not None else 0
+            chat_request = replace(chat_request, resource_policy=resource_policy)
         # Budget pre-flight (B2): real pre-call cost estimation is infeasible
         # before routing selects a model, so the check runs with an estimated
         # cost of 0.0 and relies on post-response record_usage to accumulate
@@ -372,6 +394,10 @@ def create_app(
                     detail=budget_decision.reason,
                 )
             budget_warning = budget_decision.warning
+            chat_request = replace(
+                chat_request,
+                budget_remaining_usd=budget_decision.remaining_usd,
+            )
         prompt_directives = _chat_request_directives(chat_request)
         prompt_directives = _resolve_prompt_directives(
             prompt_directives,
@@ -530,6 +556,16 @@ def create_app(
         # Budget post-response recording (B2).  Best-effort only: budget is
         # observability + governance and must never break the chat response.
         response_headers: dict[str, str] = {}
+        if resource_policy is not None:
+            response_headers["X-Resource-Policy-Version"] = resource_policy.version
+            max_policy_tokens = (
+                resource_policy.max_context_tokens + resource_policy.max_output_tokens
+            )
+            response_headers["X-Budget-Remaining"] = str(
+                max(0, max_policy_tokens - response.usage.total_tokens)
+            )
+            if policy_clamped is not None:
+                response_headers["X-Resource-Policy-Clamped"] = "max_tokens"
         if budget_warning:
             response_headers["X-Budget-Warning"] = budget_warning
         if budget_manager is not None:
@@ -1934,6 +1970,18 @@ def _record_observation(
         metadata["request_id"] = request_id
     if memory_entries:
         metadata["memory_ids"] = ",".join(str(entry.id) for entry in memory_entries)
+    resource_policy = chat_request.resource_policy
+    if resource_policy is not None:
+        policy_id = getattr(resource_policy, "policy_id", None) or getattr(
+            resource_policy, "id", None
+        )
+        if policy_id is not None:
+            metadata["resource_policy_id"] = str(policy_id)
+        policy_version = getattr(resource_policy, "version", None)
+        if policy_version is not None:
+            metadata["resource_policy_version"] = str(policy_version)
+    if chat_request.budget_remaining_usd is not None:
+        metadata["budget_remaining_usd"] = chat_request.budget_remaining_usd
     if collector is not None:
         collector.record(
             RoutingObservation(
