@@ -9,6 +9,7 @@ import sqlite3
 from collections import deque
 from pathlib import Path
 
+from llmrouter.core.redaction import PromptRedactionLevel, redact
 from llmrouter.core.types import RoutingGrade
 from llmrouter.evaluator.types import RoutingObservation, RoutingReview, TrainingExample
 
@@ -21,11 +22,13 @@ class ObservationCollector:
         db_path: str = "data/llmrouter.db",
         buffer_size: int = 100,
         sample_rate: float = 1.0,
+        redaction_level: PromptRedactionLevel = PromptRedactionLevel.SECRETS,
     ) -> None:
         self._db_path = db_path
         self._buffer: deque[RoutingObservation] = deque(maxlen=buffer_size)
         self._lock = asyncio.Lock()
         self._sample_rate = min(max(sample_rate, 0.0), 1.0)
+        self._redaction_level = redaction_level
 
     def record(self, observation: RoutingObservation) -> None:
         """Add an observation to the in-memory buffer without awaiting."""
@@ -45,16 +48,19 @@ class ObservationCollector:
         ids: list[int] = []
         with sqlite3.connect(self._db_path) as db:
             for item in observations:
+                redacted_prompt = redact(
+                    item.prompt, level=self._redaction_level
+                )
                 cursor = db.execute(
                     """
                     INSERT INTO observations (
                         prompt, chosen_model, response, latency_ms, cost_usd,
                         prompt_tokens, completion_tokens, scorer_score,
-                        scorer_tier, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        scorer_tier, metadata_json, redaction_level
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        item.prompt,
+                        redacted_prompt,
                         item.chosen_model,
                         item.response,
                         item.latency_ms,
@@ -64,6 +70,7 @@ class ObservationCollector:
                         item.scorer_score,
                         item.scorer_tier,
                         json.dumps(item.metadata, sort_keys=True),
+                        self._redaction_level.value,
                     ),
                 )
                 ids.append(int(cursor.lastrowid))
@@ -162,6 +169,7 @@ class ObservationCollector:
                     scorer_score REAL,
                     scorer_tier INTEGER,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
+                    redaction_level TEXT NOT NULL DEFAULT 'none',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
