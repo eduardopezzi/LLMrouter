@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +38,7 @@ from llmrouter.core.proxy import ProviderProxy
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.router import MultiModelRouter, NoModelsAvailableError
 from llmrouter.core.scorer import PromptScorer
-from llmrouter.core.semantic_cache import OllamaJudge, SemanticCache
+from llmrouter.core.semantic_cache import OllamaJudge, SemanticCache, StreamCacheMatch
 from llmrouter.core.stats import MetricsCollector
 from llmrouter.core.types import (
     ChatMessage,
@@ -81,6 +81,7 @@ class ChatCompletionPayload(BaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     stream: bool = False
+    stream_options: dict[str, Any] | None = None
     top_p: float | None = 1.0
     stop: str | list[str] | None = None
     # Pass-through fields for OpenAI-compatible clients (Cline, etc.)
@@ -944,6 +945,16 @@ _STREAM_PROBE_CIRCUIT: dict[str, list[float]] = {}
 # QA MEDIUM-9 — cap on chunks retained for cache storage (memory guard;
 # providers that never emit finish_reason stop accumulating at this bound).
 _STREAM_STORE_MAX_CHUNKS = 2048
+_STREAM_TERMINAL_FINISH_REASONS = frozenset({"stop", "length", "tool_calls"})
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamReplay:
+    chunks: list[dict[str, Any]]
+    usage: Usage
+    usage_source: str
+    audit_match: StreamCacheMatch | None
+    cache: SemanticCache
 
 
 async def _stream_response(
@@ -1051,14 +1062,14 @@ async def _stream_response(
     }
     if budget_warning:
         stream_headers["X-Budget-Warning"] = budget_warning
-    # ROADMAP_TOKEN_OPTIMIZATION E2 — advertise semantic cache replay status
-    # via a header (never inside the SSE chunk to preserve OpenAI compatibility).
+    # Keep the status header for existing clients; callers that request usage
+    # also receive a status extension in the final SSE chunk.
     if semantic_cache is not None and getattr(
         semantic_cache, "stream_cache_enabled", False
     ):
         stream_headers["X-LLMrouter-Stream-Cache"] = "enabled"
 
-    replay_decision: tuple[list[dict[str, Any]], int] | None = None
+    replay_decision: _StreamReplay | None = None
     if (
         semantic_cache is not None
         and getattr(semantic_cache, "stream_cache_enabled", False)
@@ -1084,13 +1095,15 @@ async def _stream_response(
         # QA HIGH-4 — live-path bookkeeping: real normalized chunks plus a
         # completion signal observed from the provider itself.
         raw_chunks: list[dict[str, Any]] = []
-        saw_finish_reason = False
+        saw_terminal_finish_reason = False
+        provider_usage: dict[str, Any] | None = None
+        include_usage = _stream_usage_requested(payload)
         try:
             # ROADMAP_TOKEN_OPTIMIZATION E2 — replay the cached chunks.  The
             # decision (lookup + probe) was already made eagerly above; this
             # branch only iterates the resolved chunks.
             if replay_decision is not None:
-                cached_chunks, completion_tokens = replay_decision
+                cached_chunks = replay_decision.chunks
                 replay_active = True
                 for cached_chunk in cached_chunks:
                     normalized_chunk = _normalize_stream_chunk(
@@ -1106,18 +1119,47 @@ async def _stream_response(
                     replay_bytes += len(line)
                     yield line
                     _extract_delta_text(normalized_chunk, collected_content)
-                try:
-                    if completion_tokens and semantic_cache is not None:
-                        semantic_cache.bump_stream_counter(
-                            "stream_tokens_saved_total", completion_tokens
-                        )
-                except Exception:  # pragma: no cover - never block the replay
-                    pass
+                if include_usage:
+                    usage_event = _usage_event(
+                        usage=replay_decision.usage,
+                        model=selected_model.name,
+                        cache_status="semantic_hit",
+                        usage_source=replay_decision.usage_source,
+                    )
+                    yield f"data: {json.dumps(usage_event)}\n\n"
                 yield "data: [DONE]\n\n"
+                # A disconnect while suspended on [DONE] is not a completed
+                # replay. The generator must resume normally past this yield.
+                replay_cache = replay_decision.cache
+                if replay_decision.audit_match is not None:
+                    record_hit = getattr(replay_cache, "record_stream_hit", None)
+                    if callable(record_hit):
+                        try:
+                            await record_hit(replay_decision.audit_match)
+                        except Exception:  # auditing cannot invalidate a replay
+                            pass
+                completed_metrics = (
+                    ("stream_replays_total", 1),
+                    ("stream_replay_bytes_served_total", replay_bytes),
+                    (
+                        "stream_tokens_saved_total",
+                        replay_decision.usage.completion_tokens,
+                    ),
+                )
+                for name, value in completed_metrics:
+                    if not value:
+                        continue
+                    try:
+                        replay_cache.bump_stream_counter(name, value)
+                    except Exception:  # metrics cannot invalidate a replay
+                        continue
                 return
             async for chunk in proxy.stream_chat_completion(chat_request, decision):
                 normalized_chunk = _normalize_stream_chunk(chunk, selected_model.name)
                 if normalized_chunk is None:
+                    continue
+                if not normalized_chunk.get("choices"):
+                    provider_usage = normalized_chunk["usage"]
                     continue
                 saw_output = saw_output or _chunk_has_assistant_output(normalized_chunk)
                 # QA HIGH-4/MEDIUM-9 — keep the provider's normalized chunks
@@ -1128,8 +1170,8 @@ async def _stream_response(
                 if raw_chunks is not None and len(raw_chunks) < _STREAM_STORE_MAX_CHUNKS:
                     raw_chunks.append(normalized_chunk)
                 for choice in normalized_chunk.get("choices", []):
-                    if choice.get("finish_reason"):
-                        saw_finish_reason = True
+                    if choice.get("finish_reason") in _STREAM_TERMINAL_FINISH_REASONS:
+                        saw_terminal_finish_reason = True
                 # Forward a normalized OpenAI-compatible chunk to the client.
                 yield f"data: {json.dumps(normalized_chunk)}\n\n"
                 # Accumulate content for observation recording
@@ -1144,11 +1186,17 @@ async def _stream_response(
                 )
             # Persist a validated stream response into the cache (best-effort).
             # QA HIGH-4: only when the provider itself signalled completion.
+            _stream_finished_cleanly = saw_terminal_finish_reason
+            stream_usage, usage_source = _live_stream_usage(
+                provider_usage,
+                prompt=chat_request.prompt_text,
+                response="".join(collected_content),
+            )
             if (
                 semantic_cache is not None
                 and getattr(semantic_cache, "stream_cache_enabled", False)
                 and saw_output
-                and saw_finish_reason
+                and _stream_finished_cleanly
             ):
                 await _store_stream_response_if_valid(
                     semantic_cache=semantic_cache,
@@ -1156,7 +1204,17 @@ async def _stream_response(
                     selected_model=selected_model,
                     collected_content=collected_content,
                     raw_chunks=raw_chunks,
+                    usage=stream_usage,
+                    usage_source=usage_source,
                 )
+            if include_usage:
+                usage_event = _usage_event(
+                    usage=stream_usage,
+                    model=selected_model.name,
+                    cache_status="live",
+                    usage_source=usage_source,
+                )
+                yield f"data: {json.dumps(usage_event)}\n\n"
             yield "data: [DONE]\n\n"
             return
         except ProviderError as exc:
@@ -1166,11 +1224,28 @@ async def _stream_response(
         except GeneratorExit:
             # Client disconnected — surface for the storage layer to skip.
             if semantic_cache is not None:
+                abort_metrics = (
+                    "stream_aborts_total",
+                    "stream_replay_error_total",
+                    (
+                        "stream_replay_aborts_total"
+                        if replay_active
+                        else "stream_live_aborts_total"
+                    ),
+                )
+                for name in abort_metrics:
+                    try:
+                        semantic_cache.bump_stream_counter(name, 1)
+                    except Exception:  # telemetry must not affect disconnect cleanup
+                        continue
+            return
+        except Exception:
+            if replay_active and semantic_cache is not None:
                 try:
                     semantic_cache.bump_stream_counter("stream_replay_error_total", 1)
                 except Exception:
                     pass
-            return
+            raise
         finally:
             # QA: no yield inside ``finally`` — yielding after GeneratorExit
             # raises RuntimeError (async generator ignored GeneratorExit).
@@ -1213,16 +1288,6 @@ async def _stream_response(
                 repository=memory_repository,
             )
             await _log_selected_model_health(health_tracker, selected_model.name, latency_ms)
-            if replay_active and semantic_cache is not None:
-                try:
-                    semantic_cache.bump_stream_counter(
-                        "stream_replays_total", 1
-                    )
-                    semantic_cache.bump_stream_counter(
-                        "stream_replay_bytes_served_total", replay_bytes
-                    )
-                except Exception:  # pragma: no cover
-                    pass
 
     response = StreamingResponse(
         event_generator(),
@@ -1239,13 +1304,11 @@ async def _maybe_replay_stream(
     chat_request: ChatRequest,
     selected_model: Any,
     probe_soft_circuit: dict[str, list[float]],
-) -> tuple[list[dict[str, Any]], int] | None:
+) -> _StreamReplay | None:
     """Run the k-token probe and replay cached chunks when the probe matches.
 
-    Returns ``(cached_chunks, completion_tokens)`` on a successful replay or
-    ``None`` if the replay path should be skipped (miss / probe diverge /
-    NotImplementedError / soft-circuit open).  All counter bumps happen
-    here so the generator can stay focused on yielding.
+    Return a replay decision with usage and optional audit evidence, or None
+    if the candidate is unavailable or the provider probe does not match.
     """
     # Soft-circuit: skip the probe for this model if too many recent probes
     # failed within the configured window.  Empty dict => always probe.
@@ -1274,11 +1337,32 @@ async def _maybe_replay_stream(
     if cached is None:
         return None
 
-    cached_chunks, completion_tokens, first_k = cached
+    if isinstance(cached, StreamCacheMatch):
+        match = cached
+        cached_chunks = match.chunks
+        first_k = match.first_k_tokens
+        usage = Usage(
+            prompt_tokens=match.prompt_tokens,
+            completion_tokens=match.completion_tokens,
+            total_tokens=match.total_tokens,
+        )
+        usage_source = "cached"
+    else:
+        # Preserve duck-typed cache compatibility for integrations and tests
+        # that still implement the original three-tuple lookup contract.
+        cached_chunks, completion_tokens, first_k = cached
+        usage = Usage(
+            prompt_tokens=0,
+            completion_tokens=int(completion_tokens),
+            total_tokens=int(completion_tokens),
+        )
+        usage_source = "estimated"
+        match = None
     # Run the k-token probe against the live provider.
     # QA MEDIUM-7 — honour stream_probe_timeout_seconds: a hung provider must
     # not stall the stream; fall back to live on timeout.
     k = semantic_cache.stream_probe_k
+    probe_started = time.perf_counter()
     try:
         prefix = await asyncio.wait_for(
             selected_provider.first_tokens(chat_request, selected_model.name, k),
@@ -1292,6 +1376,16 @@ async def _maybe_replay_stream(
         semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
         circuit.append(now)
         return None
+    finally:
+        record_probe = getattr(semantic_cache, "record_stream_probe", None)
+        if callable(record_probe):
+            try:
+                record_probe(
+                    token_budget=k,
+                    latency_ms=(time.perf_counter() - probe_started) * 1000,
+                )
+            except Exception:  # metrics must not affect the user response
+                pass
 
     if (prefix or "").strip() != (first_k or "").strip():
         semantic_cache.bump_stream_counter("stream_probes_fail_total", 1)
@@ -1301,7 +1395,13 @@ async def _maybe_replay_stream(
     # Successful replay — reset circuit, bump counters.
     circuit.clear()
     semantic_cache.bump_stream_counter("stream_probes_ok_total", 1)
-    return cached_chunks, completion_tokens
+    return _StreamReplay(
+        chunks=cached_chunks,
+        usage=usage,
+        usage_source=usage_source,
+        audit_match=match,
+        cache=semantic_cache,
+    )
 
 
 async def _store_stream_response_if_valid(
@@ -1311,6 +1411,8 @@ async def _store_stream_response_if_valid(
     selected_model: Any,
     collected_content: list[str],
     raw_chunks: list[dict[str, Any]] | None,
+    usage: Usage,
+    usage_source: str = "estimated",
 ) -> None:
     """Persist the live stream response into the cache when it ended cleanly.
 
@@ -1325,12 +1427,6 @@ async def _store_stream_response_if_valid(
     response_text = "".join(collected_content)
     if not response_text:
         return
-    approx_tokens = max(len(response_text) // 4, 1)
-    usage = Usage(
-        prompt_tokens=len(chat_request.prompt_text) // 4,
-        completion_tokens=approx_tokens,
-        total_tokens=(len(chat_request.prompt_text) // 4) + approx_tokens,
-    )
     chunks_to_store: list[dict[str, Any]]
     if raw_chunks:
         chunks_to_store = raw_chunks
@@ -1361,6 +1457,7 @@ async def _store_stream_response_if_valid(
             top_p=chat_request.top_p or 1.0,
             max_tokens=chat_request.max_tokens,
             k=semantic_cache.stream_probe_k,
+            usage_source=usage_source,
         )
     except Exception:  # pragma: no cover - never break the response
         pass
@@ -1394,10 +1491,22 @@ def _log_chat_access(
 
 
 def _normalize_stream_chunk(chunk: dict[str, Any], model: str) -> dict[str, Any] | None:
-    """Normalize provider SSE chunks to the OpenAI chat.completion.chunk shape."""
+    """Normalize provider chunks, preserving OpenAI's choices-empty usage event."""
     choices = chunk.get("choices")
-    if not isinstance(choices, list) or not choices:
+    if not isinstance(choices, list):
         return None
+
+    common = {
+        "id": str(chunk.get("id") or f"chatcmpl-{int(time.time() * 1000)}"),
+        "object": str(chunk.get("object") or "chat.completion.chunk"),
+        "created": int(chunk.get("created") or int(time.time())),
+        "model": str(chunk.get("model") or model),
+    }
+    if not choices:
+        usage = chunk.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        return {**common, "choices": [], "usage": dict(usage)}
 
     normalized_choices: list[dict[str, Any]] = []
     for index, choice in enumerate(choices):
@@ -1421,13 +1530,65 @@ def _normalize_stream_chunk(chunk: dict[str, Any], model: str) -> dict[str, Any]
 
     if not normalized_choices:
         return None
+    return {**common, "choices": normalized_choices}
+
+
+def _stream_usage_requested(payload: ChatCompletionPayload) -> bool:
+    """Follow OpenAI stream_options: usage is opt-in for streaming callers."""
+    options = payload.stream_options
+    return isinstance(options, dict) and options.get("include_usage") is True
+
+
+def _usage_event(
+    *, usage: Usage, model: str, cache_status: str, usage_source: str
+) -> dict[str, Any]:
+    """Build the final usage extension shared by replay and live streams."""
     return {
-        "id": str(chunk.get("id") or f"chatcmpl-{int(time.time() * 1000)}"),
-        "object": str(chunk.get("object") or "chat.completion.chunk"),
-        "created": int(chunk.get("created") or int(time.time())),
-        "model": str(chunk.get("model") or model),
-        "choices": normalized_choices,
+        "id": f"chatcmpl-usage-{uuid.uuid4().hex}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+        },
+        "cache_status": cache_status,
+        "usage_source": usage_source,
     }
+
+
+def _live_stream_usage(
+    provider_usage: dict[str, Any] | None, *, prompt: str, response: str
+) -> tuple[Usage, str]:
+    """Use provider usage when available; otherwise expose explicit estimates."""
+    if provider_usage is not None:
+        try:
+            prompt_tokens = int(provider_usage["prompt_tokens"])
+            completion_tokens = int(provider_usage["completion_tokens"])
+            total_tokens = int(provider_usage["total_tokens"])
+            if min(prompt_tokens, completion_tokens, total_tokens) >= 0:
+                return (
+                    Usage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                    ),
+                    "provider",
+                )
+        except (KeyError, TypeError, ValueError):
+            pass
+    prompt_tokens = max(len(prompt) // 4, 1)
+    completion_tokens = max(len(response) // 4, 1)
+    return (
+        Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        ),
+        "estimated",
+    )
 
 
 def _chunk_has_assistant_output(chunk: dict[str, Any]) -> bool:
@@ -1487,6 +1648,8 @@ def _to_chat_request(payload: ChatCompletionPayload) -> ChatRequest:
         extra["presence_penalty"] = payload.presence_penalty
     if payload.n is not None:
         extra["n"] = payload.n
+    if payload.stream_options is not None:
+        extra["stream_options"] = payload.stream_options
     if payload.logit_bias is not None:
         extra["logit_bias"] = payload.logit_bias
     if payload.user is not None:

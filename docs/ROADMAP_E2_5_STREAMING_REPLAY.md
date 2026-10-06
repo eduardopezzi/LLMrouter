@@ -18,82 +18,99 @@
 
 **Escopo:** especificação e observabilidade, sem mudar comportamento de replay.
 
-- Definir o formato do chunk final SSE: `usage` no formato OpenAI (`choices: []`) e onde `cache_status` será representado. Manter os headers atuais durante a transição.
-- Definir quando emitir usage no modo live e no replay, incluindo o comportamento de `stream_options.include_usage` se suportado pela API.
-- Registrar baseline das métricas atuais e do número de instalações/configurações com cache semântico e streaming habilitados, antes de decidir o novo default.
-- Atualizar a issue para deixar claro que item 3 adiciona auditoria específica para streaming.
+- [x] Definir o chunk SSE final com `choices: []`, `usage`, `cache_status` (`live` ou `semantic_hit`) e `usage_source` (`provider`, `cached` ou `estimated`). Preservar os headers existentes.
+- [x] Emitir o chunk de usage apenas quando `stream_options.include_usage=true`, tanto no replay quanto no modo live. No live, usar usage do provider quando disponível; caso contrário, estimar e identificar a origem.
+- [x] Registrar baseline do Yoda em 2026-10-06: uma instalação acessível; `LLMROUTER_SEMANTIC_CACHE__ENABLED=true`; override de streaming ausente (default efetivo `true`); endpoint autenticado respondeu HTTP 200. No processo iniciado às 13:41:23 UTC, as métricas legadas de streaming estavam zeradas às 15:36 UTC e ainda não havia aliases TL.
+- [ ] Completar inventário de outras instalações; esta sessão só tem evidência do Yoda.
+- [ ] Atualizar a issue #11 com o resultado e o link do PR quando houver PR publicado. O item 3 passa a descrever a nova auditoria de replay.
 
-**Aceite:** formato SSE documentado, estratégia de compatibilidade aprovada no próprio desenho técnico e baseline disponível para a decisão do default.
+**Status:** contrato e baseline inicial do Yoda concluídos; inventário global e sincronização da issue pendentes. O baseline cobre menos de duas horas e não sustenta a decisão do default.
 
 ## Fase 1 — Fixar invariantes e lacunas de QA
 
 **Escopo:** testes de regressão antes das mudanças de comportamento.
 
-- N2a: exercitar o circuito aberto com o `SemanticCache` real ou um spy fiel, provando que `lookup_stream_response` não é chamado quando o circuito está aberto.
-- N2b: cobrir persistência e unicidade quando `max_tokens=None`, verificando a sentinela `-1` na chave e `NULL` no campo persistido.
-- Cobrir interrupção do caminho live antes de `finish_reason`: nenhuma entrada deve ser armazenada.
-- Cobrir o sinal de conclusão limpa no caminho live, inclusive stream vazio, `finish_reason` terminal e encerramento do iterador com exceção.
-- Cobrir GeneratorExit durante replay e durante live, separando erro de replay de abort do cliente na semântica dos contadores.
+- [x] N2a: circuito aberto com `SemanticCache` real; lookup e probe não são chamados.
+- [x] N2b: `max_tokens=None` persiste como `NULL`, usa `-1` na chave de unicidade e migra o schema antigo.
+- [x] Interrupção live antes do terminal não armazena resposta.
+- [x] Stream vazio e terminal sem conteúdo não armazenam; exceção do iterador após terminal também não armazena.
+- [x] GeneratorExit em replay e live não registra hit concluído; novo contador de abortos é separado e o contador legado continua incluindo abortos durante a compatibilidade.
 
-**Aceite:** os testes reproduzem as duas notas N2 e demonstram que apenas streams live completos e válidos podem ser armazenados.
+**Status:** concluída. Os testes focados de replay/cache/wiring passaram (72 testes).
 
 ## Fase 2 — Conclusão limpa e TTL específico para streaming
 
 **Escopo:** endurecer o caminho live e permitir retenção independente.
 
-- Substituir `saw_finish_reason` por estado explícito de conclusão limpa, definido somente após iteração normal e observação de um chunk terminal válido.
-- Continuar exigindo conteúdo útil antes de armazenar; abort, erro do provider ou truncamento não podem gravar resposta.
-- Adicionar `stream_ttl_seconds: float | None` à configuração e ao `SemanticCache`.
-- Quando `stream_ttl_seconds` for `None`, herdar `ttl_seconds`; validar valores explícitos como positivos e documentar a variável de ambiente correspondente.
+- [x] Persistir somente depois que a iteração termina normalmente com finish reason terminal válido e conteúdo útil.
+- [x] Abort, erro do provider ou truncamento não gravam resposta.
+- [x] Adicionar `stream_ttl_seconds: float | None` à configuração e ao `SemanticCache`.
+- [x] `None` herda `ttl_seconds`; valores explícitos precisam ser positivos. Variável: `LLMROUTER_SEMANTIC_CACHE__STREAM_TTL_SECONDS`.
 
-**Aceite:** fluxos incompletos nunca são armazenados; TTL omitido mantém o comportamento existente; TTL configurado controla apenas novas entradas streaming.
+**Status:** concluída e coberta por testes de TTL herdado e específico.
 
 ## Fase 3 — Completar o payload SSE do replay
 
 **Escopo:** uso e status de cache por evento, mantendo headers existentes.
 
-- Retornar do lookup os dados de usage completos, não só `completion_tokens`.
-- No replay, emitir um chunk final de usage e `cache_status` conforme o contrato definido na Fase 0, imediatamente antes de `[DONE]`.
-- Preservar os headers `X-LLMrouter-Stream-Cache` e `X-LLMrouter-Cache-Status` durante a migração.
-- Garantir que normalização e encaminhamento de chunks não descartem o novo chunk final. Hoje chunks com `choices: []` são filtrados pela normalização.
-- Definir a mesma política de usage para resposta live, evitando que os clientes precisem tratar o replay como um protocolo distinto.
+- [x] Lookup retorna usage completo e a origem dos dados.
+- [x] Replay emite usage/status imediatamente antes de `[DONE]` quando solicitado.
+- [x] Preservar `X-LLMrouter-Stream-Cache` e `X-LLMrouter-Cache-Status`.
+- [x] Normalização preserva chunks OpenAI com `choices: []`.
+- [x] Aplicar a mesma política de usage no caminho live.
 
-**Aceite:** teste de integração compara os eventos SSE do replay com o contrato, valida a ordem `chunks → usage/cache_status → [DONE]` e cobre compatibilidade do comportamento live.
+**Status:** concluída; contrato e testes cobrem a ordem `chunks → usage/cache_status → [DONE]`.
 
 ## Fase 4 — Auditoria de replay após emissão concluída
 
 **Escopo:** trilha P-CHR/audit específica para hits streaming.
 
-- Criar uma operação de registro de hit para streaming com os dados disponíveis do candidato: prompt, resposta, modelo, restrições, similaridade e threshold.
-- Devolver do lookup a metadata do candidato necessária ao registro sem alterar o conteúdo dos chunks.
-- Só registrar o hit depois que o gerador tiver retomado após emitir `[DONE]` e concluído a sequência normalmente. Aborts e exceções não geram hit concluído.
-- Manter a gravação best-effort: erro de auditoria não pode interromper nem invalidar uma resposta já emitida.
-- Definir retenção e política de dados do texto de prompt/resposta de acordo com o hit-log existente.
+- [x] Criar registro de hit com prompt/resposta, modelo, restrições, similaridade e threshold do candidato.
+- [x] Retornar metadata de auditoria no resultado do lookup sem modificar os chunks.
+- [x] Registrar somente depois que o gerador retoma após emitir `[DONE]`; abortos não geram hit.
+- [x] Falha da auditoria é best-effort e não invalida o replay.
+- [x] Reutilizar o hit-log e a retenção já configurados para o cache semântico.
 
-**Aceite:** replay concluído cria exatamente um registro; miss, divergência do probe, circuito aberto, abort e erro não criam registro; falha de escrita não afeta a resposta.
+**Status:** concluída; integração com SQLite verifica registro único, abort e falha de escrita.
 
 ## Fase 5 — Métricas TL e migração do contrato
 
 **Escopo:** nomes, semântica e distribuição de métricas.
 
-- Adicionar aliases TL para hits, replays servidos e tokens economizados, mantendo contadores atuais durante a janela de compatibilidade.
-- Separar `stream_aborts_total` de `stream_replay_error_total`; documentar se o contador legado continua acumulando aborts durante a depreciação.
-- Instrumentar latência do probe com uma amostra limitada ou estimador de quantis e expor p50 com unidade explícita.
-- Expor `stream_probe_tokens_spent` como estimativa `k` para probes executados enquanto não houver usage real do provider. Se necessário, renomear o campo para explicitar que é estimado.
-- Atualizar o endpoint, snapshot do contrato e testes de schema juntos. Publicar período de depreciação e critério para remover aliases antigos em uma versão futura.
+- [x] Adicionar aliases TL sem remover os contadores atuais.
+- [x] Adicionar `stream_aborts_total` agregado e contadores `stream_replay_aborts_total` / `stream_live_aborts_total` para separar desconexões. O contador legado `stream_replay_error_total` continua incluindo abortos durante a janela de compatibilidade.
+- [x] Manter amostra limitada a 1.000 probes e expor `stream_probe_latency_ms_p50` em milissegundos.
+- [x] Expor `stream_probe_tokens_spent_estimated` e o alias `stream_probe_tokens_spent` como estimativa do limite `k`, não como faturamento.
+- [x] Atualizar `/v1/llmrouter/cache/stats`, snapshot em `contracts/llmrouter.contract.json` e testes de schema.
+- [x] Depreciar nomes antigos somente após pelo menos uma versão minor e 90 dias desde a primeira release com aliases, valendo o prazo maior; remover apenas em release major, com evidência de migração dos consumidores e notas de migração.
 
-**Aceite:** cada métrica tem definição, unidade e ponto de incremento documentados; aliases coexistem com os nomes atuais; contrato e implementação têm o mesmo schema.
+**Status:** implementação, schema e política de depreciação concluídos.
+
+Definição dos contadores: `stream_hits` conta candidatos que passam pelo threshold do lookup; `stream_replays_served` conta replay depois que o gerador retoma após `[DONE]`; `stream_replay_tokens_saved` soma completion tokens apenas nesse mesmo ponto de conclusão; `stream_probe_tokens_spent` soma o limite `k` de probes executados (estimativa, não faturamento); `stream_probe_latency_ms_p50` é o p50 em milissegundos das amostras limitadas aos últimos 1.000 probes. `stream_aborts_total` conta todo GeneratorExit; `stream_replay_aborts_total` e `stream_live_aborts_total` separam o caminho interrompido. O contador legado `stream_replay_error_total` inclui esses abortos e exceções de replay.
 
 ## Fase 6 — Rollout e decisão sobre o default
 
 **Escopo:** ativação controlada e decisão informada para `stream_cache_enabled`.
 
-- Implantar inicialmente sem alterar o default e observar taxa de lookup, replay concluído, probe divergente, aborts, latência p50, tokens estimados e precisão auditada.
-- Definir janela e limites de qualidade/latência antes de avaliar o default. Se os dados forem insuficientes, manter o default existente e tratar a decisão como pendente.
-- Se aprovado, mudar para `false`, atualizar descrições, exemplos de configuração e notas de migração; explicitar como habilitar streaming em ambientes que já usam cache semântico.
-- Manter uma forma rápida de desativar replay por configuração e documentar o procedimento de rollback.
+- [x] Manter o default atual (`stream_cache_enabled=true`) e registrar as métricas necessárias para o rollout.
+- [x] Definir a janela e o gate: observar 14 dias completos após publicar a versão instrumentada, com pelo menos 100 probes e 30 replays concluídos. Se a amostra não for atingida, estender a janela e manter o default atual.
+- [x] Definir limites para considerar saudável: taxa de probe correspondente (`ok / (ok + fail)`) ≥50%, p50 do probe ≤500 ms, taxa de abortos de replay (`replay_aborts / (replays_served + replay_aborts)`) ≤5% e zero erros de replay excluídos os abortos. Registrar a decisão e os valores observados antes de qualquer mudança de default.
+- [ ] Observar a janela em produção. O baseline do Yoda tem menos de duas horas e foi medido antes da versão com aliases; ainda não permite aplicar o gate.
+- [ ] Decidir o default após a janela de observação; manter `true` até haver evidência para uma mudança.
+- [x] Replay pode ser desativado imediatamente por `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false`.
+- [x] Rollback: definir `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false` no ambiente da instância, reiniciar o serviço `llmrouter` e validar `/health` e `/v1/llmrouter/cache/stats`; reverter a variável somente após estabilização.
 
-**Aceite:** decisão registrada com dados observados; rollout e rollback documentados; mudança de default acompanhada por cobertura de configuração e comunicação de migração.
+**Status:** plano, critérios e rollback documentados; observação por 14 dias e decisão do default pendentes de publicar a versão instrumentada.
+
+## Verificação desta implementação
+
+- [x] Testes focados de replay, cache e wiring: 72 passaram.
+- [x] Suíte completa: 950 passaram e 4 foram ignorados.
+- [x] Cobertura final do código E2.5 alterado: linhas executáveis 204/204 (100%); ramos condicionais nas linhas alteradas 58/58 (100%). A cobertura global do repositório inclui módulos fora deste roadmap.
+- [x] Ruff e `git diff --check` passaram.
+- [x] Análise de QA requisito por requisito registrada em [QA_E2_5_STREAMING_REPLAY.md](QA_E2_5_STREAMING_REPLAY.md).
+- [x] Baseline de produção registrado no Yoda pela porta correta (12345): `/health` e `/v1/llmrouter/cache/stats` responderam 200; o processo usa o commit `da9c781` e reportou todos os contadores legados de streaming em zero. Os serviços Prometheus-01 e Prometheus-02 estavam reiniciando.
+- [ ] Publicar a versão instrumentada e executar a janela do rollout; os arquivos locais ainda não estão implantados no Yoda.
 
 ## Ordem sugerida de entrega
 

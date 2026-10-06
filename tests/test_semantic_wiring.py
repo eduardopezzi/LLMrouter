@@ -302,6 +302,13 @@ def test_contract_snapshot_includes_stream_stats_block() -> None:
     snapshot = Path("contracts/llmrouter.contract.json")
     data = json.loads(snapshot.read_text(encoding="utf-8"))
 
+    chat_endpoint = next(
+        endpoint
+        for endpoint in data["endpoints"]
+        if endpoint["path"] == "/v1/chat/completions"
+    )
+    assert "stream_options" in chat_endpoint["request_schema"]["properties"]
+
     endpoints = [
         endpoint
         for endpoint in data["endpoints"]
@@ -317,7 +324,16 @@ def test_contract_snapshot_includes_stream_stats_block() -> None:
         "stream_purged_total": "int",
         "stream_replay_bytes_served_total": "int",
         "stream_replay_error_total": "int",
+        "stream_aborts_total": "int",
+        "stream_replay_aborts_total": "int",
+        "stream_live_aborts_total": "int",
+        "stream_probe_tokens_spent_estimated": "int",
         "stream_replays_total": "int",
+        "stream_hits": "int",
+        "stream_replays_served": "int",
+        "stream_replay_tokens_saved": "int",
+        "stream_probe_tokens_spent": "int",
+        "stream_probe_latency_ms_p50": "float",
         "stream_stored_total": "int",
         "stream_tokens_saved_total": "int",
         "stream_probes_fail_total": "int",
