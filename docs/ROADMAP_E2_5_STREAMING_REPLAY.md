@@ -95,7 +95,7 @@ Definição dos contadores: `stream_hits` conta candidatos que passam pelo thres
 - [x] Manter o default atual (`stream_cache_enabled=true`) e registrar as métricas necessárias para o rollout.
 - [x] Definir a janela e o gate: observar 14 dias completos após publicar a versão instrumentada, com pelo menos 100 probes e 30 replays concluídos. Se a amostra não for atingida, estender a janela e manter o default atual.
 - [x] Definir limites para considerar saudável: taxa de probe correspondente (`ok / (ok + fail)`) ≥50%, p50 do probe ≤500 ms, taxa de abortos de replay (`replay_aborts / (replays_served + replay_aborts)`) ≤5% e zero erros de replay excluídos os abortos. Registrar a decisão e os valores observados antes de qualquer mudança de default.
-- [ ] Observar a janela em produção. O baseline do Yoda tem menos de duas horas e foi medido antes da versão com aliases; ainda não permite aplicar o gate.
+- [ ] Observar a janela em produção. O baseline do Yoda cobre apenas 2h32 antes do deploy e foi medido antes da versão com aliases; ainda não permite aplicar o gate.
 - [ ] Decidir o default após a janela de observação; manter `true` até haver evidência para uma mudança.
 - [x] Replay pode ser desativado imediatamente por `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false`.
 - [x] Rollback: definir `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false` no ambiente da instância, reiniciar o serviço `llmrouter` e validar `/health` e `/v1/llmrouter/cache/stats`; reverter a variável somente após estabilização.
