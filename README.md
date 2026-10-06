@@ -1,6 +1,6 @@
 # LLMrouter
 
-LLMrouter is an OpenAI-compatible gateway that routes chat requests across a configured model catalog and records observations for local self-evaluation with Ollama.
+LLMrouter is an OpenAI-compatible gateway for chat and Ollama embedding requests. It routes chat requests across a configured model catalog and records observations for local self-evaluation with Ollama.
 
 ## Docker
 
@@ -242,6 +242,25 @@ curl -X POST http://localhost:12345/v1/chat/completions \
 úteis hoje incluem `review`, `test_generation`, `fix`, `summarization`,
 `documentation`, `refactoring`, `security_audit`, `architecture` e `migration`.
 Também é possível enviar o papel em `llmrouter.task_role` ou `extra.task_role`.
+
+## Embeddings OpenAI-compatible
+
+O endpoint `POST /v1/embeddings` adapta pedidos OpenAI-compatible à API nativa
+de embeddings do Ollama (`/api/embed`). Use `auto` para o modelo definido em
+`semantic.model_name`, `ollama/<modelo>` ou apenas o nome do modelo. O modelo
+precisa estar disponível no Ollama e o
+provedor Ollama precisa estar habilitado no catálogo/configuração.
+
+```bash
+curl -X POST http://localhost:12345/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LLMROUTER_SERVER__API_KEY" \
+  -d '{"model":"ollama/embeddinggemma:latest","input":"texto para vetorizar"}'
+```
+
+Para cadastrar o LLMrouter como provedor de embeddings no RAGFlow, use a URL
+base `http://host.docker.internal:12345/v1` quando ambos estiverem no Yoda,
+informe o nome do modelo de embedding do Ollama e use a API key do LLMrouter.
 
 ### Diretivas no prompt
 

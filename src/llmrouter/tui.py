@@ -171,7 +171,10 @@ class LLMrouterTUI(App[None]):
         table = self.query_one("#models-table", DataTable)
         table.cursor_type = "row"
         self._load_catalog()
-        self._refresh_all()
+        self._update_models_table()
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self._refresh_tab(event.pane.id or "")
 
     def action_switch_tab(self, tab_id: str) -> None:
         self.query_one(TabbedContent).active = tab_id
@@ -180,21 +183,20 @@ class LLMrouterTUI(App[None]):
         self.push_screen(HelpScreen())
 
     def action_refresh(self) -> None:
-        self._load_catalog()
-        self._refresh_all()
+        self._load_catalog(reload=True)
+        self._refresh_tab(self.query_one(TabbedContent).active)
         self.notify("Catálogo recarregado")
 
-    def _load_catalog(self) -> None:
-        self.settings = reload_settings()
+    def _load_catalog(self, *, reload: bool = False) -> None:
+        if reload:
+            self.settings = reload_settings()
         self.models_file = Path(self.models_file or self.settings.models_file)
         self.catalog = load_model_registry(
             self.models_file,
-            benchmark_catalog_path=self.settings.benchmarks.catalog_path,
             include_disabled=True,
         )
-        self.active_catalog = load_model_registry(
-            self.models_file,
-            benchmark_catalog_path=self.settings.benchmarks.catalog_path,
+        self.active_catalog = ModelRegistry(
+            models=tuple(model for model in self.catalog.all() if model.enabled)
         )
         rows = model_priorities(self.catalog, limit=None)
         self._order = [row.name for row in rows]
@@ -203,10 +205,18 @@ class LLMrouterTUI(App[None]):
         self._dirty = False
 
     def _refresh_all(self) -> None:
-        self._update_overview()
-        self._update_routing()
-        self._update_models_table()
-        self._update_usage()
+        for tab_id in ("overview", "routing", "models", "usage"):
+            self._refresh_tab(tab_id)
+
+    def _refresh_tab(self, tab_id: str) -> None:
+        if tab_id == "overview":
+            self._update_overview()
+        elif tab_id == "routing":
+            self._update_routing()
+        elif tab_id == "models":
+            self._update_models_table()
+        elif tab_id == "usage":
+            self._update_usage()
 
     def _update_overview(self) -> None:
         self.query_one("#overview-content", Static).update(
@@ -297,7 +307,7 @@ class LLMrouterTUI(App[None]):
         except Exception as exc:
             self.notify(f"Falha ao salvar: {exc}", severity="error")
             return
-        self._load_catalog()
+        self._load_catalog(reload=True)
         self._refresh_all()
         self.notify("Catálogo salvo")
 

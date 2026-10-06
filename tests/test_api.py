@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -476,6 +477,7 @@ def test_health_reports_model_count() -> None:
         "health_tracker": False,
         "openai_compatible": {
             "chat_completions": "/v1/chat/completions",
+            "embeddings": "/v1/embeddings",
             "models": "/v1/models",
             "routing_roles": [],
         },
@@ -573,6 +575,83 @@ def test_api_key_protects_models_endpoint() -> None:
 
     assert unauthorized.status_code == 401
     assert authorized.status_code == 200
+
+
+def test_embeddings_endpoint_uses_ollama_and_returns_openai_shape() -> None:
+    class FakeEmbeddingProxy:
+        def __init__(self) -> None:
+            self._providers = {Provider.OLLAMA: self}
+            self.call: dict[str, object] | None = None
+
+        async def embeddings(self, **kwargs: Any) -> tuple[list[list[float]], int]:
+            self.call = kwargs
+            return [[0.1, 0.2], [0.3, 0.4]], 5
+
+    proxy = FakeEmbeddingProxy()
+    client = TestClient(create_app(proxy=proxy, api_key="secret"))
+
+    unauthorized = client.post(
+        "/v1/embeddings",
+        json={"model": "ollama/nomic-embed-text", "input": ["first", "second"]},
+    )
+    response = client.post(
+        "/v1/embeddings",
+        headers={"Authorization": "Bearer secret"},
+        json={"model": "ollama/nomic-embed-text", "input": ["first", "second"]},
+    )
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert proxy.call == {
+        "model": "nomic-embed-text",
+        "inputs": ["first", "second"],
+        "dimensions": None,
+        "truncate": True,
+    }
+    assert response.json() == {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "index": 0, "embedding": [0.1, 0.2]},
+            {"object": "embedding", "index": 1, "embedding": [0.3, 0.4]},
+        ],
+        "model": "ollama/nomic-embed-text",
+        "usage": {"prompt_tokens": 5, "total_tokens": 5},
+    }
+
+
+def test_embeddings_endpoint_rejects_unsupported_provider() -> None:
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/v1/embeddings",
+        json={"model": "openai/text-embedding-3-small", "input": "hello"},
+    )
+
+    assert response.status_code == 501
+    assert response.json()["detail"] == "Embeddings are currently supported only for Ollama models"
+
+
+def test_embeddings_auto_uses_configured_semantic_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeEmbeddingProxy:
+        def __init__(self) -> None:
+            self._providers = {Provider.OLLAMA: self}
+            self.model: str | None = None
+
+        async def embeddings(self, **kwargs: Any) -> tuple[list[list[float]], int]:
+            self.model = str(kwargs["model"])
+            return [[0.1]], 1
+
+    monkeypatch.setattr(
+        "llmrouter.api.routes.get_settings",
+        lambda: SimpleNamespace(semantic=SimpleNamespace(model_name="embeddinggemma:latest")),
+    )
+    proxy = FakeEmbeddingProxy()
+    client = TestClient(create_app(proxy=proxy))
+
+    response = client.post("/v1/embeddings", json={"model": "auto", "input": "hello"})
+
+    assert response.status_code == 200
+    assert proxy.model == "embeddinggemma:latest"
 
 
 def test_api_key_accepts_x_api_key_header() -> None:

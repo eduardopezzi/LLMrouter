@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from llmrouter.api.routes import ChatCompletionPayload, SemanticInspectPayload
+from llmrouter.api.routes import ChatCompletionPayload, EmbeddingPayload, SemanticInspectPayload
 from llmrouter.core.registry import ModelRegistry
 
 CONTRACT_SCHEMA_VERSION = "1.0"
@@ -403,6 +403,17 @@ def _default_endpoints() -> tuple[dict[str, object], ...]:
             "request_schema": _model_schema(ChatCompletionPayload),
             "response_schema": {"object": "str", "choices": "list[choice]", "usage": "object"},
             "streaming": True,
+        },
+        {
+            "path": "/v1/embeddings",
+            "method": "POST",
+            "auth_required": True,
+            "request_schema": _model_schema(EmbeddingPayload),
+            "response_schema": {
+                "object": "str",
+                "data": "list[embedding]",
+                "usage": "object",
+            },
         },
         {
             "path": "/v1/llmrouter/semantic/inspect",

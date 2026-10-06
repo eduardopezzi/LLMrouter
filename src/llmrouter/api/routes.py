@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import difflib
 import hashlib
 import json
 import re
+import struct
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -98,6 +100,17 @@ class ChatCompletionPayload(BaseModel):
     metadata: dict[str, Any] | None = None
     llmrouter: dict[str, Any] | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+
+
+class EmbeddingPayload(BaseModel):
+    """OpenAI-compatible input for ``POST /v1/embeddings``."""
+
+    model: str = Field(min_length=1, max_length=256)
+    input: str | list[str]
+    encoding_format: str = Field(default="float", pattern="^(float|base64)$")
+    dimensions: int | None = Field(default=None, gt=0)
+    user: str | None = None
+    truncate: bool = True
 
 
 class LLMrouterFeedbackPayload(BaseModel):
@@ -262,6 +275,7 @@ def create_app(
             "health_tracker": app.state.health_tracker is not None,
             "openai_compatible": {
                 "chat_completions": "/v1/chat/completions",
+                "embeddings": "/v1/embeddings",
                 "models": "/v1/models",
                 "routing_roles": _routing_roles(app.state.registry),
             },
@@ -273,6 +287,83 @@ def create_app(
         return {
             "object": "list",
             "data": [_model_payload(model) for model in app.state.registry.all()],
+        }
+
+    @app.post("/v1/embeddings")
+    async def create_embeddings(
+        payload: EmbeddingPayload,
+        request: Request,
+    ) -> dict[str, object]:
+        """Generate OpenAI-compatible embeddings through the configured Ollama provider."""
+        _require_api_key(request, app.state.api_key)
+
+        raw_model = payload.model.strip()
+        if not raw_model:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="model must not be blank",
+            )
+        if raw_model in {"auto", "ollama/auto"}:
+            model_name = get_settings().semantic.model_name
+        elif "/" in raw_model and raw_model.split("/", maxsplit=1)[0] in {
+            "openai",
+            "zai",
+            "gemini",
+            "deepseek",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Embeddings are currently supported only for Ollama models",
+            )
+        elif raw_model.startswith("ollama/"):
+            _, model_name = raw_model.split("/", maxsplit=1)
+        else:
+            model_name = raw_model
+        if not model_name:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="model must not be blank",
+            )
+
+        inputs = [payload.input] if isinstance(payload.input, str) else payload.input
+        if not inputs or any(not text.strip() for text in inputs):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="input must contain non-empty text",
+            )
+
+        proxy = getattr(app.state, "proxy", None)
+        providers = getattr(proxy, "_providers", {})
+        ollama = providers.get(Provider.OLLAMA) if isinstance(providers, dict) else None
+        if ollama is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Ollama embedding provider is not configured",
+            )
+
+        try:
+            vectors, prompt_tokens = await ollama.embeddings(
+                model=model_name,
+                inputs=inputs,
+                dimensions=payload.dimensions,
+                truncate=payload.truncate,
+            )
+        except ProviderError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+        data: list[dict[str, object]] = []
+        for index, vector in enumerate(vectors):
+            embedding: list[float] | str = vector
+            if payload.encoding_format == "base64":
+                packed = struct.pack(f"<{len(vector)}f", *vector)
+                embedding = base64.b64encode(packed).decode("ascii")
+            data.append({"object": "embedding", "index": index, "embedding": embedding})
+
+        return {
+            "object": "list",
+            "data": data,
+            "model": payload.model,
+            "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
         }
 
     @app.get("/v1/llmrouter/rollout")

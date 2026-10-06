@@ -95,6 +95,22 @@ def test_reload_settings() -> None:
     assert s1.app_name == s2.app_name
 
 
+def test_ragflow_default_dataset_id_environment_overrides_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "ragflow:\n  default_dataset_id: yaml-dataset\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LLMROUTER_CONFIG", str(config_path))
+    monkeypatch.setenv("LLMROUTER_RAGFLOW__DEFAULT_DATASET_ID", "env-dataset")
+
+    settings = reload_settings()
+
+    assert settings.ragflow.default_dataset_id == "env-dataset"
+    get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # Runtime helpers
 # ---------------------------------------------------------------------------

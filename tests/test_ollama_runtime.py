@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -63,6 +65,40 @@ async def test_ollama_provider_uses_openai_compatible_endpoint() -> None:
     assert '"model":"qwen2.5-coder:3b"' in str(seen["body"]).replace(" ", "")
     assert response.id == "chatcmpl-ollama"
     assert response.usage.total_tokens == 4
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_generates_batch_embeddings() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(
+            200,
+            json={"embeddings": [[0.1, 0.2], [0.3, 0.4]], "prompt_eval_count": 5},
+        )
+
+    provider = OllamaProvider(base_url="http://ollama.test", api_key="ollama-secret")
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    vectors, prompt_tokens = await provider.embeddings(
+        model="nomic-embed-text",
+        inputs=["first", "second"],
+        dimensions=2,
+        truncate=False,
+    )
+    await provider.close()
+
+    assert seen["path"] == "/api/embed"
+    assert seen["body"] == {
+        "model": "nomic-embed-text",
+        "input": ["first", "second"],
+        "truncate": False,
+        "dimensions": 2,
+    }
+    assert vectors == [[0.1, 0.2], [0.3, 0.4]]
+    assert prompt_tokens == 5
 
 
 def test_runtime_builds_ollama_without_api_key() -> None:

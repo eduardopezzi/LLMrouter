@@ -3,55 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
 import logging
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import httpx
-import uvicorn
-
-from llmrouter.benchmark_catalog import BenchmarkRefreshError, refresh_benchmark_catalog
-from llmrouter.benchmark_research import BenchmarkResearcher
-from llmrouter.cli_panel import (
-    promote_model_priority,
-    render_benchmark_leaderboards,
-    render_model_health,
-    render_model_priorities,
-    render_panel_summary,
-    run_interactive_panel,
-    set_fallback_count,
-    set_model_rollout_percentage,
-    set_provider_cost_order,
-    set_routing_strategy,
-)
-from llmrouter.config import Settings, get_settings, reload_settings
-from llmrouter.contract_publisher import ContractPublisher
-from llmrouter.core.health import InMemoryHealthStore, ModelHealthTracker
-from llmrouter.cross_repository import (
-    BreakingChangeDetector,
-    ContractRegistry,
-    format_contract_changes,
-    resolve_project_contract_path,
-)
-from llmrouter.logging_config import setup_logging
-from llmrouter.model_catalog import (
-    configured_models,
-    fetch_ollama_local_inventory,
-    reconcile_ollama_local_models,
-    write_catalog_proposals,
-)
-from llmrouter.provider_catalog import refresh_provider_catalog
-from llmrouter.runtime import (
-    _build_health_tracker as _build_configured_health_tracker,
-)
-from llmrouter.runtime import (
-    _build_scorer,
-    build_app,
-    build_registry,
-)
-from llmrouter.utils import resolve_api_key
+if TYPE_CHECKING:
+    from llmrouter.config import Settings
+    from llmrouter.core.health import ModelHealthTracker
 
 
 class _LazyASGIApp:
@@ -66,6 +24,8 @@ class _LazyASGIApp:
 
     def _get_application(self) -> Any:
         if self._application is None:
+            from llmrouter.runtime import build_app
+
             self._application = build_app()
         return self._application
 
@@ -427,9 +387,14 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Run the development server."""
     args = _parse_args()
+    from llmrouter.config import get_settings, reload_settings
+
     settings = get_settings()
 
     if args.command == "export-contracts":
+        from llmrouter.cross_repository import ContractRegistry, resolve_project_contract_path
+        from llmrouter.runtime import build_registry
+
         registry = build_registry(
             args.models_file or settings.models_file,
             benchmark_catalog_path=settings.benchmarks.catalog_path,
@@ -449,6 +414,8 @@ def main() -> None:
         return
 
     if args.command in {"check-contracts", "diff-contracts"}:
+        from llmrouter.cross_repository import BreakingChangeDetector, format_contract_changes
+
         result = BreakingChangeDetector().compare_files(args.previous, args.current)
         print(format_contract_changes(result))
         if args.command == "check-contracts" and not result.is_compatible:
@@ -474,6 +441,9 @@ def main() -> None:
         return
 
     if args.command == "publish-contracts":
+        from llmrouter.contract_publisher import ContractPublisher
+        from llmrouter.runtime import build_registry
+
         registry = build_registry(
             args.models_file or settings.models_file,
             benchmark_catalog_path=settings.benchmarks.catalog_path,
@@ -492,6 +462,19 @@ def main() -> None:
         return
 
     if args.command == "panel":
+        from llmrouter.cli_panel import (
+            promote_model_priority,
+            render_benchmark_leaderboards,
+            render_model_priorities,
+            render_panel_summary,
+            run_interactive_panel,
+            set_fallback_count,
+            set_model_rollout_percentage,
+            set_provider_cost_order,
+            set_routing_strategy,
+        )
+        from llmrouter.runtime import build_registry
+
         models_file = args.models_file or settings.models_file
         registry = build_registry(
             models_file,
@@ -557,6 +540,11 @@ def main() -> None:
         return
 
     if args.command == "health":
+        import asyncio
+        import json
+
+        from llmrouter.cli_panel import render_model_health
+
         tracker = _build_health_tracker(args)
         rows = asyncio.run(tracker.list_health())
         scores = asyncio.run(tracker.score_map())
@@ -578,6 +566,10 @@ def main() -> None:
         return
 
     if args.command == "semantic-inspect":
+        import json
+
+        from llmrouter.runtime import _build_scorer
+
         scoring = _build_scorer(settings).score(args.prompt)
         payload = _semantic_inspect_payload(scoring)
         if args.json:
@@ -596,6 +588,8 @@ def main() -> None:
         return
 
     if args.command == "benchmarks-refresh":
+        from llmrouter.benchmark_catalog import BenchmarkRefreshError, refresh_benchmark_catalog
+
         try:
             report = refresh_benchmark_catalog(
                 args.sources or settings.benchmarks.sources_path,
@@ -616,6 +610,11 @@ def main() -> None:
         return
 
     if args.command == "benchmarks-research":
+        import asyncio
+
+        from llmrouter.benchmark_research import BenchmarkResearcher
+        from llmrouter.utils import resolve_api_key
+
         researcher = BenchmarkResearcher(
             base_url=settings.evaluator.ollama.base_url,
             api_key=resolve_api_key(settings.evaluator.ollama, "OLLAMA_API_KEY"),
@@ -647,6 +646,15 @@ def main() -> None:
         return
 
     if args.command == "catalog-sync":
+        import httpx
+
+        from llmrouter.model_catalog import (
+            configured_models,
+            fetch_ollama_local_inventory,
+            reconcile_ollama_local_models,
+            write_catalog_proposals,
+        )
+
         models = configured_models(settings.models_file)
         base_url = settings.providers.ollama.base_url or "http://localhost:11434"
         try:
@@ -676,6 +684,8 @@ def main() -> None:
         return
 
     if args.command == "providers-sync":
+        from llmrouter.provider_catalog import refresh_provider_catalog
+
         try:
             report = refresh_provider_catalog(
                 settings.benchmarks.provider_sources_path,
@@ -717,6 +727,10 @@ def main() -> None:
         return
 
     # Configure logging based on --debug flag
+    import uvicorn
+
+    from llmrouter.logging_config import setup_logging
+
     setup_logging(debug=args.debug)
     if args.debug:
         logging.getLogger("llmrouter").info("Debug mode ENABLED — detailed logging active")
@@ -743,12 +757,19 @@ def main() -> None:
 
 def _build_health_tracker_from_settings(settings: Settings) -> ModelHealthTracker:
     """Build a tracker using the same health backend as the running service."""
-    return _build_configured_health_tracker(settings)
+    from llmrouter.runtime import _build_health_tracker as build_configured_health_tracker
+
+    return build_configured_health_tracker(settings)
 
 
 def _build_health_tracker(args: argparse.Namespace) -> ModelHealthTracker:
     """Build a health tracker from CLI arguments."""
-    from llmrouter.core.health import HealthWeights, SQLiteHealthStore
+    from llmrouter.core.health import (
+        HealthWeights,
+        InMemoryHealthStore,
+        ModelHealthTracker,
+        SQLiteHealthStore,
+    )
 
     if args.backend == "sqlite":
         store = SQLiteHealthStore(db_path=args.db_path)

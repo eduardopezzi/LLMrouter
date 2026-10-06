@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-import llmrouter.main as main_module
+import llmrouter.benchmark_catalog as benchmark_catalog_module
+import llmrouter.config as config_module
 from llmrouter.main import (
     _build_health_tracker,
     _build_health_tracker_from_settings,
@@ -645,15 +646,19 @@ def test_benchmarks_refresh_does_not_load_model_catalog(
 ) -> None:
     invalid_models = tmp_path / "models.yaml"
     invalid_models.write_text("models:\n  - name: broken\n    invalid yaml", encoding="utf-8")
-    settings = main_module.Settings(models_file=str(invalid_models))
+    settings = config_module.Settings(models_file=str(invalid_models))
     report = SimpleNamespace(
         changed=False,
         models_updated=0,
         scores_updated=0,
         output_path="data/model_benchmarks.yaml",
     )
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "refresh_benchmark_catalog", lambda *args, **kwargs: report)
+    monkeypatch.setattr(config_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        benchmark_catalog_module,
+        "refresh_benchmark_catalog",
+        lambda *args, **kwargs: report,
+    )
     monkeypatch.setattr(sys, "argv", ["llmrouter", "benchmarks-refresh", "--check"])
 
     main()

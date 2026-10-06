@@ -59,6 +59,9 @@ logs/
 /pip
 /python
 
+# Local timestamped backups created during migrations/rollouts
+/.backup-pre-onda*/
+
 # Editors and OS files
 .DS_Store
 .idea/

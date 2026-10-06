@@ -614,8 +614,15 @@ def get_settings() -> Settings:
     config_path = os.environ.get("LLMROUTER_CONFIG", "config/config.yaml")
     yaml_data = _load_yaml(Path(config_path))
 
-    # Build Settings from YAML base, then env overrides
+    # Build Settings from YAML base. Pydantic gives explicitly supplied init
+    # values precedence over environment sources, so apply this integration's
+    # environment value explicitly when YAML also contains one.
     settings = Settings(**yaml_data) if yaml_data else Settings()
+    env_settings = Settings()
+    if env_settings.ragflow.default_dataset_id is not None:
+        settings.ragflow = settings.ragflow.model_copy(
+            update={"default_dataset_id": env_settings.ragflow.default_dataset_id}
+        )
     return settings
 
 

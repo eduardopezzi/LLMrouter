@@ -17,18 +17,17 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from llmrouter.config import Settings
 from llmrouter.core.benchmark_scorer import _normalize_benchmark_value, score_model
-from llmrouter.core.health import ModelHealthTracker
 from llmrouter.core.registry import ModelRegistry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
-from llmrouter.providers.base import BaseProvider
-from llmrouter.providers.deepseek_provider import DeepSeekProvider
-from llmrouter.providers.ollama_provider import OllamaProvider
-from llmrouter.providers.openai_provider import OpenAIProvider
-from llmrouter.providers.zai_provider import ZaiProvider
 from llmrouter.utils import resolve_api_key
+
+if TYPE_CHECKING:
+    from llmrouter.config import Settings
+    from llmrouter.core.health import ModelHealthTracker
+    from llmrouter.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
@@ -1518,6 +1517,11 @@ def _ranker_provider_available(settings: Settings, provider: Provider) -> bool:
 
 
 def _build_ranker_provider(settings: Settings, provider: Provider) -> BaseProvider:
+    from llmrouter.providers.deepseek_provider import DeepSeekProvider
+    from llmrouter.providers.ollama_provider import OllamaProvider
+    from llmrouter.providers.openai_provider import OpenAIProvider
+    from llmrouter.providers.zai_provider import ZaiProvider
+
     if provider == Provider.OLLAMA:
         return OllamaProvider(
             api_key=resolve_api_key(settings.providers.ollama, "OLLAMA_API_KEY"),
