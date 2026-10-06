@@ -45,9 +45,19 @@ class ServerConfig(BaseModel):
     )
 
 
+class RagConfig(BaseModel):
+    """RAGFlow coupling configuration (ADR-0001, cenário A Lite)."""
+
+    enabled: bool = False
+    base_url: str = "http://localhost:9380"
+    api_key: str | None = Field(default=None, description="RAGFlow SDK API key (ragflow-...)")
+    timeout_seconds: float = 3.0
+    default_top_k: int = 4
+    default_similarity_threshold: float = 0.2
+
+
 class ProviderConfig(BaseModel):
     """Configuration for a single LLM provider."""
-
     enabled: bool = True
     api_key: str | None = None
     base_url: str | None = None
@@ -434,6 +444,7 @@ class Settings(BaseSettings):
 
     # Sub-configs
     server: ServerConfig = Field(default_factory=ServerConfig)
+    rag: RagConfig = Field(default_factory=RagConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     benchmarks: BenchmarksConfig = Field(default_factory=BenchmarksConfig)

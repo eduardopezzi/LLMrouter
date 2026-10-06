@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from llmrouter.benchmark_scheduler import BenchmarkRefreshScheduler
+from llmrouter.config import RagConfig
 from llmrouter.core.budget import (
     DEFAULT_PROJECT_ID,
     DEFAULT_USER_ID,
@@ -123,6 +124,15 @@ class BudgetLimitsPayload(BaseModel):
     mode: str = Field(default="soft", pattern="^(soft|hard)$")
 
 
+class RagQueryPayload(BaseModel):
+    """Body for POST /v1/llmrouter/rag/query (ADR-0001 cenário A Lite)."""
+
+    query: str = Field(min_length=1, max_length=4096)
+    dataset_ids: list[str] = Field(min_length=1, max_length=32)
+    top_k: int | None = Field(default=None, ge=1, le=64)
+    similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 def create_app(
     *,
     registry: ModelRegistry | None = None,
@@ -142,6 +152,8 @@ def create_app(
     semantic_cache: SemanticCache | None = None,
     budget_manager: BudgetManager | None = None,
     benchmark_scheduler: BenchmarkRefreshScheduler | None = None,
+    rag_config: RagConfig | None = None,
+    ragflow_client: Any | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -198,6 +210,66 @@ def create_app(
     app.state.semantic_cache = semantic_cache
     app.state.budget_manager = budget_manager
     app.state.benchmark_scheduler = benchmark_scheduler
+    app.state.rag_config = rag_config
+    app.state.ragflow_client = ragflow_client
+
+    @app.post("/v1/llmrouter/rag/query")
+    async def rag_query(payload: RagQueryPayload, request: Request) -> dict[str, object]:
+        """Retrieval-only proxy p/ RAGFlow (ADR-0001 cenário A Lite)."""
+        _require_api_key(request, app.state.api_key)
+        rag: RagConfig | None = getattr(app.state, "rag_config", None)
+        client = getattr(app.state, "ragflow_client", None)
+        if rag is None or not rag.enabled or client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="RAG query is disabled or RAGFlow client is not configured",
+            )
+        top_k = payload.top_k if payload.top_k is not None else rag.default_top_k
+        threshold = (
+            payload.similarity_threshold
+            if payload.similarity_threshold is not None
+            else rag.default_similarity_threshold
+        )
+        started = time.perf_counter()
+        try:
+            records = await client.retrieve(
+                payload.query,
+                payload.dataset_ids,
+                top_k=top_k,
+                similarity_threshold=threshold,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"RAGFlow upstream error: {exc}",
+            ) from exc
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        results: list[dict[str, Any]] = []
+        seen: set[tuple[str, str | None]] = set()
+        for record in records:
+            content = record.get("content", "")
+            metadata = record.get("metadata") or {}
+            document_id = metadata.get("document_id")
+            key = (content, document_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(
+                {
+                    "content": content,
+                    "score": record.get("score", 0.0),
+                    "document_id": document_id,
+                    "dataset_id": metadata.get("dataset_id"),
+                    "title": record.get("title"),
+                }
+            )
+        return {
+            "query": payload.query,
+            "results": results,
+            "total": len(results),
+            "elapsed_ms": elapsed_ms,
+        }
 
     @app.get("/health/models")
     async def health_models(request: Request) -> dict[str, object]:
