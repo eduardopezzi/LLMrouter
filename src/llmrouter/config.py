@@ -417,7 +417,7 @@ class SemanticCacheConfig(BaseModel):
             "the start of each verify_pending cycle (daily job)."
         ),
     )
-    # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay knobs (S1/S2/S3).
+    # ROADMAP E2 — streaming cache replay knobs (S1/S2/S3).
     # Defaults match PRD §4.1: k=8, timeout=10s, soft-circuit after 3
     # consecutive probe failures for 1h.  All knobs are env-overridable via
     # the nested-delimiter pattern (LLMROUTER_SEMANTIC_CACHE__STREAM_*).

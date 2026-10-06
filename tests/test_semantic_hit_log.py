@@ -1,6 +1,6 @@
 """P-CHR hit-log tests: persisted per-hit audit log for the semantic cache.
 
-Covers the E1.3 deliverable (ROADMAP_TOKEN_OPTIMIZATION):
+Covers the E1.3 deliverable (ROADMAP):
 - every semantic hit appends one row to ``semantic_cache_hit_log``;
 - writes are best-effort (never break the served response);
 - ``stats()`` derives ``pchr_*`` counters from the log (survives reopen);

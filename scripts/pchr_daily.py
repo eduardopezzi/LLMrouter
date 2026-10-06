@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""P-CHR daily verification job (ROADMAP_TOKEN_OPTIMIZATION E1.3).
+"""P-CHR daily verification job (ROADMAP E1.3).
 
 Calls ``POST /v1/llmrouter/cache/verify`` on a running LLMrouter gateway and
 then reads ``GET /v1/llmrouter/cache/stats`` to report the rolling P-CHR
 precision. Exit codes (alarm semantics per the product decision in
-docs/ROADMAP_TOKEN_OPTIMIZATION.md):
+docs/ROADMAP.md#e1):
 
 - 0: verification ran, precision healthy (or not yet measurable)
 - 2: verification ran but the API rejected the call (HTTP 4xx/5xx)

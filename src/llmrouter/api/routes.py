@@ -1012,7 +1012,7 @@ async def _stream_response(
     request_id = _request_id(request)
     memory_entries = memory_entries or []
 
-    # ROADMAP_TOKEN_OPTIMIZATION E2 — resolve replay dependencies.
+    # ROADMAP E2 — resolve replay dependencies.
     # QA CRITICAL-1: the route call-site never injected ``selected_provider``,
     # so the replay path was dormant in production.  Resolve the provider
     # from the proxy's registry (keyed by the selected model's provider kind);
@@ -1048,7 +1048,7 @@ async def _stream_response(
     )
     _logger.debug("Reason: %s", decision.reason)
 
-    # ROADMAP_TOKEN_OPTIMIZATION E2 / QA HIGH-5 — resolve the replay decision
+    # ROADMAP E2 / QA HIGH-5 — resolve the replay decision
     # EAGERLY, before building the StreamingResponse.  Under real ASGI the
     # headers are serialized when the response starts; a decision made inside
     # the body generator can never influence them.  Deciding here lets the
@@ -1099,7 +1099,7 @@ async def _stream_response(
         provider_usage: dict[str, Any] | None = None
         include_usage = _stream_usage_requested(payload)
         try:
-            # ROADMAP_TOKEN_OPTIMIZATION E2 — replay the cached chunks.  The
+            # ROADMAP E2 — replay the cached chunks.  The
             # decision (lookup + probe) was already made eagerly above; this
             # branch only iterates the resolved chunks.
             if replay_decision is not None:

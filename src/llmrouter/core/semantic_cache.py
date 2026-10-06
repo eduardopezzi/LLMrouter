@@ -9,7 +9,7 @@ Storage is additive: a dedicated ``semantic_cache_entries`` table is created
 with ``CREATE TABLE IF NOT EXISTS`` — the exact cache's ``cache_entries``
 table is never altered, and both can share one SQLite file.
 
-P-CHR hit log (ROADMAP_TOKEN_OPTIMIZATION E1.3): when ``hit_log_enabled`` is
+P-CHR hit log (ROADMAP E1.3): when ``hit_log_enabled`` is
 set, every semantic hit appends one row to the sibling
 ``semantic_cache_hit_log`` table (prompt/response/restriction tuple,
 similarity and threshold) so precision can be audited offline by
@@ -47,7 +47,7 @@ _logger = get_logger("llmrouter.semantic_cache")
 
 _DEFAULT_TTL_SECONDS: float = 3600.0
 
-# P-CHR similarity buckets (ROADMAP_TOKEN_OPTIMIZATION E1.3): [low, high).
+# P-CHR similarity buckets (ROADMAP E1.3): [low, high).
 _PCHR_BUCKETS: tuple[tuple[float, float], ...] = (
     (0.80, 0.85),
     (0.85, 0.90),
@@ -311,7 +311,7 @@ class SemanticCache:
         self._semantic_hits = 0
         self._semantic_misses = 0
         self._semantic_unavailable = 0
-        # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay counters.
+        # ROADMAP E2 — streaming cache replay counters.
         # This module (Dev E2-A) only writes the four "storage" counters;
         # the probe/replay counters (stream_probes_ok_total, etc.) are
         # populated by the route-layer code in Dev E2-B's work and exposed
@@ -620,7 +620,7 @@ class SemanticCache:
         try:
             await self._ensure_table()
             await asyncio.to_thread(self.purge_expired_hit_log)
-            # ROADMAP_TOKEN_OPTIMIZATION E2 (S1, Dev E2-A) — purge the
+            # ROADMAP E2 (S1, Dev E2-A) — purge the
             # streaming table at the same hook.  Best-effort: a failure
             # here is logged by ``purge_expired_stream_responses`` and
             # does NOT short-circuit verify_pending (the hit-log sweep
@@ -884,7 +884,7 @@ class SemanticCache:
             return int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
 
     # ------------------------------------------------------------------
-    # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay (S1, Dev E2-A)
+    # ROADMAP E2 — streaming cache replay (S1, Dev E2-A)
     # ------------------------------------------------------------------
     #
     # Public surface (storage-only; probe/replay instrumentation is owned
@@ -1463,7 +1463,7 @@ class SemanticCache:
                 )
                 """
             )
-            # P-CHR hit log (ROADMAP_TOKEN_OPTIMIZATION E1.3): sibling table,
+            # P-CHR hit log (ROADMAP E1.3): sibling table,
             # never alters semantic_cache_entries.  ``verified`` codes:
             # 0=pending, 1=ok, -1=mismatch, 2=verify_error.
             conn.execute(
@@ -1498,7 +1498,7 @@ class SemanticCache:
                 "CREATE INDEX IF NOT EXISTS idx_pchr_bucket "
                 "ON semantic_cache_hit_log (threshold, similarity)"
             )
-            # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay (S1,
+            # ROADMAP E2 — streaming cache replay (S1,
             # Dev E2-A).  Sister table to ``semantic_cache_entries``; the
             # non-stream cache is never altered.  See PRD §4.3 + TL §2.
             conn.execute(

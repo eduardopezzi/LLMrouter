@@ -1,5 +1,12 @@
 # Canary/Blue-Green Model Rollout — Plano Executivo (Item #9 do Roadmap)
 
+**Status:** base de rollout implementada (tipos, catálogo, filtro determinístico,
+CLI e API). Este arquivo preserva o desenho original, suas estimativas e
+propostas de extensão; nem todo detalhe proposto representa código entregue.
+Auto-rollback, auto-promoção, sticky bucketing e edição na TUI continuam no
+[roadmap único](../ROADMAP.md). Ver também as
+[capacidades implementadas](CAPACIDADES_IMPLEMENTADAS.md).
+
 ## 1. Resumo Executivo
 
 A feature **Canary/Blue-Green Model Rollout** permite promoção gradual e segura de novos modelos no catálogo LLMrouter. Cada modelo recebe um campo `rollout_percentage` (0.0–100.0). Antes da estratégia de seleção finalizar o candidato, o router aplica um filtro de rollout baseado em hash determinístico do prompt. O objetivo é:
@@ -267,7 +274,10 @@ Ambos atualizam o arquivo YAML e hot-reload o registry sem reiniciar o servidor.
 
 ---
 
-## 11. Checklist de Implementação
+## 11. Checklist do desenho original
+
+Este checklist preserva o planejamento original e não acompanha o status atual.
+O estado das entregas está nos itens 9, 9.1 e 9.2 do [roadmap](../ROADMAP.md).
 
 - [ ] Adicionar `rollout_percentage` a `ModelInfo`
 - [ ] Validar range no dataloader

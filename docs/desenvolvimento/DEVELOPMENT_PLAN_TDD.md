@@ -1,7 +1,8 @@
 # Plano de Desenvolvimento TDD - LLMrouter
 
-Este plano consolida a avaliacao do projeto, o roadmap em `docs/ROADMAP.md` e
-o plano TDD anexado. A diretriz central e transformar recursos ja existentes em
+Este documento tecnico registra o metodo TDD e os criterios das fases de
+desenvolvimento. Prioridades e acompanhamento ficam no [roadmap unico](../ROADMAP.md).
+A diretriz central e transformar recursos ja existentes em
 capacidades operaveis em producao, mantendo a suite verde a cada etapa.
 
 ## Ciclo de Trabalho
@@ -29,9 +30,12 @@ Quando a fase alterar API publica ou CLI, atualizar tambem:
 | 2. Semantic inspect API/CLI | Concluida | `POST /v1/llmrouter/semantic/inspect` e `llmrouter semantic-inspect` implementados |
 | 3. Stats operacionais | Concluida | `MetricsCollector` e `GET /v1/llmrouter/stats` implementados |
 | 4. Cache exato SQLite | Concluida | `SQLiteCacheBackend`, `CacheManager` e `GET /v1/llmrouter/cache/stats` implementados |
-| 5. Cache semantico | Pendente | Aguardando cache exato e semantic calibrado |
-| 6. Budget Manager SQLite | Pendente | Aguardando metricas/custos mais consolidados |
-| 7. Auto-rollback rollout | Pendente | Aguardando health/stats operacionais |
+| 5. Cache semantico | Concluida (opt-in) | Cache, fallback e wiring entregues; qualidade em producao acompanhada em E1 |
+| 6. Budget Manager SQLite | Concluida (opt-in) | Persistencia, enforcement e API entregues; evolucoes no item 10.1 do roadmap |
+| 7. Auto-rollback rollout | Pendente | Health/stats ja entregues; falta a automacao do item 9.1 do roadmap |
+
+As fases concluidas descrevem implementacao, nao aceite em producao. Ver o
+[registro de capacidades implementadas](../implementado/CAPACIDADES_IMPLEMENTADAS.md).
 
 ## Fase 0 - Baseline Verde
 
@@ -233,7 +237,10 @@ integracao com a rota chat, 503 sem manager).
 
 **Criterio de aceite:** canary pode rodar com menor supervisao manual.
 
-## Ordem Recomendada
+## Sequencia tecnica das fases
+
+A lista abaixo preserva a sequencia do plano original. Para executar novas
+entregas, consultar a ordem e as pendencias no [roadmap unico](../ROADMAP.md#ordem-de-execução).
 
 1. Baseline verde: cooldown.
 2. Semantic routing no runtime.

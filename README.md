@@ -2,6 +2,13 @@
 
 LLMrouter is an OpenAI-compatible gateway for chat and Ollama embedding requests. It routes chat requests across a configured model catalog and records observations for local self-evaluation with Ollama.
 
+## Documentação
+
+O [índice de documentação](docs/README.md) organiza guias e pesquisas,
+documentos técnicos de desenvolvimento e recursos já implementados.
+O [roadmap único](docs/ROADMAP.md) reúne a evolução do gateway, a otimização
+de tokens (E1–E7) e o streaming replay (E2.5).
+
 ## Docker
 
 Build:
@@ -478,7 +485,7 @@ curl -N -X POST http://localhost:12345/v1/chat/completions \
   -d '{"model":"auto","messages":[{"role":"user","content":"Olá!"}],"stream":true}'
 ```
 
-Guia completo com troubleshooting: [`docs/CLINE_SETUP.md`](docs/CLINE_SETUP.md).
+Guia completo com troubleshooting: [`docs/informacoes/CLINE_SETUP.md`](docs/informacoes/CLINE_SETUP.md).
 
 ## Cross-Repository Contracts
 

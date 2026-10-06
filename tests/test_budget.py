@@ -1,4 +1,4 @@
-"""Tests for the budget manager (Fase 5 / B1 - DEVELOPMENT_PLAN_TDD.md:209-217).
+"""Tests for the budget manager (Fase 6 / B1 - docs/desenvolvimento/DEVELOPMENT_PLAN_TDD.md).
 
 Covers: allow within limit, hard block (daily and monthly), soft warning,
 tenant isolation, daily/monthly period resets via injectable clock,
