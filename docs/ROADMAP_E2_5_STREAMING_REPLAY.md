@@ -20,11 +20,11 @@
 
 - [x] Definir o chunk SSE final com `choices: []`, `usage`, `cache_status` (`live` ou `semantic_hit`) e `usage_source` (`provider`, `cached` ou `estimated`). Preservar os headers existentes.
 - [x] Emitir o chunk de usage apenas quando `stream_options.include_usage=true`, tanto no replay quanto no modo live. No live, usar usage do provider quando disponível; caso contrário, estimar e identificar a origem.
-- [x] Registrar baseline do Yoda em 2026-10-06: uma instalação acessível; `LLMROUTER_SEMANTIC_CACHE__ENABLED=true`; override de streaming ausente (default efetivo `true`); endpoint autenticado respondeu HTTP 200. No processo iniciado às 13:41:23 UTC, as métricas legadas de streaming estavam zeradas às 15:36 UTC e ainda não havia aliases TL.
+- [x] Registrar baseline do Yoda em 2026-10-06: o único host SSH configurado é Yoda; `LLMROUTER_SEMANTIC_CACHE__ENABLED=true`; override de streaming ausente (default efetivo `true`). Às 16:13:46 UTC, `/health` e `/v1/llmrouter/cache/stats` responderam HTTP 200 e os dez contadores legados de streaming estavam zerados. O processo havia iniciado às 13:41:23 UTC; ainda não havia aliases TL.
 - [ ] Confirmar inventário global além do Yoda. O `~/.ssh/config` disponível contém apenas o alvo `yoda`, mas isso não prova inexistência de instalações fora desse inventário.
 - [x] Atualizar a issue #11 com o resultado e o link do [PR #20](https://github.com/eduardopezzi/LLMrouter/pull/20); o item 3 agora descreve a nova auditoria de replay.
 
-**Status:** contrato, baseline inicial do Yoda e sincronização da issue concluídos; inventário global de instalações pendente. O baseline cobre menos de duas horas e não sustenta a decisão do default.
+**Status:** contrato, baseline inicial do Yoda e sincronização da issue concluídos; inventário global de instalações pendente. O baseline cobre 2h32 antes do deploy e não sustenta a decisão do default.
 
 ## Fase 1 — Fixar invariantes e lacunas de QA
 
@@ -109,7 +109,7 @@ Definição dos contadores: `stream_hits` conta candidatos que passam pelo thres
 - [x] Cobertura final do código E2.5 alterado: linhas executáveis 204/204 (100%); ramos condicionais nas linhas alteradas 58/58 (100%). A cobertura global do repositório inclui módulos fora deste roadmap.
 - [x] Ruff e `git diff --check` passaram.
 - [x] Análise de QA requisito por requisito registrada em [QA_E2_5_STREAMING_REPLAY.md](QA_E2_5_STREAMING_REPLAY.md).
-- [x] Baseline de produção registrado no Yoda pela porta correta (12345): `/health` e `/v1/llmrouter/cache/stats` responderam 200; o processo usa o commit `da9c781` e reportou todos os contadores legados de streaming em zero. Os serviços Prometheus-01 e Prometheus-02 estavam reiniciando.
+- [x] Baseline de produção atualizado em 2026-10-06 16:13:46 UTC no Yoda pela porta correta (12345): `/health` e `/v1/llmrouter/cache/stats` responderam 200; o processo ainda usa `da9c781` e reportou os dez contadores legados de streaming em zero. Prometheus-01 e Prometheus-02 seguem reiniciando por falha de bootstrap Kafka em `172.17.0.1:9092`.
 - [x] Publicar o código na `main` via [PR #20](https://github.com/eduardopezzi/LLMrouter/pull/20), atualizar a issue #11 e fazer pull fast-forward local; suíte pós-pull passou.
 - [ ] Implantar a versão instrumentada no Yoda e executar a janela do rollout. Uma worktree isolada em `/home/vieli/LLMrouter-release-ee030f7` foi criada no commit `ee030f7`; os 72 testes focados passaram em Python 3.12.3 sem carregar o `.env` de produção. Também confirmei que `PYTHONPATH` resolve o pacote para o `src/` da worktree quando executado do `WorkingDirectory` atual. O drop-in preparado só define esse `PYTHONPATH`, mantendo `.env`, `config/`, `data/` e o `WorkingDirectory` existentes. A troca ainda não foi aplicada: instalar `/home/vieli/llmrouter-e25.service.conf` e reiniciar requer `sudo`, que não está disponível sem senha nesta sessão.
 
