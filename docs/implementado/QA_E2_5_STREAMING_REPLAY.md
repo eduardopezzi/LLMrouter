@@ -1,7 +1,7 @@
 # QA — E2.5 Streaming Replay
 
 **Data da revisão:** 2026-10-06
-**Escopo:** mudanças locais de reconciliação do streaming replay com TL, comparadas com `docs/ROADMAP_E2_5_STREAMING_REPLAY.md` e a issue [#11](https://github.com/eduardopezzi/LLMrouter/issues/11).
+**Escopo:** mudanças locais de reconciliação do streaming replay com TL, comparadas com o [plano E2.5 no roadmap único](../ROADMAP.md#e2-5-streaming-replay) e a issue [#11](https://github.com/eduardopezzi/LLMrouter/issues/11).
 
 ## Parecer
 

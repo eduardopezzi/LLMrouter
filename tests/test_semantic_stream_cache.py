@@ -1,4 +1,4 @@
-"""Streaming cache storage tests (ROADMAP_TOKEN_OPTIMIZATION E2, S1 — Dev E2-A).
+"""Streaming cache storage tests (ROADMAP E2, S1 — Dev E2-A).
 
 Covers the storage layer for the streaming cache replay MVP:
 

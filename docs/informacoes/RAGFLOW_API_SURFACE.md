@@ -1,5 +1,10 @@
 # API Surface — RAGFlow + Infinity (acoplamento ao LLMrouter)
 
+**Tipo:** pesquisa da superfície de API e desenho de integração. As próximas
+etapas abaixo preservam o plano original. O cliente e as rotas Lite já estão
+no [registro de implementações](../implementado/CAPACIDADES_IMPLEMENTADAS.md);
+decisão formal e validação operacional seguem no [roadmap](../ROADMAP.md).
+
 **Versão alvo:** RAGFlow v0.19.1-full (validado em operação em `http://172.17.0.1:9380`)
 **Data:** 2026-10-05
 **Cards:** E5-A2 (`t_925d584a`)

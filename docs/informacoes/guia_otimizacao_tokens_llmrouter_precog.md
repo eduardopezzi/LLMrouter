@@ -1,5 +1,10 @@
 # Guia de Eficiência de Contexto e Tokens para LLMRouter / PRecog
 
+**Tipo:** estudo de referência. Fases, interfaces e metas abaixo são propostas
+da pesquisa; prioridades e status de implementação estão no
+[roadmap único](../ROADMAP.md). A organização deste guia não implica aprovação
+ou entrega de todas as recomendações.
+
 **Data:** 21/09/2026\
 **Objetivo:** reduzir tokens, custo e latência sem degradar
 assertividade, taxa de sucesso ou capacidade de correção de código.

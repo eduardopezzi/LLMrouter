@@ -1,9 +1,16 @@
 # ADR-0001: Acoplamento RAGFlow → LLMrouter (Lite vs B vs C vs D)
 
 **Status:** PROPOSED → **Aguardando decisão do Eduardo**
+
+**Nota de consolidação (2026-10-06):** há cliente e rotas Lite no código,
+documentados em [capacidades implementadas](../implementado/CAPACIDADES_IMPLEMENTADAS.md).
+Este registro não contém aceite formal da decisão; por isso o status da ADR
+permanece proposto. As próximas etapas originais abaixo não são o status atual;
+consultar o item 14 do [roadmap único](../ROADMAP.md).
+
 **Data:** 2026-10-05
 **Cards:** E5-A3 (`t_5c61947b`)
-**Pré-requisito:** [RAGFLOW_API_SURFACE.md](RAGFLOW_API_SURFACE.md) (E5-A2)
+**Pré-requisito:** [RAGFLOW_API_SURFACE.md](../informacoes/RAGFLOW_API_SURFACE.md) (E5-A2)
 
 ---
 
@@ -160,8 +167,8 @@ chamadas usam RAG), considerar D (não acoplar) e voltar para o RAG endêmico.
 
 ## Referências
 
-- API surface: [RAGFLOW_API_SURFACE.md](RAGFLOW_API_SURFACE.md)
+- API surface: [RAGFLOW_API_SURFACE.md](../informacoes/RAGFLOW_API_SURFACE.md)
 - Smoke E5-A1: `/opt/data/ragflow/smoke_test2.py` (17s E2E)
 - Épico: `/opt/data/backlog/ragflow-acoplamento-llmrouter.md`
-- ROADMAP token-opt: [ROADMAP_TOKEN_OPTIMIZATION.md](ROADMAP_TOKEN_OPTIMIZATION.md) E4 (RAG como
+- ROADMAP token-opt: [Roadmap único](../ROADMAP.md#e4) E4 (RAG como
   proxy de contexto) e E5 (RAGFlow já validado)
