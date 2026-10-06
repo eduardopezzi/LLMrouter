@@ -370,6 +370,90 @@ class SemanticCacheConfig(BaseModel):
             "latency is never added to the response path."
         ),
     )
+    hit_log_enabled: bool = Field(
+        default=True,
+        description=(
+            "Persist one audit row per semantic cache hit into the sibling "
+            "semantic_cache_hit_log table (P-CHR base, E1.3). Best-effort: "
+            "write failures never break the served response."
+        ),
+    )
+    verify_sample_size: int = Field(
+        default=20,
+        gt=0,
+        description=(
+            "Maximum number of pending hit-log rows audited per "
+            "verify_pending run (most recent first)."
+        ),
+    )
+    verify_judge_base_url: str = Field(
+        default="http://127.0.0.1:11434",
+        description="Base URL of the native Ollama endpoint backing the P-CHR judge.",
+    )
+    verify_judge_model: str = Field(
+        default="glm-5.2",
+        description="Ollama model used by the P-CHR judge for hit auditing.",
+    )
+    verify_judge_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Per-request timeout for the P-CHR judge, in seconds.",
+    )
+    hit_log_retention_days: int = Field(
+        default=45,
+        ge=0,
+        description=(
+            "Days of retention for semantic_cache_hit_log rows (R2 privacy "
+            "decision: prompts/responses are purged after this window). "
+            "0 disables retention (rows are kept forever). Purge runs at "
+            "the start of each verify_pending cycle (daily job)."
+        ),
+    )
+    # ROADMAP_TOKEN_OPTIMIZATION E2 — streaming cache replay knobs (S1/S2/S3).
+    # Defaults match PRD §4.1: k=8, timeout=10s, soft-circuit after 3
+    # consecutive probe failures for 1h.  All knobs are env-overridable via
+    # the nested-delimiter pattern (LLMROUTER_SEMANTIC_CACHE__STREAM_*).
+    stream_cache_enabled: bool = Field(
+        default=True,
+        description=(
+            "Opt-out flag for the streaming cache replay path. When False, "
+            "the route layer skips lookup_stream_response and the live "
+            "provider is always used. Defaults to True (cache replay is on)."
+        ),
+    )
+    stream_probe_k: int = Field(
+        default=8,
+        ge=4,
+        le=16,
+        description=(
+            "Number of output tokens requested by the k-token probe used to "
+            "validate a streaming cache candidate before replay (PRD §4.1)."
+        ),
+    )
+    stream_probe_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            "Per-request timeout for the k-token probe. A timeout is treated "
+            "as probe_fail (live path; candidate not discarded)."
+        ),
+    )
+    stream_probe_soft_circuit_threshold: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Consecutive probe_fail occurrences for the same model required "
+            "to open the soft-circuit (skip probe for 1h; live path)."
+        ),
+    )
+    stream_probe_soft_circuit_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+        description=(
+            "How long the soft-circuit stays open once tripped.  After this "
+            "window the next request probes again (best-effort recovery)."
+        ),
+    )
 
 
 class BudgetConfig(BaseModel):

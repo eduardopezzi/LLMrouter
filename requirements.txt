@@ -14,4 +14,5 @@ google-generativeai>=0.7.0
 ollama>=0.2.0
 slowapi>=0.1.9
 python-dotenv>=1.0
+textual>=8.2.8
 aiosqlite>=0.20.0

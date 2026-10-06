@@ -49,8 +49,14 @@ def load_model_registry(
     path: str | Path,
     *,
     benchmark_catalog_path: str | Path | None = None,
+    include_disabled: bool = False,
 ) -> ModelRegistry:
-    """Load model definitions from a YAML catalog."""
+    """Load model definitions from a YAML catalog.
+
+    Routing callers keep the historical default of excluding disabled entries.
+    Catalog-management callers can request the complete catalog with
+    ``include_disabled=True``.
+    """
     data = _load_yaml(Path(path))
     raw_models = data.get("models", [])
     if not isinstance(raw_models, list):
@@ -59,11 +65,17 @@ def load_model_registry(
     refreshed_sources = (
         load_catalog_source_urls(benchmark_catalog_path) if benchmark_catalog_path else {}
     )
-    models = [
-        _model_from_mapping(item, refreshed_scores, refreshed_sources)
-        for item in raw_models
-        if not (isinstance(item, dict) and item.get("enabled") is False)
-    ]
+    models_by_name: dict[str, ModelInfo] = {}
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        model = _model_from_mapping(item, refreshed_scores, refreshed_sources)
+        if not include_disabled and not model.enabled:
+            continue
+        # Provider discovery may append a duplicate disabled entry after the
+        # hand-curated entry. Keep the first catalog definition per name.
+        models_by_name.setdefault(model.name, model)
+    models = list(models_by_name.values())
     return ModelRegistry(models=tuple(sorted(models, key=lambda model: model.priority)))
 
 
@@ -94,6 +106,7 @@ def _model_from_mapping(
     tier = _parse_tier(item.get("tier"), roles, max_tokens, priority, name)
     # Let ModelInfo.__post_init__ validate the range; do NOT clamp silently.
     rollout_percentage = float(item.get("rollout_percentage", 100.0))
+    enabled = item.get("enabled") is not False
 
     configured_scores = dict(_benchmark_scores(item.get("benchmark_scores", {})))
     configured_scores.update((refreshed_scores or {}).get(name, {}))
@@ -111,6 +124,8 @@ def _model_from_mapping(
         context_window=context_window,
         api_base=_optional_str(item.get("api_base")),
         description=_optional_str(item.get("description")) or "",
+        enabled=enabled,
+        model_family=_optional_str(item.get("model_family") or item.get("family")),
         rollout_percentage=rollout_percentage,
         benchmark_scores=tuple(sorted(configured_scores.items())),
         benchmark_sources=tuple(sorted(benchmark_sources)),

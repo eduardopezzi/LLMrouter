@@ -14,9 +14,11 @@ implementação no repositório, e não apenas a existência de um plano.
 | **7. Roteamento semântico** | 90% | Calibrar roles e thresholds com feedback de produção |
 | **8. Cache de respostas** | 100% | Habilitar `llmrouter.semantic_cache.enabled` em produção com observação de hit rate e falsos positivos |
 | **9. Rollout canary / blue-green** | 100% | Evoluir para rollout automatizado e sticky bucketing |
+| **9.2. Controle de rollout na TUI** | 0% | Editar, validar e persistir `rollout_percentage` por modelo na interface interativa |
 | **10. Budgets e alertas por tenant** | 100% | Evoluir para downgrade automático e alertas proativos (webhook/PRecog) |
 | **11. Contratos para APIs customizadas** | 0% | Permitir declarar endpoints fora do perfil OpenAI-compatible |
 | **12. Governança do catálogo de modelos** | 0% | Validar metadados, limites e fontes de forma repetível |
+| **13. Otimização de tokens (ecossistema)** | 5% | Seguir `ROADMAP_TOKEN_OPTIMIZATION.md` (E1–E7) |
 
 ---
 
@@ -121,6 +123,29 @@ de intervenção imediata.
 **Dependências:** itens 6 e 6.1. **Critério de aceite:** canary degradado é
 removido automaticamente, com motivo observável e sem reinício do serviço.
 
+### 9.2. Controle de rollout na TUI — 0%
+
+**Objetivo:** permitir que a operação ajuste o percentual de tráfego de cada
+modelo sem sair da interface Textual do LLMrouter.
+
+- Exibir o `rollout_percentage` do modelo selecionado e abrir um editor
+  interativo para alterá-lo, com suporte a teclado e mouse.
+- Validar valores entre `0` e `100`, deixando claros os significados de `0%`
+  (fora do tráfego normal), percentual parcial (canary) e `100%` (sempre
+  elegível).
+- Manter alterações pendentes apenas em memória até `s`/Save, com indicador de
+  estado modificado e possibilidade de recarregar sem salvar.
+- Persistir o valor no catálogo usando a mesma função do CLI
+  (`set_model_rollout_percentage`) e atualizar a tabela após o salvamento.
+- Exibir confirmação ou erro de validação e manter o rollback manual rápido
+  para `0%`.
+- Cobrir o fluxo com testes Textual/CLI, incluindo modelos com e sem o campo
+  explícito no YAML.
+
+**Critério de aceite:** o operador seleciona um modelo na aba `Models`, altera
+seu percentual, salva, recarrega a TUI e encontra o valor persistido; o serviço
+passa a aplicar o novo rollout sem edição manual do YAML.
+
 ### 10. Budgets e alertas por tenant — 100%
 
 **Entregue (B1-B3, opt-in via `llmrouter.budgets.enabled`).**
@@ -184,8 +209,11 @@ validada no CI e refletida no contrato exportado.
    (item 8).
 3. Implementar budgets persistentes e integrar suas métricas (item 10).
 4. Automatizar rollback de canary; só então considerar auto-promoção (item 9.1).
-5. Entregar contratos de endpoints customizados (item 11).
-6. Instituir governança e checagens do catálogo (item 12).
+5. Entregar o controle operacional de rollout na TUI (item 9.2).
+6. Entregar contratos de endpoints customizados (item 11).
+7. Instituir governança e checagens do catálogo (item 12).
+8. Executar o roadmap de otimização de tokens (item 13,
+   `ROADMAP_TOKEN_OPTIMIZATION.md`): E1 → E3 → E2 → E4 → E5 → E6 → E7.
 
 ## Qualidade transversal
 

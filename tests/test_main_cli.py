@@ -98,6 +98,22 @@ class TestArgParsing:
         assert args.command == "panel"
         assert args.stats is True
 
+    def test_parse_args_tui(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["llmrouter", "tui", "--models-file", "models.yaml"],
+        ):
+            args = _parse_args()
+        assert args.command == "tui"
+        assert args.models_file == "models.yaml"
+
+    def test_parse_args_panel_tui(self) -> None:
+        with patch.object(sys, "argv", ["llmrouter", "panel", "--tui"]):
+            args = _parse_args()
+        assert args.command == "panel"
+        assert args.tui is True
+
     def test_parse_args_panel_list_priorities(self) -> None:
         with patch.object(
             sys,

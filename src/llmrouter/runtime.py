@@ -539,6 +539,13 @@ def _build_semantic_cache(
         adapter,
         threshold=cache_config.threshold,
         ttl_seconds=cache_config.ttl_seconds,
+        hit_log_enabled=cache_config.hit_log_enabled,
+        hit_log_retention_days=cache_config.hit_log_retention_days,
+        stream_cache_enabled=cache_config.stream_cache_enabled,
+        stream_probe_k=cache_config.stream_probe_k,
+        stream_probe_timeout_seconds=cache_config.stream_probe_timeout_seconds,
+        stream_probe_soft_circuit_threshold=cache_config.stream_probe_soft_circuit_threshold,
+        stream_probe_soft_circuit_seconds=cache_config.stream_probe_soft_circuit_seconds,
     )
 
 

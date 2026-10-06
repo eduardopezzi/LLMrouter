@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import yaml
+from dotenv import load_dotenv
 
 from llmrouter.cli_panel import set_model_priority_order
 from llmrouter.core.benchmark_scorer import rank_models
@@ -295,6 +296,11 @@ def _load_snapshot(path: Path) -> dict[str, dict[str, Any]]:
 
 def _fetch_source(source: ProviderSource, *, timeout: float) -> tuple[str, list[dict[str, Any]]]:
     headers = {"User-Agent": "LLMrouter provider catalog monitor/1.0"}
+    if source.api_key_env:
+        # pydantic-settings reads .env into Settings, but does not populate
+        # os.environ. Provider sources resolve their key by environment name,
+        # so load the same .env before constructing the request headers.
+        load_dotenv(override=False)
     api_key = os.environ.get(source.api_key_env) if source.api_key_env else None
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

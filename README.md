@@ -89,7 +89,14 @@ llmrouter catalog-sync # inventaria modelos locais do Ollama e gera propostas
 make providers-sync # verifica docs/modelos oficiais e recalcula prioridades
 make providers-update # adiciona/retira modelos do catálogo ativo
 llmrouter panel --benchmark-leaderboard # mostra os 3 melhores por benchmark
+llmrouter tui # abre a interface interativa em tela cheia
 ```
+
+O `llmrouter tui` usa uma interface em abas inspirada no `precog-tui`: `1`–`4`
+alternam Overview, Routing, Models e Usage. Na aba `Models`, as setas
+selecionam o modelo; `q`/`k` sobem, `a`/`j` descem, `e` alterna
+`enabled`/`disabled`, `s` salva e `r` recarrega. `Ctrl+Q` sai e `?` mostra a
+ajuda.
 
 O painel informa a cobertura total e quantos modelos participaram de cada
 benchmark. Quando existe apenas um candidato, o resultado aparece como
@@ -148,6 +155,17 @@ promovê-los. No painel, use `Routing > Rollout %` para iniciar um canary (por
 exemplo, 5%) e aumentar o percentual depois de validar o modelo.
 Mantenha `LLMROUTER_ROLLOUT__ENABLED=true` no servidor: com essa opção em
 `false`, o filtro inteiro é ignorado, inclusive para modelos com rollout `0`.
+
+No painel interativo, em `Models > Promote model`, a lista de prioridade mostra
+todo o catálogo, inclusive entradas com `enabled: false`. Escolha `Reorder`
+para editar com `↑`/`↓` (ou `j`/`k`); pressione `e` para alternar o status do
+modelo selecionado, `Enter` para salvar e `q` para cancelar. Pela linha de
+comando, o mesmo status pode ser alterado diretamente no `config/models.yaml`:
+
+```yaml
+- name: ollama/glm-5.3-flash:cloud
+  enabled: true
+```
 
 Para modelos Ollama locais, disponibilize o modelo antes de reiniciar:
 
@@ -525,6 +543,14 @@ desempate segue a ordem comercial atual:
 ```text
 Zhipu -> Ollama -> NVIDIA
 ```
+
+Para variantes do mesmo modelo hospedadas por mais de um provedor, o catalogo
+aceita `model_family`. O roteador primeiro classifica a capacidade para a
+tarefa e depois escolhe, dentro da mesma familia, a menor oferta de custo;
+quando os custos empatam, aplica `provider_cost_order`. Assim,
+`zhipu/glm-5.3-flash` pode ter prioridade sobre
+`ollama/glm-5.3-flash:cloud` sem permitir que um modelo barato de outra
+familia desloque um modelo mais adequado para a tarefa.
 
 Para trocar a estrategia:
 

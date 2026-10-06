@@ -23,6 +23,20 @@ def test_load_model_registry_from_catalog() -> None:
     assert first.max_tokens == 131072
     assert first.context_window == 1000000
 
+    zhipu_flash = registry.get("zhipu/glm-5.3-flash")
+    assert zhipu_flash is not None
+    assert zhipu_flash.model_family == "glm-5.3-flash"
+    assert zhipu_flash.tier == Tier.T1
+
+
+def test_load_model_registry_can_include_disabled_entries() -> None:
+    active = load_model_registry("config/models.example.yaml")
+    complete = load_model_registry("config/models.example.yaml", include_disabled=True)
+
+    assert len(complete.models) > len(active.models)
+    assert all(model.enabled for model in active.models)
+    assert any(not model.enabled for model in complete.models)
+
 
 def test_provider_model_name_removes_catalog_namespace() -> None:
     registry = build_registry("config/models.example.yaml")
