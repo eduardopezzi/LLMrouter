@@ -334,6 +334,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         semantic_cache=semantic_cache,
         budget_manager=budget_manager,
         benchmark_scheduler=benchmark_scheduler,
+        ragflow_client=_build_ragflow_client(resolved_settings),
     )
     app_holder["app"] = app
     return app
@@ -490,6 +491,21 @@ def _scorer_embedder(scorer: object) -> Any | None:
         return None
     embedder = getattr(semantic_scorer, "embedder", None)
     return embedder if embedder is not None else None
+
+
+def _build_ragflow_client(settings: Settings) -> Any | None:
+    """Build the RAGFlow client when the feature flag is on.
+
+    Returns ``None`` when ``settings.ragflow.enabled`` is ``False`` — the
+    API then returns 404 for ``/v1/llmrouter/rag/*`` and no client exists
+    in the process.
+    """
+    if not settings.ragflow.enabled:
+        return None
+
+    from llmrouter.core.ragflow_client import RagflowClient
+
+    return RagflowClient(settings.ragflow)
 
 
 def _build_semantic_cache(

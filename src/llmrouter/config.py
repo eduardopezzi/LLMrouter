@@ -262,6 +262,55 @@ class HealthConfig(BaseModel):
     cost_weight: float = 0.10
 
 
+class RagflowConfig(BaseModel):
+    """RAGFlow retrieval coupling configuration (ADR-0001 — Cenário A Lite).
+
+    Strictly opt-in: the :class:`~llmrouter.core.ragflow_client.RagflowClient`
+    is only built (and the ``/v1/llmrouter/rag/query`` route registered) when
+    ``enabled`` is ``True``.  When disabled the route returns 404 and no
+    extra HTTP traffic is generated.
+
+    The retrieval surface is Dify-compatible (``POST /api/v1/dify/retrieval``)
+    — the RAGFlow team ships that endpoint specifically for external
+    integrations, so the request/response payload stays minimal.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Opt-in flag for the RAGFlow retrieval proxy. Default off.",
+    )
+    base_url: str = Field(
+        default="http://127.0.0.1:9380",
+        description="RAGFlow server base URL (no /api/v1 suffix).",
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="RAGFlow API key (Authorization header).",
+    )
+    default_dataset_id: str | None = Field(
+        default=None,
+        description=(
+            "Default dataset_id used when the request omits one. "
+            "Per-project mapping (project_id → dataset_id) is wired by the "
+            "caller via the X-Project-ID header / payload field."
+        ),
+    )
+    default_top_k: int = Field(default=5, ge=1, le=50)
+    default_score_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
+    timeout_seconds: float = Field(default=3.0, gt=0)
+    retries: int = Field(default=1, ge=0, le=5)
+    circuit_breaker_failures: int = Field(
+        default=5,
+        ge=1,
+        description="Open the circuit after this many consecutive failures.",
+    )
+    circuit_breaker_cooldown_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="Stay open for this long before allowing a probe request.",
+    )
+
+
 class SemanticConfig(BaseModel):
     """Semantic prompt scoring configuration."""
 
@@ -456,6 +505,7 @@ class Settings(BaseSettings):
     budgets: BudgetConfig = Field(default_factory=BudgetConfig)
     hybrid: HybridScorerConfig = Field(default_factory=HybridScorerConfig)
     rollout: RolloutConfig = Field(default_factory=RolloutConfig)
+    ragflow: RagflowConfig = Field(default_factory=RagflowConfig)
 
     # Model registry file
     models_file: str = "config/models.yaml"

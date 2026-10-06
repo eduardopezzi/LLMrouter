@@ -123,6 +123,17 @@ class BudgetLimitsPayload(BaseModel):
     mode: str = Field(default="soft", pattern="^(soft|hard)$")
 
 
+class RagQueryPayload(BaseModel):
+    """Body for POST /v1/llmrouter/rag/query — Dify-compatible retrieval."""
+
+    model_config = ConfigDict(extra="allow")
+
+    query: str = Field(min_length=1, max_length=8192)
+    dataset_id: str | None = Field(default=None, min_length=1, max_length=128)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    score_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 def create_app(
     *,
     registry: ModelRegistry | None = None,
@@ -142,6 +153,7 @@ def create_app(
     semantic_cache: SemanticCache | None = None,
     budget_manager: BudgetManager | None = None,
     benchmark_scheduler: BenchmarkRefreshScheduler | None = None,
+    ragflow_client: Any | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with injectable runtime components."""
     model_registry = registry or ModelRegistry()
@@ -198,6 +210,7 @@ def create_app(
     app.state.semantic_cache = semantic_cache
     app.state.budget_manager = budget_manager
     app.state.benchmark_scheduler = benchmark_scheduler
+    app.state.ragflow_client = ragflow_client
 
     @app.get("/health/models")
     async def health_models(request: Request) -> dict[str, object]:
@@ -604,6 +617,72 @@ def create_app(
         if semantic is not None:
             payload.update(semantic.stats())
         return payload
+
+    @app.get("/v1/llmrouter/rag/health")
+    async def get_ragflow_health(request: Request) -> dict[str, object]:
+        """Report RAGFlow client state (E5-B1)."""
+        _require_api_key(request, app.state.api_key)
+        ragflow = getattr(app.state, "ragflow_client", None)
+        if ragflow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="RAGFlow coupling is disabled (ragflow.enabled=False)",
+            )
+        stats: dict[str, object] = dict(ragflow.stats)
+        return stats
+
+    @app.post("/v1/llmrouter/rag/query")
+    async def rag_query(
+        payload: RagQueryPayload, request: Request
+    ) -> dict[str, object]:
+        """Proxy a retrieval call to RAGFlow (B1 — Cenário Lite).
+
+        Payload is Dify-compatible: ``knowledge_id`` + ``query``. The
+        response carries either ``records`` (200) or ``degraded: true``
+        (HTTP 200, RAGFlow temporarily unavailable) — never 5xx, so callers
+        can attach fallback behavior uniformly.
+        """
+        _require_api_key(request, app.state.api_key)
+        ragflow = getattr(app.state, "ragflow_client", None)
+        if ragflow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="RAGFlow coupling is disabled (ragflow.enabled=False)",
+            )
+
+        result = await ragflow.retrieval(
+            query=payload.query,
+            dataset_id=payload.dataset_id,
+            top_k=payload.top_k,
+            score_threshold=payload.score_threshold,
+        )
+
+        from llmrouter.core.ragflow_client import RagflowUnavailable
+
+        if isinstance(result, RagflowUnavailable):
+            return {
+                "degraded": True,
+                "error": result.error,
+                "retry_after_seconds": result.retry_after_seconds,
+                "records": [],
+                "query": payload.query,
+                "dataset_id": payload.dataset_id,
+            }
+
+        return {
+            "degraded": False,
+            "records": [
+                {
+                    "content": r.content,
+                    "score": r.score,
+                    "title": r.title,
+                    "metadata": r.metadata,
+                }
+                for r in result
+            ],
+            "query": payload.query,
+            "dataset_id": payload.dataset_id,
+        }
 
     @app.post("/admin/evaluator/run-cycle")
     async def run_evaluator_cycle(request: Request, limit: int = 50) -> dict[str, object]:
