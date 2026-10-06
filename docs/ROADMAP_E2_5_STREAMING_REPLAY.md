@@ -22,9 +22,9 @@
 - [x] Emitir o chunk de usage apenas quando `stream_options.include_usage=true`, tanto no replay quanto no modo live. No live, usar usage do provider quando disponível; caso contrário, estimar e identificar a origem.
 - [x] Registrar baseline do Yoda em 2026-10-06: uma instalação acessível; `LLMROUTER_SEMANTIC_CACHE__ENABLED=true`; override de streaming ausente (default efetivo `true`); endpoint autenticado respondeu HTTP 200. No processo iniciado às 13:41:23 UTC, as métricas legadas de streaming estavam zeradas às 15:36 UTC e ainda não havia aliases TL.
 - [ ] Completar inventário de outras instalações; esta sessão só tem evidência do Yoda.
-- [ ] Atualizar a issue #11 com o resultado e o link do PR quando houver PR publicado. O item 3 passa a descrever a nova auditoria de replay.
+- [x] Atualizar a issue #11 com o resultado e o link do [PR #20](https://github.com/eduardopezzi/LLMrouter/pull/20); o item 3 agora descreve a nova auditoria de replay.
 
-**Status:** contrato e baseline inicial do Yoda concluídos; inventário global e sincronização da issue pendentes. O baseline cobre menos de duas horas e não sustenta a decisão do default.
+**Status:** contrato, baseline inicial do Yoda e sincronização da issue concluídos; inventário global de instalações pendente. O baseline cobre menos de duas horas e não sustenta a decisão do default.
 
 ## Fase 1 — Fixar invariantes e lacunas de QA
 
@@ -100,7 +100,7 @@ Definição dos contadores: `stream_hits` conta candidatos que passam pelo thres
 - [x] Replay pode ser desativado imediatamente por `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false`.
 - [x] Rollback: definir `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false` no ambiente da instância, reiniciar o serviço `llmrouter` e validar `/health` e `/v1/llmrouter/cache/stats`; reverter a variável somente após estabilização.
 
-**Status:** plano, critérios e rollback documentados; observação por 14 dias e decisão do default pendentes de publicar a versão instrumentada.
+**Status:** plano, critérios e rollback documentados; código mergeado via PR #20, mas implantação e observação por 14 dias ainda pendentes. A janela só começa após implantar a versão instrumentada.
 
 ## Verificação desta implementação
 
@@ -110,7 +110,20 @@ Definição dos contadores: `stream_hits` conta candidatos que passam pelo thres
 - [x] Ruff e `git diff --check` passaram.
 - [x] Análise de QA requisito por requisito registrada em [QA_E2_5_STREAMING_REPLAY.md](QA_E2_5_STREAMING_REPLAY.md).
 - [x] Baseline de produção registrado no Yoda pela porta correta (12345): `/health` e `/v1/llmrouter/cache/stats` responderam 200; o processo usa o commit `da9c781` e reportou todos os contadores legados de streaming em zero. Os serviços Prometheus-01 e Prometheus-02 estavam reiniciando.
-- [ ] Publicar a versão instrumentada e executar a janela do rollout; os arquivos locais ainda não estão implantados no Yoda.
+- [x] Publicar o código na `main` via [PR #20](https://github.com/eduardopezzi/LLMrouter/pull/20), atualizar a issue #11 e fazer pull fast-forward local; suíte pós-pull passou.
+- [ ] Implantar a versão instrumentada no Yoda e executar a janela do rollout. Uma worktree isolada em `/home/vieli/LLMrouter-release-ee030f7` foi criada no commit `ee030f7`; `data/` e `.env` apontam para os dados/configuração existentes, e os 72 testes focados passaram em Python 3.12.3 com as variáveis de defaults isoladas. O serviço ainda não foi trocado: instalar o drop-in `/home/vieli/llmrouter-e25.service.conf` e reiniciar requer `sudo`, que não está disponível sem senha nesta sessão.
+
+Para ativar a worktree após obter acesso administrativo:
+
+```sh
+sudo install -D -m 0644 /home/vieli/llmrouter-e25.service.conf /etc/systemd/system/llmrouter.service.d/10-e25-release.conf
+sudo systemctl daemon-reload
+sudo systemctl restart llmrouter
+sudo systemctl show llmrouter --property=ActiveState,WorkingDirectory,ExecStart --no-pager
+curl -fsS http://127.0.0.1:12345/health
+```
+
+Para reverter a troca do diretório de execução, remova o drop-in e reinicie o serviço; para desativar somente o replay, use `LLMROUTER_SEMANTIC_CACHE__STREAM_CACHE_ENABLED=false` no `.env` e reinicie.
 
 ## Ordem sugerida de entrega
 
