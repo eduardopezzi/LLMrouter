@@ -21,6 +21,7 @@ The replay/probe/header instrumentation belongs to Dev E2-B (see PRD §3 S2).
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ from typing import Any
 import pytest
 
 from llmrouter.config import SemanticCacheConfig, Settings
-from llmrouter.core.semantic_cache import SemanticCache
+from llmrouter.core.semantic_cache import SemanticCache, _stream_response_text
 from llmrouter.core.types import Tier, Usage
 
 _DIM = 64
@@ -86,17 +87,13 @@ def _sample_chunks() -> list[dict[str, Any]]:
             "id": "chatcmpl-1",
             "object": "chat.completion.chunk",
             "model": "gpt-4o",
-            "choices": [
-                {"index": 0, "delta": {"content": " is"}, "finish_reason": None}
-            ],
+            "choices": [{"index": 0, "delta": {"content": " is"}, "finish_reason": None}],
         },
         {
             "id": "chatcmpl-1",
             "object": "chat.completion.chunk",
             "model": "gpt-4o",
-            "choices": [
-                {"index": 0, "delta": {"content": " nice"}, "finish_reason": "stop"}
-            ],
+            "choices": [{"index": 0, "delta": {"content": " nice"}, "finish_reason": "stop"}],
         },
     ]
 
@@ -132,6 +129,7 @@ def test_stream_config_defaults_safe() -> None:
     assert cfg.stream_probe_soft_circuit_threshold == 3
     assert cfg.stream_probe_soft_circuit_threshold >= 1
     assert cfg.stream_probe_soft_circuit_seconds == pytest.approx(3600.0)
+    assert cfg.stream_ttl_seconds is None
 
 
 def test_stream_config_constructible_directly() -> None:
@@ -139,6 +137,57 @@ def test_stream_config_constructible_directly() -> None:
     cfg = SemanticCacheConfig()
     assert cfg.stream_cache_enabled is True
     assert cfg.stream_probe_k == 8
+    assert cfg.stream_ttl_seconds is None
+
+
+def test_stream_ttl_loads_from_nested_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLMROUTER_SEMANTIC_CACHE__STREAM_TTL_SECONDS", "123.5")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.semantic_cache.stream_ttl_seconds == pytest.approx(123.5)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_stream_ttl_environment_rejects_non_positive_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("LLMROUTER_SEMANTIC_CACHE__STREAM_TTL_SECONDS", value)
+
+    with pytest.raises(ValueError):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, float("inf"), float("nan"), pytest.param(10**10000, id="overflow")],
+)
+def test_semantic_cache_rejects_invalid_stream_ttl(tmp_path: Path, value: Any) -> None:
+    with pytest.raises(ValueError, match="stream_ttl_seconds"):
+        SemanticCache(str(tmp_path / "invalid_stream_ttl.db"), stream_ttl_seconds=value)
+
+
+@pytest.mark.parametrize(
+    "ttl_seconds",
+    [0, -1, float("inf"), float("nan"), pytest.param(10**10000, id="overflow")],
+)
+@pytest.mark.asyncio
+async def test_store_stream_response_skips_invalid_ttl_override(
+    tmp_path: Path, ttl_seconds: Any
+) -> None:
+    db_path = str(tmp_path / "invalid_stream_ttl_override.db")
+    cache = SemanticCache(db_path, embedder=FakeHashEmbedder())
+
+    stored = await cache.store_stream_response(
+        _sample_chunks(),
+        prompt=_PROMPT_A,
+        usage=_sample_usage(),
+        ttl_seconds=ttl_seconds,
+        **_restrictions(),
+    )
+
+    assert stored is False
+    assert _count_stream_rows(db_path) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -149,11 +198,7 @@ def test_stream_config_constructible_directly() -> None:
 def _count_stream_rows(db_path: str) -> int:
     with sqlite3.connect(db_path) as conn:
         try:
-            return int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM semantic_stream_responses"
-                ).fetchone()[0]
-            )
+            return int(conn.execute("SELECT COUNT(*) FROM semantic_stream_responses").fetchone()[0])
         except sqlite3.OperationalError:
             # Table not yet created (e.g. an aborted test path that never
             # reached the schema bootstrap).  Tests asserting "no rows
@@ -164,9 +209,7 @@ def _count_stream_rows(db_path: str) -> int:
 def _fetch_stream_row(db_path: str) -> sqlite3.Row:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM semantic_stream_responses ORDER BY id"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM semantic_stream_responses ORDER BY id").fetchall()
         assert rows, "expected one row"
         return rows[0]
 
@@ -182,9 +225,7 @@ class TestStoreStream:
         return str(tmp_path / "stream_cache.db")
 
     @pytest.mark.asyncio
-    async def test_store_stream_response_persists_chunks_and_usage(
-        self, db_path: str
-    ) -> None:
+    async def test_store_stream_response_persists_chunks_and_usage(self, db_path: str) -> None:
         cache = SemanticCache(
             db_path,
             embedder=FakeHashEmbedder(),
@@ -219,6 +260,7 @@ class TestStoreStream:
             "prompt_tokens": 7,
             "completion_tokens": 3,
             "total_tokens": 10,
+            "source": "estimated",
         }
 
         # first_k_tokens = concatenation of deltas.content (default k=8,
@@ -228,6 +270,38 @@ class TestStoreStream:
         assert row["expires_at"] > row["created_at"]
         assert row["purge_pending"] == 0
         assert row["prompt_hash"]  # sha256 hex is non-empty
+
+    @pytest.mark.asyncio
+    async def test_stream_specific_ttl_overrides_general_ttl(self, tmp_path: Path) -> None:
+        path = str(tmp_path / "stream_specific_ttl.db")
+        cache = SemanticCache(
+            path,
+            embedder=FakeHashEmbedder(),
+            ttl_seconds=600,
+            stream_ttl_seconds=30,
+        )
+        assert cache.stream_ttl_seconds == 30
+        assert await cache.store_stream_response(
+            _sample_chunks(), prompt=_PROMPT_A, usage=_sample_usage(), **_restrictions()
+        )
+        row = _fetch_stream_row(path)
+        assert row["expires_at"] - row["created_at"] == pytest.approx(30, abs=0.05)
+
+    @pytest.mark.asyncio
+    async def test_stream_ttl_none_inherits_general_ttl(self, tmp_path: Path) -> None:
+        path = str(tmp_path / "stream_inherited_ttl.db")
+        cache = SemanticCache(
+            path,
+            embedder=FakeHashEmbedder(),
+            ttl_seconds=60,
+            stream_ttl_seconds=None,
+        )
+        assert cache.stream_ttl_seconds is None
+        assert await cache.store_stream_response(
+            _sample_chunks(), prompt=_PROMPT_A, usage=_sample_usage(), **_restrictions()
+        )
+        row = _fetch_stream_row(path)
+        assert row["expires_at"] - row["created_at"] == pytest.approx(60, abs=0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +325,7 @@ class TestLookupStream:
             chunks, prompt=_PROMPT_A, usage=_sample_usage(), **_restrictions()
         )
 
-        result = await cache.lookup_stream_response(
-            _PROMPT_A_VARIANT, **_restrictions()
-        )
+        result = await cache.lookup_stream_response(_PROMPT_A_VARIANT, **_restrictions())
 
         assert result is not None
         cached_chunks, completion_tokens, first_k = result
@@ -311,9 +383,7 @@ class TestSkipStoreOnAbort:
         return str(tmp_path / "stream_abort.db")
 
     @pytest.mark.asyncio
-    async def test_store_stream_response_skipped_on_consumer_disconnect(
-        self, db_path: str
-    ) -> None:
+    async def test_store_stream_response_skipped_on_consumer_disconnect(self, db_path: str) -> None:
         """Embed step cancelled (GeneratorExit / consumer disconnect) → no row.
 
         When the consumer aborts mid-stream, the route layer guards the call
@@ -392,9 +462,7 @@ class TestSkipStoreOnTruncation:
                 "id": "chatcmpl-1",
                 "object": "chat.completion.chunk",
                 "model": "gpt-4o",
-                "choices": [
-                    {"index": 0, "delta": {"content": " is"}, "finish_reason": None}
-                ],
+                "choices": [{"index": 0, "delta": {"content": " is"}, "finish_reason": None}],
                 # Provider cut: never emitted a final chunk with finish_reason.
             },
         ]
@@ -437,9 +505,7 @@ class TestPurgeStream:
         return str(tmp_path / "stream_purge.db")
 
     @pytest.mark.asyncio
-    async def test_purge_expired_stream_responses_removes_old_entries(
-        self, db_path: str
-    ) -> None:
+    async def test_purge_expired_stream_responses_removes_old_entries(self, db_path: str) -> None:
         cache = SemanticCache(db_path, embedder=FakeHashEmbedder(), threshold=0.90)
 
         # TTL of 0.1s: will expire during the sleep below.
@@ -495,9 +561,7 @@ class TestUniqueStream:
         return str(tmp_path / "stream_unique.db")
 
     @pytest.mark.asyncio
-    async def test_stream_unique_constraint_prevents_duplicates(
-        self, db_path: str
-    ) -> None:
+    async def test_stream_unique_constraint_prevents_duplicates(self, db_path: str) -> None:
         cache = SemanticCache(db_path, embedder=FakeHashEmbedder(), threshold=0.90)
 
         # Two stores with identical (prompt, model, tier, temperature, top_p,
@@ -529,6 +593,136 @@ class TestUniqueStream:
             max_tokens=200,
         )
         assert _count_stream_rows(db_path) == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_max_tokens_persists_null_and_collapses_duplicates(
+        self, db_path: str
+    ) -> None:
+        cache = SemanticCache(db_path, embedder=FakeHashEmbedder(), threshold=0.90)
+        restrictions = {**_restrictions(), "max_tokens": None}
+
+        for _ in range(2):
+            assert await cache.store_stream_response(
+                _sample_chunks(),
+                prompt=_PROMPT_A,
+                usage=_sample_usage(),
+                **restrictions,
+            )
+
+        assert _count_stream_rows(db_path) == 1
+        row = _fetch_stream_row(db_path)
+        assert row["max_tokens"] is None
+        assert row["max_tokens_key"] == -1
+        assert (
+            await cache.lookup_stream_response(
+                _PROMPT_A,
+                model="gpt-4o",
+                tier=Tier.T2,
+                temperature=0.2,
+                top_p=0.9,
+                max_tokens=None,
+            )
+        ) is not None
+
+    @pytest.mark.asyncio
+    async def test_legacy_sentinel_schema_migrates_to_nullable_public_field(
+        self, db_path: str
+    ) -> None:
+        legacy_embedding = json.dumps(_bag_of_words(_PROMPT_A)).encode("utf-8")
+        legacy_chunks = json.dumps(_sample_chunks())
+        legacy_usage = json.dumps({"prompt_tokens": 7, "completion_tokens": 3})
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE semantic_stream_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prompt_hash TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    prompt_text TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    tier INTEGER NOT NULL,
+                    temperature REAL NOT NULL,
+                    top_p REAL NOT NULL,
+                    max_tokens INTEGER,
+                    response_chunks_json TEXT NOT NULL,
+                    first_k_tokens TEXT NOT NULL,
+                    usage_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    purge_pending INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(prompt_hash, model, tier, temperature, top_p, max_tokens)
+                )
+                """
+            )
+            legacy_rows = (
+                # NULL rows were permitted to duplicate under the legacy
+                # UNIQUE constraint because SQLite treats NULLs as distinct.
+                (None, "legacy null old"),
+                (None, "legacy null new"),
+                # Older builds also used -1 as a sentinel for missing tokens.
+                (-1, "legacy sentinel newest"),
+                (128, "legacy explicit limit"),
+            )
+            for max_tokens, prompt_text in legacy_rows:
+                conn.execute(
+                    """
+                    INSERT INTO semantic_stream_responses
+                        (prompt_hash, embedding, prompt_text, model, tier,
+                         temperature, top_p, max_tokens, response_chunks_json,
+                         first_k_tokens, usage_json, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "legacy-prompt-hash",
+                        legacy_embedding,
+                        prompt_text,
+                        "gpt-4o",
+                        int(Tier.T2),
+                        0.2,
+                        0.9,
+                        max_tokens,
+                        legacy_chunks,
+                        "Paris",
+                        legacy_usage,
+                        1.0,
+                        9_999_999_999.0,
+                    ),
+                )
+            conn.commit()
+
+        cache = SemanticCache(db_path, embedder=FakeHashEmbedder(), threshold=0.90)
+        await cache._ensure_table()
+
+        with sqlite3.connect(db_path) as conn:
+            migrated_rows = conn.execute(
+                "SELECT max_tokens, max_tokens_key, prompt_text "
+                "FROM semantic_stream_responses ORDER BY max_tokens_key"
+            ).fetchall()
+        assert migrated_rows == [
+            (None, -1, "legacy sentinel newest"),
+            (128, 128, "legacy explicit limit"),
+        ]
+
+        assert await cache.store_stream_response(
+            _sample_chunks(),
+            prompt=_PROMPT_A,
+            usage=_sample_usage(),
+            **{**_restrictions(), "max_tokens": None},
+        )
+
+        row = _fetch_stream_row(db_path)
+        assert row["max_tokens"] is None
+        assert row["max_tokens_key"] == -1
+        assert (
+            await cache.lookup_stream_response(
+                _PROMPT_A,
+                model="gpt-4o",
+                tier=Tier.T2,
+                temperature=0.2,
+                top_p=0.9,
+                max_tokens=None,
+            )
+        ) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -579,3 +773,56 @@ class TestStreamStats:
         assert stats["stream_purged_total"] == 0
         assert stats["stream_lookup_hit_total"] == 0
         assert stats["stream_lookup_miss_total"] == 0
+        assert stats["stream_hits"] == 0
+        assert stats["stream_replays_served"] == 0
+        assert stats["stream_replay_tokens_saved"] == 0
+        assert stats["stream_probe_tokens_spent"] == 0
+        assert stats["stream_probe_latency_ms_p50"] == 0
+
+    @pytest.mark.asyncio
+    async def test_stream_metrics_aliases_and_bounded_probe_latency(self, tmp_path: Path) -> None:
+        cache = SemanticCache(str(tmp_path / "stream_metric_aliases.db"))
+        cache.bump_stream_counter("stream_lookup_hit_total", 2)
+        cache.bump_stream_counter("stream_replays_total", 3)
+        cache.bump_stream_counter("stream_tokens_saved_total", 11)
+        cache.record_stream_probe(token_budget=8, latency_ms=100)
+        cache.record_stream_probe(token_budget=8, latency_ms=200)
+        cache.record_stream_probe(token_budget=8, latency_ms=300)
+
+        stats = cache.stream_stats()
+        assert stats["stream_hits"] == stats["stream_lookup_hit_total"] == 2
+        assert stats["stream_replays_served"] == stats["stream_replays_total"] == 3
+        assert stats["stream_replay_tokens_saved"] == stats["stream_tokens_saved_total"] == 11
+        assert stats["stream_probe_tokens_spent"] == 24
+        assert stats["stream_probe_tokens_spent_estimated"] == 24
+        assert stats["stream_probe_latency_ms_p50"] == pytest.approx(200)
+        assert len(cache._stream_probe_latency.samples) <= 1000
+
+    def test_stream_hit_log_text_extraction_skips_invalid_choices(self) -> None:
+        assert (
+            _stream_response_text(
+                [
+                    {"choices": None},
+                    {"choices": []},
+                    {"choices": ["invalid"]},
+                    {"choices": [{"delta": {"content": "A"}}]},
+                    {"choices": [{"message": {"content": "B"}}]},
+                    {"choices": [{"delta": {"content": 3}}]},
+                ]
+            )
+            == "AB"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_hit_log_is_skipped_when_disabled(self, tmp_path: Path) -> None:
+        cache = SemanticCache(str(tmp_path / "stream_hit_log_disabled.db"))
+        match = await cache.lookup_stream_response(
+            _PROMPT_A,
+            model="missing",
+            tier=int(Tier.T2),
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=64,
+        )
+        assert match is None
+        assert not await cache.record_stream_hit(None)  # type: ignore[arg-type]

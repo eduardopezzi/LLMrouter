@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -29,16 +31,24 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from llmrouter.api.routes import _stream_response, create_app
+from llmrouter.api.routes import (
+    _live_stream_usage,
+    _maybe_replay_stream,
+    _normalize_stream_chunk,
+    _stream_response,
+    _to_chat_request,
+    create_app,
+)
 from llmrouter.config import Settings
 from llmrouter.core.registry import ModelRegistry
-from llmrouter.core.semantic_cache import SemanticCache
+from llmrouter.core.semantic_cache import SemanticCache, StreamCacheMatch
 from llmrouter.core.types import (
     ChatMessage,
     ChatRequest,
     ModelInfo,
     Provider,
     Tier,
+    Usage,
 )
 from llmrouter.providers.base import BaseProvider, ProviderError
 from llmrouter.providers.openai_compatible import OpenAICompatibleProvider
@@ -140,7 +150,12 @@ class _FakeSemanticCache:
             "stream_replay_bytes_served_total": 0,
             "stream_tokens_saved_total": 0,
             "stream_replay_error_total": 0,
+            "stream_aborts_total": 0,
+            "stream_replay_aborts_total": 0,
+            "stream_live_aborts_total": 0,
+            "stream_probe_tokens_spent_estimated": 0,
         }
+        self._probe_latencies: list[float] = []
         # Stream knobs (E2-A naming).
         self.stream_cache_enabled = True
         self.stream_probe_k = 8
@@ -150,8 +165,11 @@ class _FakeSemanticCache:
         # Behaviour flags for tests.
         self._store_calls: list[dict[str, Any]] = []
         self.lookup_calls: list[dict[str, Any]] = []
+        self.hit_log_calls: list[StreamCacheMatch] = []
 
-    async def lookup_stream_response(self, *args: Any, **kwargs: Any) -> tuple | None:
+    async def lookup_stream_response(
+        self, *args: Any, **kwargs: Any
+    ) -> StreamCacheMatch | None:
         self.lookup_calls.append({"args": args, "kwargs": kwargs})
         self.stream_stats_data["stream_lookup_hit_total"] += (
             1 if self._cached_chunks is not None else 0
@@ -162,15 +180,57 @@ class _FakeSemanticCache:
         if self._cached_chunks is None:
             self.stream_stats_data["stream_lookup_miss_total"] += 1
             return None
-        return (self._cached_chunks, self._completion_tokens, self._first_k_tokens)
+        prompt = str(args[0]) if args else "say hi"
+        return StreamCacheMatch(
+            chunks=self._cached_chunks,
+            prompt_tokens=5,
+            completion_tokens=self._completion_tokens,
+            total_tokens=5 + self._completion_tokens,
+            usage_source="provider",
+            first_k_tokens=self._first_k_tokens,
+            prompt_text=prompt,
+            prompt_hash="test-prompt-hash",
+            model=str(kwargs.get("model", "cheap")),
+            tier=int(kwargs.get("tier", 1)),
+            temperature=float(kwargs.get("temperature", 0.0)),
+            top_p=float(kwargs.get("top_p", 1.0)),
+            max_tokens=kwargs.get("max_tokens"),
+            similarity=1.0,
+            threshold=0.95,
+            cache_key="test-cache-key",
+        )
 
     async def store_stream_response(self, *args: Any, **kwargs: Any) -> bool:
         self._store_calls.append({"args": args, "kwargs": kwargs})
         self.stream_stats_data["stream_stored_total"] += 1
         return True
 
-    def stream_stats(self) -> dict[str, int]:
-        return dict(self.stream_stats_data)
+    def stream_stats(self) -> dict[str, int | float]:
+        stats: dict[str, int | float] = dict(self.stream_stats_data)
+        stats.update(
+            {
+                "stream_hits": stats["stream_lookup_hit_total"],
+                "stream_replays_served": stats["stream_replays_total"],
+                "stream_replay_tokens_saved": stats["stream_tokens_saved_total"],
+                "stream_probe_tokens_spent": stats[
+                    "stream_probe_tokens_spent_estimated"
+                ],
+                "stream_probe_latency_ms_p50": (
+                    sorted(self._probe_latencies)[len(self._probe_latencies) // 2]
+                    if self._probe_latencies
+                    else 0.0
+                ),
+            }
+        )
+        return stats
+
+    def record_stream_probe(self, *, token_budget: int, latency_ms: float) -> None:
+        self.stream_stats_data["stream_probe_tokens_spent_estimated"] += token_budget
+        self._probe_latencies.append(latency_ms)
+
+    async def record_stream_hit(self, match: StreamCacheMatch) -> bool:
+        self.hit_log_calls.append(match)
+        return True
 
     def bump_stream_counter(self, name: str, by: int = 1) -> None:
         if name in self.stream_stats_data:
@@ -183,7 +243,7 @@ class _FakeStreamingProxy:
     def __init__(self, live_chunks: list[dict[str, Any]] | None = None) -> None:
         self.last_request: ChatRequest | None = None
         self.last_decision: Any = None
-        self.live_chunks: list[dict[str, Any]] = live_chunks or [
+        self.live_chunks: list[dict[str, Any]] = live_chunks if live_chunks is not None else [
             {
                 "id": "chatcmpl-live",
                 "object": "chat.completion.chunk",
@@ -343,6 +403,7 @@ def test_runtime_passes_stream_knobs_to_semantic_cache(
     # Inject the stream knobs (E2-A will provide them on the config schema).
     cache_config = settings.semantic_cache
     cache_config.stream_cache_enabled = True  # type: ignore[attr-defined]
+    cache_config.stream_ttl_seconds = 180.0
     cache_config.stream_probe_k = 12  # type: ignore[attr-defined]
     cache_config.stream_probe_timeout_seconds = 7.5  # type: ignore[attr-defined]
     cache_config.stream_probe_soft_circuit_threshold = 5  # type: ignore[attr-defined]
@@ -361,6 +422,7 @@ def test_runtime_passes_stream_knobs_to_semantic_cache(
     cache = _build_semantic_cache(settings, scorer=_ScorerStub(_FakeEmbedder()))
     assert cache is not None
     assert captured.get("stream_cache_enabled") is True
+    assert captured.get("stream_ttl_seconds") == 180.0
     assert captured.get("stream_probe_k") == 12
     assert captured.get("stream_probe_timeout_seconds") == 7.5
     assert captured.get("stream_probe_soft_circuit_threshold") == 5
@@ -397,6 +459,15 @@ def test_cache_stats_includes_stream_counters() -> None:
         "stream_replay_bytes_served_total",
         "stream_tokens_saved_total",
         "stream_replay_error_total",
+        "stream_aborts_total",
+        "stream_replay_aborts_total",
+        "stream_live_aborts_total",
+        "stream_probe_tokens_spent_estimated",
+        "stream_hits",
+        "stream_replays_served",
+        "stream_replay_tokens_saved",
+        "stream_probe_tokens_spent",
+        "stream_probe_latency_ms_p50",
     ):
         assert key in stream
         assert stream[key] == 0
@@ -439,14 +510,50 @@ def _make_stream_request(
     return StarletteRequest(scope=scope)
 
 
-def _payload() -> Any:
+def _payload(*, include_usage: bool = False) -> Any:
     from llmrouter.api.routes import ChatCompletionPayload
 
     return ChatCompletionPayload(
         messages=[{"role": "user", "content": "say hi"}],
         model="auto",
         stream=True,
+        stream_options={"include_usage": True} if include_usage else None,
     )
+
+
+def test_usage_only_provider_chunk_is_preserved_and_stream_options_forwarded() -> None:
+    normalized = _normalize_stream_chunk(
+        {"id": "completion-1", "choices": [], "usage": {"total_tokens": 7}},
+        "cheap",
+    )
+    assert normalized is not None
+    assert normalized["choices"] == []
+    assert normalized["usage"] == {"total_tokens": 7}
+
+    chat_request = _to_chat_request(_payload(include_usage=True))
+    assert chat_request.extra["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in _to_chat_request(_payload()).extra
+    assert _normalize_stream_chunk({"choices": []}, "cheap") is None
+    assert _normalize_stream_chunk({"choices": "invalid"}, "cheap") is None
+
+
+def test_invalid_provider_usage_falls_back_to_estimate() -> None:
+    usage, source = _live_stream_usage(
+        {"prompt_tokens": "bad", "completion_tokens": 3, "total_tokens": 4},
+        prompt="a prompt",
+        response="some output",
+    )
+    assert source == "estimated"
+    assert usage.prompt_tokens == 2
+    assert usage.completion_tokens == 2
+    assert usage.total_tokens == 4
+    negative_usage, negative_source = _live_stream_usage(
+        {"prompt_tokens": -1, "completion_tokens": 3, "total_tokens": 2},
+        prompt="a prompt",
+        response="some output",
+    )
+    assert negative_source == "estimated"
+    assert negative_usage.prompt_tokens == 2
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +639,48 @@ async def test_streaming_response_replays_cached_chunks_byte_by_byte() -> None:
 
     # The header ``X-LLMrouter-Cache-Status`` must be set to ``semantic_hit``.
     assert response.headers.get("x-llmrouter-cache-status") == "semantic_hit"
+    assert len(fake_cache.hit_log_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_usage_chunk_precedes_done_when_requested() -> None:
+    cached_chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "cached"}, "finish_reason": "stop"}]}
+    ]
+    cache = _FakeSemanticCache(
+        cached_chunks=cached_chunks,
+        first_k_tokens="cached",
+        completion_tokens=8,
+    )
+    model = ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+
+    class _MatchingProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, name: str, k: int) -> str:
+            return "cached"
+
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache, selected_provider=_MatchingProvider()),
+        chat_request=_chat_request(),
+        payload=_payload(include_usage=True),
+        proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(model),  # type: ignore[arg-type]
+        collector=None,
+    )
+    events = [
+        piece.decode() if isinstance(piece, bytes) else piece
+        async for piece in response.body_iterator
+    ]
+    assert len(events) == 3
+    assert '"choices": []' in events[1]
+    usage = json.loads(events[1].removeprefix("data: ").strip())
+    assert usage["usage"] == {
+        "prompt_tokens": 5,
+        "completion_tokens": 8,
+        "total_tokens": 13,
+    }
+    assert usage["cache_status"] == "semantic_hit"
+    assert usage["usage_source"] == "cached"
+    assert events[2] == "data: [DONE]\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +791,119 @@ async def test_streaming_response_skips_storage_when_consumer_aborts_during_repl
     # Store must NOT have been called because the consumer aborted mid-stream.
     assert fake_cache._store_calls == []
     assert fake_proxy.calls == 0
+    assert fake_cache.hit_log_calls == []
+
+
+@pytest.mark.asyncio
+async def test_replay_metrics_wait_until_generator_resumes_after_done() -> None:
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "answer"}, "finish_reason": "stop"}]}
+    ]
+    cache = _FakeSemanticCache(
+        cached_chunks=chunks,
+        first_k_tokens="answer",
+        completion_tokens=9,
+    )
+
+    class _MatchingProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, name: str, k: int) -> str:
+            return "answer"
+
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache, selected_provider=_MatchingProvider()),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(
+            ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+        ),  # type: ignore[arg-type]
+        collector=None,
+    )
+    iterator = response.body_iterator
+    assert "answer" in str(await iterator.__anext__())
+    assert await iterator.__anext__() == "data: [DONE]\n\n"
+    await iterator.aclose()
+
+    assert cache.stream_stats_data["stream_replays_total"] == 0
+    assert cache.stream_stats_data["stream_tokens_saved_total"] == 0
+    assert cache.stream_stats_data["stream_replay_aborts_total"] == 1
+    assert cache.stream_stats_data["stream_live_aborts_total"] == 0
+    assert cache.hit_log_calls == []
+
+
+@pytest.mark.asyncio
+async def test_replay_exception_increments_legacy_error_counter() -> None:
+    cache = _FakeSemanticCache(cached_chunks=[None], first_k_tokens="x")  # type: ignore[list-item]
+    error_metric_calls: list[str] = []
+
+    def fail_error_metric(name: str, by: int = 1) -> None:
+        if name == "stream_replay_error_total":
+            error_metric_calls.append(name)
+            raise RuntimeError("metrics unavailable")
+        original_bump(name, by)
+
+    original_bump = cache.bump_stream_counter
+    cache.bump_stream_counter = fail_error_metric  # type: ignore[method-assign]
+
+    class _MatchingProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, name: str, k: int) -> str:
+            return "x"
+
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache, selected_provider=_MatchingProvider()),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(
+            ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+        ),  # type: ignore[arg-type]
+        collector=None,
+    )
+
+    with pytest.raises(AttributeError):
+        async for _ in response.body_iterator:
+            pass
+    assert error_metric_calls == ["stream_replay_error_total"]
+
+
+@pytest.mark.asyncio
+async def test_replay_audit_and_metric_failures_do_not_break_completed_stream() -> None:
+    cache = _FakeSemanticCache(
+        cached_chunks=[
+            {"choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": "stop"}]}
+        ],
+        first_k_tokens="x",
+    )
+
+    async def fail_audit(match: StreamCacheMatch) -> bool:
+        raise RuntimeError("audit unavailable")
+
+    def fail_metrics(name: str, by: int = 1) -> None:
+        if name == "stream_replays_total":
+            raise RuntimeError("metrics unavailable")
+        original_bump(name, by)
+
+    original_bump = cache.bump_stream_counter
+    cache.record_stream_hit = fail_audit  # type: ignore[method-assign]
+    cache.bump_stream_counter = fail_metrics  # type: ignore[method-assign]
+
+    class _MatchingProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, name: str, k: int) -> str:
+            return "x"
+
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache, selected_provider=_MatchingProvider()),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(
+            ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+        ),  # type: ignore[arg-type]
+        collector=None,
+    )
+
+    events = [piece async for piece in response.body_iterator]
+    assert events[-1] == "data: [DONE]\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +1075,6 @@ async def test_probe_soft_circuit_after_consecutive_failures() -> None:
     assert fake_cache.stream_stats_data["stream_probes_fail_total"] == 2
 
     # Third request: circuit should now be open, so the probe must NOT run.
-    # We swap in a probe that records whether it was called via a list.
     probe_calls: list[int] = []
 
     class _CountingProbeProvider(OpenAICompatibleProvider):
@@ -822,7 +1083,7 @@ async def test_probe_soft_circuit_after_consecutive_failures() -> None:
 
         async def first_tokens(self, request: ChatRequest, model: str, k: int) -> str:
             probe_calls.append(1)
-            return "x"  # would match, but the circuit should block us
+            return "x"
 
         def _build_headers(self) -> dict[str, str]:
             return {"Content-Type": "application/json", "Authorization": "Bearer k"}
@@ -841,12 +1102,128 @@ async def test_probe_soft_circuit_after_consecutive_failures() -> None:
     async for _ in response.body_iterator:
         pass
     assert proxy.calls == 1
-    # The probe must NOT have been invoked while the circuit is open.
     assert probe_calls == []
-    # The fail counter stays at the prior 2 (the short-circuit returns without
-    # bumping it because the probe never ran).
     assert fake_cache.stream_stats_data["stream_probes_fail_total"] == 2
 
+
+@pytest.mark.asyncio
+async def test_open_circuit_skips_real_semantic_cache_lookup(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N2a: an open circuit bypasses the actual SemanticCache lookup method."""
+    cache = SemanticCache(
+        str(tmp_path / "real_open_circuit.db"),
+        embedder=_FakeEmbedder(),
+        stream_probe_soft_circuit_threshold=1,
+    )
+    lookup_calls: list[int] = []
+    real_lookup = cache.lookup_stream_response
+
+    async def spy_lookup(*args: Any, **kwargs: Any) -> Any:
+        lookup_calls.append(1)
+        return await real_lookup(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "lookup_stream_response", spy_lookup)
+    probe_calls: list[int] = []
+
+    class _ProbeProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, model: str, k: int) -> str:
+            probe_calls.append(1)
+            return "unused"
+
+    result = await _maybe_replay_stream(
+        semantic_cache=cache,
+        selected_provider=_ProbeProvider(),
+        chat_request=_chat_request(),
+        selected_model=ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),
+        probe_soft_circuit={"cheap": [time.monotonic()]},
+    )
+
+    assert result is None
+    assert lookup_calls == []
+    assert probe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_tuple_lookup_remains_supported_when_probe_metrics_fail() -> None:
+    cache = _FakeSemanticCache()
+    cached_chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": "stop"}]}
+    ]
+
+    async def legacy_lookup(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], int, str]:
+        return cached_chunks, 3, "x"
+
+    def fail_probe_metrics(*, token_budget: int, latency_ms: float) -> None:
+        raise RuntimeError("metrics unavailable")
+
+    cache.lookup_stream_response = legacy_lookup  # type: ignore[method-assign]
+    cache.record_stream_probe = fail_probe_metrics  # type: ignore[method-assign]
+
+    class _MatchingProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, name: str, k: int) -> str:
+            return "x"
+
+    result = await _maybe_replay_stream(
+        semantic_cache=cache,
+        selected_provider=_MatchingProvider(),
+        chat_request=_chat_request(),
+        selected_model=ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),
+        probe_soft_circuit={},
+    )
+    assert result is not None
+    assert result.chunks == cached_chunks
+    assert result.usage.completion_tokens == 3
+    assert result.usage_source == "estimated"
+    assert result.audit_match is None
+
+    cache.record_stream_probe = None  # type: ignore[method-assign]
+    result_without_metrics = await _maybe_replay_stream(
+        semantic_cache=cache,
+        selected_provider=_MatchingProvider(),
+        chat_request=_chat_request(),
+        selected_model=ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1),
+        probe_soft_circuit={},
+    )
+    assert result_without_metrics is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_tuple, expose_audit", [(True, True), (False, False)])
+async def test_replay_supports_legacy_cache_and_optional_audit_method(
+    legacy_tuple: bool, expose_audit: bool
+) -> None:
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "cached"}, "finish_reason": "stop"}]}
+    ]
+    cache = _FakeSemanticCache(cached_chunks=chunks, first_k_tokens="cached")
+    if not expose_audit:
+        cache.record_stream_hit = None  # type: ignore[method-assign]
+    if legacy_tuple:
+        async def legacy_lookup(
+            *args: Any, **kwargs: Any
+        ) -> tuple[list[dict[str, Any]], int, str]:
+            return chunks, 5, "cached"
+
+        cache.lookup_stream_response = legacy_lookup  # type: ignore[method-assign]
+
+    class _MatchingProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, name: str, k: int) -> str:
+            return "cached"
+
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache, selected_provider=_MatchingProvider()),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(
+            ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+        ),  # type: ignore[arg-type]
+        collector=None,
+    )
+    events = [piece async for piece in response.body_iterator]
+    assert events[-1] == "data: [DONE]\n\n"
+    assert cache.stream_stats_data["stream_replays_total"] == 1
 
 # ---------------------------------------------------------------------------
 # (p) Stream stats counters after replay
@@ -896,3 +1273,290 @@ async def test_stream_stats_increment_properly_after_replay() -> None:
     assert stats["stream_probes_ok_total"] == 1
     assert stats["stream_replay_bytes_served_total"] > 0
     assert stats["stream_tokens_saved_total"] == 4
+
+
+@pytest.mark.asyncio
+async def test_live_stream_emits_provider_usage_before_done_and_caches_cleanly() -> None:
+    usage = {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+    proxy = _FakeStreamingProxy(
+        live_chunks=[
+            {
+                "choices": [
+                    {"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}
+                ]
+            },
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                ]
+            },
+            {"choices": [], "usage": usage},
+        ]
+    )
+    cache = _FakeSemanticCache()
+    cache.stream_probe_soft_circuit_threshold = 1
+    model = ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache),
+        chat_request=_chat_request(),
+        payload=_payload(include_usage=True),
+        proxy=proxy,  # type: ignore[arg-type]
+        app_router=_FakeRouter(model),  # type: ignore[arg-type]
+        collector=None,
+        probe_soft_circuit={"cheap": [time.monotonic()]},
+    )
+    events = [
+        piece.decode() if isinstance(piece, bytes) else piece
+        async for piece in response.body_iterator
+    ]
+    assert len(events) == 4
+    usage_event = json.loads(events[-2].removeprefix("data: ").strip())
+    assert usage_event["usage"] == usage
+    assert usage_event["cache_status"] == "live"
+    assert usage_event["usage_source"] == "provider"
+    assert events[-1] == "data: [DONE]\n\n"
+    assert cache._store_calls[0]["kwargs"]["usage_source"] == "provider"
+
+
+@pytest.mark.asyncio
+async def test_incomplete_live_stream_is_never_stored() -> None:
+    cache = _FakeSemanticCache()
+    cache.stream_probe_soft_circuit_threshold = 1
+    model = ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+
+    class _InterruptedProxy(_FakeStreamingProxy):
+        async def stream_chat_completion(
+            self, request: ChatRequest, decision: Any
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls += 1
+            yield {
+                "choices": [
+                    {"index": 0, "delta": {"content": "partial"}, "finish_reason": None}
+                ]
+            }
+            raise ProviderError("provider disconnected", status_code=502, provider="test")
+
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_InterruptedProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(model),  # type: ignore[arg-type]
+        collector=None,
+        probe_soft_circuit={"cheap": [time.monotonic()]},
+    )
+    events = [piece async for piece in response.body_iterator]
+    assert any('"type": "provider_error"' in str(event) for event in events)
+    assert cache._store_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [],
+        [
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                ]
+            }
+        ],
+    ],
+    ids=["empty", "terminal-without-content"],
+)
+async def test_empty_or_contentless_live_stream_is_never_stored(
+    chunks: list[dict[str, Any]],
+) -> None:
+    cache = _FakeSemanticCache()
+    cache.stream_probe_soft_circuit_threshold = 1
+    model = ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_FakeStreamingProxy(live_chunks=chunks),  # type: ignore[arg-type]
+        app_router=_FakeRouter(model),  # type: ignore[arg-type]
+        collector=None,
+        probe_soft_circuit={"cheap": [time.monotonic()]},
+    )
+
+    events = [piece async for piece in response.body_iterator]
+    assert events[-1] == "data: [DONE]\n\n"
+    assert cache._store_calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_stream_exception_after_terminal_does_not_store() -> None:
+    cache = _FakeSemanticCache()
+    cache.stream_probe_soft_circuit_threshold = 1
+    model = ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+
+    class _BrokenAfterTerminalProxy(_FakeStreamingProxy):
+        async def stream_chat_completion(
+            self, request: ChatRequest, decision: Any
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls += 1
+            yield {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "partial"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+            raise RuntimeError("provider iterator failed after terminal chunk")
+
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_BrokenAfterTerminalProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(model),  # type: ignore[arg-type]
+        collector=None,
+        probe_soft_circuit={"cheap": [time.monotonic()]},
+    )
+
+    iterator = response.body_iterator
+    assert await iterator.__anext__()
+    with pytest.raises(RuntimeError, match="after terminal chunk"):
+        await iterator.__anext__()
+    assert cache._store_calls == []
+
+
+@pytest.mark.asyncio
+async def test_generator_exit_on_live_stream_counts_abort_without_storing() -> None:
+    cache = _FakeSemanticCache()
+    cache.stream_probe_soft_circuit_threshold = 1
+    model = ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(model),  # type: ignore[arg-type]
+        collector=None,
+        probe_soft_circuit={"cheap": [time.monotonic()]},
+    )
+    iterator = response.body_iterator
+    assert await iterator.__anext__()
+    await iterator.aclose()
+    assert cache._store_calls == []
+    assert cache.stream_stats_data["stream_aborts_total"] == 1
+    assert cache.stream_stats_data["stream_live_aborts_total"] == 1
+    assert cache.stream_stats_data["stream_replay_aborts_total"] == 0
+    assert cache.stream_stats_data["stream_replay_error_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_abort_metrics_are_best_effort_independently() -> None:
+    cache = _FakeSemanticCache()
+    cache.stream_probe_soft_circuit_threshold = 1
+    original_bump = cache.bump_stream_counter
+
+    def fail_aggregate(name: str, by: int = 1) -> None:
+        if name == "stream_aborts_total":
+            raise RuntimeError("aggregate metric unavailable")
+        original_bump(name, by)
+
+    cache.bump_stream_counter = fail_aggregate  # type: ignore[method-assign]
+    response = await _stream_response(
+        request=_make_stream_request(semantic_cache=cache),
+        chat_request=_chat_request(),
+        payload=_payload(),
+        proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+        app_router=_FakeRouter(
+            ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+        ),  # type: ignore[arg-type]
+        collector=None,
+        probe_soft_circuit={"cheap": [time.monotonic()]},
+    )
+    iterator = response.body_iterator
+    assert await iterator.__anext__()
+    await iterator.aclose()
+
+    assert cache.stream_stats_data["stream_aborts_total"] == 0
+    assert cache.stream_stats_data["stream_live_aborts_total"] == 1
+    assert cache.stream_stats_data["stream_replay_error_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_real_stream_replay_hit_log_only_after_done_and_best_effort(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = str(tmp_path / "stream_replay_audit.db")
+    cache = SemanticCache(
+        db_path,
+        embedder=_FakeEmbedder(),
+        threshold=0.99,
+        hit_log_enabled=True,
+    )
+    model = ModelInfo(name="cheap", provider=Provider.OPENAI, tier=Tier.T1)
+    chunks = [
+        {
+            "id": "cached-id",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "cheap",
+            "choices": [
+                {"index": 0, "delta": {"content": "cached answer"}, "finish_reason": "stop"}
+            ],
+        }
+    ]
+    assert await cache.store_stream_response(
+        chunks,
+        prompt="say hi",
+        usage=Usage(prompt_tokens=4, completion_tokens=2, total_tokens=6),
+        model="cheap",
+        tier=int(Tier.T1),
+        temperature=0.7,
+        top_p=0.9,
+        max_tokens=64,
+        usage_source="provider",
+    )
+
+    class _MatchingProvider(_TestProvider):
+        async def first_tokens(self, request: ChatRequest, name: str, k: int) -> str:
+            return "cached answer"
+
+    async def make_response() -> Any:
+        return await _stream_response(
+            request=_make_stream_request(
+                semantic_cache=cache, selected_provider=_MatchingProvider()
+            ),
+            chat_request=_chat_request(),
+            payload=_payload(),
+            proxy=_FakeStreamingProxy(),  # type: ignore[arg-type]
+            app_router=_FakeRouter(model),  # type: ignore[arg-type]
+            collector=None,
+            probe_soft_circuit={},
+        )
+
+    response = await make_response()
+    events = [piece async for piece in response.body_iterator]
+    assert events[-1] == "data: [DONE]\n\n"
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT prompt_text, response_text, model, verified "
+            "FROM semantic_cache_hit_log"
+        ).fetchall()
+    assert rows == [("say hi", "cached answer", "cheap", 0)]
+
+    # A second replay stopped while suspended at its first chunk must not log.
+    aborted = await make_response()
+    iterator = aborted.body_iterator
+    assert await iterator.__anext__()
+    await iterator.aclose()
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM semantic_cache_hit_log").fetchone()[0] == 1
+
+    # Hit-log storage failure remains best-effort after a fully emitted replay.
+    def fail_write(_: dict[str, Any]) -> None:
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr(cache, "_write_hit_log_row", fail_write)
+    failed_audit = await make_response()
+    failed_events = [piece async for piece in failed_audit.body_iterator]
+    assert failed_events[-1] == "data: [DONE]\n\n"
+    assert cache.stream_stats()["stream_replays_total"] == 2

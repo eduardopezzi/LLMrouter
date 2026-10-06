@@ -354,6 +354,14 @@ class SemanticCacheConfig(BaseModel):
         gt=0,
         description="Per-entry TTL for semantic cache entries, in seconds.",
     )
+    stream_ttl_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Per-entry TTL for streaming responses, in seconds. None inherits "
+            "ttl_seconds."
+        ),
+    )
     db_path: str = "data/semantic_cache.db"
     embed_timeout_seconds: float = Field(
         default=5.0,
@@ -418,7 +426,8 @@ class SemanticCacheConfig(BaseModel):
         description=(
             "Opt-out flag for the streaming cache replay path. When False, "
             "the route layer skips lookup_stream_response and the live "
-            "provider is always used. Defaults to True (cache replay is on)."
+            "provider is always used. Defaults to True for compatibility; "
+            "review production usage before changing this default."
         ),
     )
     stream_probe_k: int = Field(
