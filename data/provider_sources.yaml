@@ -11,7 +11,6 @@ sources:
     api_key_env: "OLLAMA_API_KEY"
     model_denylist:
       # IDs absent from Yoda's Ollama /api/tags inventory (avoid auto-reactivating them).
-      - "kimi-k3:cloud"
       - "deepseek-v4-flash:0731-cloud"
       - "north-mini-code-1.0:cloud"
       - "qwen3.6-27b:cloud"
