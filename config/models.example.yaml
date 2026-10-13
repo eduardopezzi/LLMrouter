@@ -34,26 +34,26 @@ models:
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["architecture", "review", "refactoring", "fix", "migration", "test_generation"]
-    priority: 8
+    priority: 20
     description: "Kimi K3 (2.8T) — Modelo multimodal agêntico nativo com 1M de contexto. Flagship para arquitetura, revisão profunda, refatoração de bases extensas, correções complexas, migrações e geração de testes em longas sessões de engenharia."
     max_tokens: 128000
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
+    prompt_cost_per_1m_tokens: 3.0
+    completion_cost_per_1m_tokens: 15.0
+    cached_prompt_cost_per_1m_tokens: 0.30
 
   - name: "ollama/minimax-m3:cloud"
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "test_generation", "documentation", "summarization", "refactoring"]
-    priority: 9
+    priority: 2
     description: "MiniMax-M3 — 1M+ contexto, excelente para tarefas de contexto longo como documentação, revisão abrangente e refatoração de bases extensas."
     max_tokens: 393216
     context_window: 1048576
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
+    prompt_cost_per_1m_tokens: 0.60
+    completion_cost_per_1m_tokens: 2.40
+    cached_prompt_cost_per_1m_tokens: 0.12
 
   - name: "ollama/kimi-k2.7-code:cloud"
     provider: "ollama"
@@ -268,16 +268,16 @@ models:
   - name: "zhipu/glm-5.3-flash"
     provider: "zai"
     model_family: "glm-5.3-flash"
-    tier: 1
+    tier: 3
     roles: ["summarization", "documentation", "test_generation", "fix", "refactoring", "review", "architecture", "security_audit", "migration"]
     priority: 1
     description: "GLM-5.3-Flash via Z.ai (glm-5.3-flash) — Modelo multimodal para texto, imagens, vídeo e arquivos; contexto de 1M e saída de 128K. Recomendado pela Z.ai com temperature=1, top_p=0.95 e reasoning_effort=max. Preferência padrão para prompts simples e tarefas multimodais."
     max_tokens: 131072
     context_window: 1000000
     rollout_percentage: 100
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
+    prompt_cost_per_1m_tokens: 0.15
+    completion_cost_per_1m_tokens: 0.50
+    cached_prompt_cost_per_1m_tokens: 0.03
     benchmark_sources:
       - "https://huggingface.co/zai-org/GLM-5.3-Flash/raw/main/README.md"
       - "https://docs.z.ai/guides/vlm/glm-5.3-flash"
@@ -286,14 +286,14 @@ models:
     provider: "zai"
     tier: 3
     roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation"]
-    priority: 1
+    priority: 3
     description: "GLM-5.3 via Z.ai (glm-5.3) — Modelo text-only com contexto de 1M, saída de 128K e raciocínio sempre habilitado. reasoning_effort aceita low, high ou max (padrão max). Preferência para tarefas complexas de engenharia e agentes."
     max_tokens: 131072
     context_window: 1000000
     rollout_percentage: 100
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
+    prompt_cost_per_1m_tokens: 1.40
+    completion_cost_per_1m_tokens: 4.40
+    cached_prompt_cost_per_1m_tokens: 0.26
     benchmark_sources:
       - "https://huggingface.co/zai-org/GLM-5.3/raw/main/README.md"
       - "https://docs.z.ai/guides/llm/glm-5.3"
