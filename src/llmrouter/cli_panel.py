@@ -645,12 +645,16 @@ def usage_report(
             model,
             {
                 "requests": 0,
+                "total_tokens": 0,
                 "avg_latency_ms": 0.0,
                 "cost_usd": 0.0,
                 "avg_score": 0.0,
             },
         )
         model_row["requests"] = int(model_row["requests"]) + 1
+        model_row["total_tokens"] = (
+            int(model_row["total_tokens"]) + prompt_count + completion_count
+        )
         model_row["avg_latency_ms"] = float(model_row["avg_latency_ms"]) + latency
         model_row["cost_usd"] = float(model_row["cost_usd"]) + cost
         score = row[5]

@@ -216,8 +216,9 @@ def refresh_provider_catalog(
             Path(models_path),
             removed_models,
             inventory_discovered,
+            metadata_discovered=discovered,
         )
-        changed = changed or bool(added or reactivated)
+        changed = changed or bool(added or reactivated or report.updated_models)
         report = replace(
             report,
             changed=changed,
@@ -551,8 +552,10 @@ def _apply_provider_catalog_changes(
     path: Path,
     removed_models: list[dict[str, str]],
     discovered: dict[str, dict[str, dict[str, Any]]],
+    *,
+    metadata_discovered: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Append new models and enable/disable entries while preserving YAML comments."""
+    """Apply official inventory changes while preserving YAML comments."""
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
     model_rows = raw.get("models", []) if isinstance(raw, dict) else []
     if not isinstance(model_rows, list):
@@ -563,6 +566,7 @@ def _apply_provider_catalog_changes(
         if isinstance(row, dict) and isinstance(row.get("name"), str)
     }
     updates: dict[str, bool] = {}
+    metadata_updates: dict[str, dict[str, Any]] = {}
     reactivated: list[dict[str, str]] = []
     added: list[dict[str, str]] = []
 
@@ -588,6 +592,10 @@ def _apply_provider_catalog_changes(
                     )
                 continue
             entry = _new_model_entry(provider, name, model_rows)
+            metadata_record = (metadata_discovered or discovered).get(provider, {}).get(
+                model_id, {}
+            )
+            entry.update(_provider_metadata_fields(metadata_record))
             rows_by_name[name] = entry
             model_rows.append(entry)
             added.append(
@@ -598,7 +606,20 @@ def _apply_provider_catalog_changes(
                 }
             )
 
-    if not updates and not added:
+    for provider, records in (metadata_discovered or discovered).items():
+        for model_id, record in records.items():
+            name = _provider_model_name(provider, model_id)
+            row = rows_by_name.get(name)
+            if row is None:
+                continue
+            fields = _provider_metadata_fields(record)
+            changed_fields = {
+                field: value for field, value in fields.items() if row.get(field) != value
+            }
+            if changed_fields:
+                metadata_updates[name] = changed_fields
+
+    if not updates and not added and not metadata_updates:
         return added, reactivated
 
     text = path.read_text(encoding="utf-8") if path.exists() else "models:\n"
@@ -613,7 +634,7 @@ def _apply_provider_catalog_changes(
     # Work from the bottom up so inserting an `enabled` line never shifts the
     # positions of model entries that still need to be updated.
     for start, name in reversed(starts):
-        if name not in updates:
+        if name not in updates and name not in metadata_updates:
             continue
         name_match = name_pattern.match(lines[start])
         if name_match is None:
@@ -627,15 +648,41 @@ def _apply_provider_catalog_changes(
             ),
             len(lines),
         )
-        enabled_index = next(
-            (i for i in range(start + 1, end) if enabled_pattern.match(lines[i])),
-            None,
-        )
-        state_line = f"{property_indent}enabled: {'true' if updates[name] else 'false'}"
-        if enabled_index is None:
-            lines.insert(start + 1, state_line)
-        else:
-            lines[enabled_index] = state_line
+        if name in updates:
+            enabled_index = next(
+                (i for i in range(start + 1, end) if enabled_pattern.match(lines[i])),
+                None,
+            )
+            state_line = f"{property_indent}enabled: {'true' if updates[name] else 'false'}"
+            if enabled_index is None:
+                lines.insert(start + 1, state_line)
+            else:
+                lines[enabled_index] = state_line
+
+        if name in metadata_updates:
+            end = next(
+                (
+                    index
+                    for index in range(start + 1, len(lines))
+                    if name_pattern.match(lines[index])
+                ),
+                len(lines),
+            )
+            for field, value in metadata_updates[name].items():
+                field_pattern = re.compile(rf"^\s*{re.escape(field)}\s*:")
+                field_index = next(
+                    (i for i in range(start + 1, end) if field_pattern.match(lines[i])),
+                    None,
+                )
+                dumped = yaml.safe_dump(
+                    {field: value}, sort_keys=False, allow_unicode=True
+                ).splitlines()[0]
+                replacement = f"{property_indent}{dumped}"
+                if field_index is None:
+                    lines.insert(end, replacement)
+                    end += 1
+                else:
+                    lines[field_index] = replacement
 
     if added:
         if not any(re.match(r"^\s*models\s*:", line) for line in lines):
@@ -731,6 +778,39 @@ def _new_model_entry(provider: str, name: str, rows: list[Any]) -> dict[str, Any
             "Review its pricing, context limit, and supported capabilities."
         ),
     }
+
+
+def _provider_metadata_fields(record: dict[str, Any]) -> dict[str, Any]:
+    """Return catalog fields explicitly supplied by an official model endpoint."""
+    fields: dict[str, Any] = {}
+    for source_key in ("context_window", "context_length", "max_context_length"):
+        value = _safe_int(record.get(source_key))
+        if value > 0:
+            fields["context_window"] = value
+            break
+    for source_key in ("max_tokens", "max_output_tokens"):
+        value = _safe_int(record.get(source_key))
+        if value > 0:
+            fields["max_tokens"] = value
+            break
+    description = record.get("description")
+    if isinstance(description, str) and description.strip() and "\n" not in description:
+        fields["description"] = description.strip()
+    details = record.get("details")
+    family = record.get("model_family", record.get("family"))
+    if not isinstance(family, str) and isinstance(details, dict):
+        family = details.get("family")
+    if isinstance(family, str) and family.strip():
+        fields["model_family"] = family.strip()
+    for field in (
+        "prompt_cost_per_1m_tokens",
+        "completion_cost_per_1m_tokens",
+        "cached_prompt_cost_per_1m_tokens",
+    ):
+        value = record.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            fields[field] = value
+    return fields
 
 
 def _write_snapshot(path: Path, records: dict[str, dict[str, Any]]) -> None:

@@ -24,7 +24,6 @@ sources:
       - "kimi-k2.7-code"
       - "qwen3.5:397b"
       - "nemotron-3-ultra"
-      - "deepseek-v4.1-flash"
       - "gpt-oss:20b"
       - "kimi-k3"
       - "minimax-m2.7"
@@ -44,6 +43,7 @@ sources:
     kind: "model_api"
     url: "https://api.deepseek.com/models"
     api_key_env: "DEEPSEEK_API_KEY"
+    complete_inventory: true
   - provider: "deepseek"
     kind: "documentation"
     url: "https://api-docs.deepseek.com/api/list-models"

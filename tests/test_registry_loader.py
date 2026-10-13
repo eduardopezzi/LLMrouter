@@ -43,8 +43,8 @@ def test_provider_model_name_removes_catalog_namespace() -> None:
 
     assert registry.get("ollama/qwen2.5-coder:3b").provider_model_name == "qwen2.5-coder:3b"
     assert (
-        registry.get("deepseek/deepseek-v4-flash").provider_model_name
-        == "deepseek-v4-flash"
+        registry.get("deepseek/deepseek-flash").provider_model_name
+        == "deepseek-flash"
     )
     assert registry.get("zhipu/glm-5.3").provider_model_name == "glm-5.3"
 

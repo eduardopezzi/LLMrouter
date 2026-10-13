@@ -95,6 +95,36 @@ models:
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
 
+  - name: "ollama/deepseek-v4.1-flash:cloud"
+    provider: "ollama"
+    model_family: "deepseek-v4.1-flash"
+    tier: 3
+    api_base: "http://localhost:11434"
+    roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
+    priority: 19
+    rollout_percentage: 0
+    description: "DeepSeek-V4.1-Flash — modelo multimodal de raciocínio e ferramentas, com contexto de 1M, para coding agêntico e tarefas longas."
+    max_tokens: 393216
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0.3
+    completion_cost_per_1m_tokens: 1.2
+    cached_prompt_cost_per_1m_tokens: 0.006
+
+  - name: "ollama/mistral-large-4:cloud"
+    provider: "ollama"
+    model_family: "mistral-large-4"
+    tier: 3
+    api_base: "http://localhost:11434"
+    roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
+    priority: 20
+    rollout_percentage: 0
+    description: "Mistral Large 4 — modelo multimodal generalista com contexto de 1M, raciocínio, coding, ferramentas e fluxos agênticos."
+    max_tokens: 131072
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 1.36
+    completion_cost_per_1m_tokens: 4.18
+    cached_prompt_cost_per_1m_tokens: 0.14
+
   - name: "ollama/qwen3-coder:480b-cloud"
     provider: "ollama"
     tier: 3
@@ -136,28 +166,28 @@ models:
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
 
-  - name: "ollama/north-mini-code-1.0:cloud"
+  - name: "ollama/north-mini-code-1.0"
     enabled: false
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
-    roles: ["fix", "refactoring"]
+    roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation"]
     priority: 15
-    description: "Cohere North Mini Code (30B) — Especialista ultrarrápido em automações agênticas locais e patches diretos."
-    max_tokens: 128000
-    context_window: 499712
+    description: "Cohere North Mini Code — modelo local focado em engenharia de software agêntica, com ferramentas, contexto de 256K e saída de até 64K."
+    max_tokens: 65536
+    context_window: 262144
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
 
-  - name: "ollama/qwen3.6-27b:cloud"
+  - name: "ollama/qwen3.8:27b"
     enabled: false
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
-    roles: ["test_generation", "documentation"]
+    roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
     priority: 17
-    description: "Qwen 3.6 (27B) — Escrita ágil e precisa de documentações técnicas de arquivos múltiplos."
+    description: "Qwen3.8 27B — modelo multimodal para coding, trabalho profissional, pesquisa e tarefas agênticas longas."
     max_tokens: 128000
     context_window: 262144
     prompt_cost_per_1m_tokens: 0
@@ -169,9 +199,9 @@ models:
     provider: "ollama"
     tier: 2
     api_base: "http://localhost:11434"
-    roles: ["review", "fix", "refactoring"]
+    roles: ["architecture", "review", "fix", "refactoring", "test_generation", "documentation", "summarization"]
     priority: 16
-    description: "Gemma 4 (31B) — Modelo de nuvem nativo do Ollama com excelente capacidade de agenciamento de código."
+    description: "Gemma 4 31B — modelo multimodal para raciocínio, coding e fluxos agênticos; variante local do Ollama."
     max_tokens: 262144
     context_window: 262144
     prompt_cost_per_1m_tokens: 0
@@ -191,28 +221,14 @@ models:
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
 
-  - name: "ollama/deepseek-v3.2:cloud"
+  - name: "ollama/deepseek-v3.1"
     enabled: false
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
-    roles: ["review", "fix"]
-    priority: 13
-    description: "DeepSeek V3.2 — MoE cloud com thinking e tools, raciocinio avancado para review e correcoes."
-    max_tokens: 128000
-    context_window: 163840
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
-
-  - name: "ollama/deepseek-v3.1:cloud"
-    enabled: false
-    provider: "ollama"
-    tier: 3
-    api_base: "http://localhost:11434"
-    roles: ["test_generation", "summarization"]
+    roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation", "summarization"]
     priority: 14
-    description: "DeepSeek V3.1 — MoE cloud com thinking e tools, versatil para geracao de testes e resumos."
+    description: "DeepSeek V3.1-Terminus — modelo local com modos de raciocínio e melhor uso de ferramentas para coding e busca."
     max_tokens: 128000
     context_window: 163840
     prompt_cost_per_1m_tokens: 0
@@ -222,17 +238,17 @@ models:
   # ==================================================================
   # DeepSeek — Provedor OpenAI-compatible
   # ==================================================================
-  - name: "deepseek/deepseek-v4-flash"
+  - name: "deepseek/deepseek-flash"
     provider: "deepseek"
     tier: 3
-    roles: ["review", "fix", "refactoring", "test_generation", "documentation", "summarization"]
+    roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization", "security_audit"]
     priority: 2
-    description: "DeepSeek V4 Flash — modelo direto rápido e econômico para tarefas gerais e agentes."
+    description: "DeepSeek-V4.1-Flash — modelo multimodal com raciocínio e ferramentas. ID oficial atual deepseek-flash; deepseek-v4-flash é alias legado."
     max_tokens: 384000
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 0.14
-    completion_cost_per_1m_tokens: 0.28
-    cached_prompt_cost_per_1m_tokens: 0.0028
+    prompt_cost_per_1m_tokens: 0.3
+    completion_cost_per_1m_tokens: 1.2
+    cached_prompt_cost_per_1m_tokens: 0.006
 
   - name: "deepseek/deepseek-v4-pro"
     provider: "deepseek"
@@ -242,9 +258,9 @@ models:
     description: "DeepSeek V4 Pro — modelo direto para arquitetura, segurança e tarefas complexas."
     max_tokens: 384000
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 0.435
-    completion_cost_per_1m_tokens: 0.87
-    cached_prompt_cost_per_1m_tokens: 0.003625
+    prompt_cost_per_1m_tokens: 1.32
+    completion_cost_per_1m_tokens: 3.96
+    cached_prompt_cost_per_1m_tokens: 0.044
 
   # ==================================================================
   # Z AI (Zhipu) — Provedor de fallback

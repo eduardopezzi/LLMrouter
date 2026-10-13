@@ -29,8 +29,10 @@ from llmrouter.cli_panel import (
     set_model_enabled,
     set_model_priority_order,
     set_provider_cost_order,
+    usage_report,
 )
 from llmrouter.config import Settings, reload_settings
+from llmrouter.core.benchmark_scorer import score_model
 from llmrouter.core.registry import ModelRegistry, load_model_registry
 
 
@@ -88,6 +90,10 @@ class LLMrouterTUI(App[None]):
     #models-table {
         height: 1fr;
         margin-top: 1;
+    }
+    #models-actions {
+        height: auto;
+        margin-bottom: 1;
     }
     #routing-controls {
         height: auto;
@@ -155,6 +161,11 @@ class LLMrouterTUI(App[None]):
                     yield Button("Save provider order", id="save-provider-order")
                 yield Static(id="routing-status")
             with TabPane("Models", id="models"):
+                with Horizontal(id="models-actions"):
+                    yield Button(
+                        "Atualizar modelos e características",
+                        id="update-model-catalog",
+                    )
                 yield Label(
                     "↑/↓ seleciona | q/k sobe | a/j desce | e alterna status | "
                     "s salva | r recarrega | x restaura ordem",
@@ -240,19 +251,40 @@ class LLMrouterTUI(App[None]):
         table.add_column("Provider", width=10)
         table.add_column("Model", width=42)
         table.add_column("Tier", width=7)
+        table.add_column("Nota (0-100)", width=11)
+        table.add_column("Média tokens/requisição (6h)", width=28)
         table.add_column("Status", width=10)
         table.add_column("Rollout", width=9)
         table.add_column("Roles", width=38)
 
         models = {model.name: model for model in self.catalog.all()}
+        usage = usage_report(self.settings.evaluator.db_path, hours=6)
+        usage_by_model = {
+            str(row["model"]): row
+            for row in usage.get("models", [])
+            if isinstance(row, dict) and isinstance(row.get("model"), str)
+        }
         for index, name in enumerate(self._order, 1):
             model = models[name]
             status = "enabled" if self._enabled[name] else "disabled"
+            score = score_model(
+                model,
+                strategy=self.settings.routing.strategy.value,
+                provider_cost_order=self.settings.routing.provider_cost_order,
+            )
+            model_usage = usage_by_model.get(name)
+            requests = int(model_usage.get("requests", 0)) if model_usage else 0
+            total_tokens = int(model_usage.get("total_tokens", 0)) if model_usage else 0
+            average_tokens = (
+                f"{round(total_tokens / requests):,} (n={requests})" if requests else "—"
+            )
             table.add_row(
                 str(index),
                 model.provider.value,
                 name,
                 f"T{model.tier.value}",
+                f"{score.strategy_score * 100:.0f}/100",
+                average_tokens,
                 status,
                 f"{model.rollout_percentage:g}%",
                 ", ".join(sorted(model.capabilities)) or "-",
@@ -318,6 +350,9 @@ class LLMrouterTUI(App[None]):
         self._update_models_table(0)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "update-model-catalog":
+            self._start_catalog_update()
+            return
         if event.button.id != "save-provider-order":
             return
         value = self.query_one("#provider-order", Input).value
@@ -332,6 +367,62 @@ class LLMrouterTUI(App[None]):
             )
         except Exception as exc:
             self.query_one("#routing-status", Static).update(f"Erro: {exc}")
+
+    def _start_catalog_update(self) -> None:
+        self.query_one("#models-status", Static).update(
+            "Consultando sites e APIs oficiais dos provedores..."
+        )
+        self.query_one("#update-model-catalog", Button).disabled = True
+        self.run_worker(self._update_model_catalog, thread=True, exclusive=True)
+
+    def _update_model_catalog(self) -> None:
+        """Refresh provider inventory and metadata off the UI thread."""
+        from llmrouter.provider_catalog import refresh_provider_catalog
+
+        outcomes: list[str] = []
+        errors: list[str] = []
+        benchmarks = self.settings.benchmarks
+        routing = self.settings.routing
+        try:
+            report = refresh_provider_catalog(
+                benchmarks.provider_sources_path,
+                self.models_file,
+                benchmarks.provider_snapshot_path,
+                benchmarks.provider_report_path,
+                strategy=routing.strategy.value,
+                provider_cost_order=routing.provider_cost_order,
+                benchmark_catalog_path=benchmarks.catalog_path,
+                timeout=benchmarks.refresh_timeout_seconds,
+                apply_catalog=True,
+            )
+            outcomes.append(
+                f"Modelos: {len(report.new_models)} adicionados, "
+                f"{len(report.reactivated_models)} reativados, "
+                f"{len(report.removed_models)} desativados; "
+                f"{len(report.updated_models)} com metadados alterados nas fontes oficiais"
+            )
+            if report.source_errors:
+                errors.append(
+                    f"{len(report.source_errors)} fonte(s) de modelos falharam"
+                )
+        except Exception as exc:
+            errors.append(f"sincronização de modelos: {exc}")
+
+        self.call_from_thread(self._finish_catalog_update, outcomes, errors)
+
+    def _finish_catalog_update(self, outcomes: list[str], errors: list[str]) -> None:
+        self.query_one("#update-model-catalog", Button).disabled = False
+        self._load_catalog(reload=True)
+        self._refresh_all()
+        summary = "; ".join(outcomes + errors)
+        if errors:
+            self.query_one("#models-status", Static).update(
+                f"Atualização concluída com problemas: {summary}"
+            )
+            self.notify("Atualização concluída com problemas", severity="warning")
+        else:
+            self.query_one("#models-status", Static).update(summary or "Catálogo atualizado")
+            self.notify("Modelos e características atualizados")
 
     def _update_usage(self) -> None:
         self.query_one("#usage-content", Static).update(
