@@ -55,6 +55,19 @@ models:
     completion_cost_per_1m_tokens: 2.40
     cached_prompt_cost_per_1m_tokens: 0.12
 
+  - name: "ollama/minimax-m3.1-flash:cloud"
+    provider: "ollama"
+    model_family: "minimax-m3.1-flash"
+    tier: 3
+    api_base: "http://localhost:11434"
+    roles: ["review", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
+    priority: 2
+    description: "MiniMax M3.1 Flash — modelo Flash multimodal com visão e ferramentas, voltado a coding e tarefas agênticas; contexto de 976K. Hospedado nos EUA com zero retenção de dados. Grátis no Ollama até 22/10/2026 às 23:59 UTC; preço padrão após a promoção: US$ 0,15/M tokens de entrada e US$ 0,60/M de saída."
+    context_window: 976000
+    prompt_cost_per_1m_tokens: 0.15
+    completion_cost_per_1m_tokens: 0.60
+    cached_prompt_cost_per_1m_tokens: 0.015
+
   - name: "ollama/kimi-k2.7-code:cloud"
     provider: "ollama"
     tier: 3
