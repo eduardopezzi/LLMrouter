@@ -1,9 +1,9 @@
-# Configuração de Modelos LLM — Ollama primário + provedores de fallback
+# Configuração de Modelos LLM — GLM (Z.ai) primário + provedores de fallback
 #
 # Pipeline multi-modelo com fallback hierárquico:
-#   1. Ollama — modelos preferenciais por tarefa
-#   3. Z AI (GLM) — fallback quando ZAI_API_KEY existe
-#   4. Demais candidatos cadastrados — usados por ordem de prioridade
+#   1. Z AI (GLM) — preferência por custo-benefício e qualidade
+#   2. Ollama Cloud — fallback entre modelos equivalentes quando disponível
+#   3. Demais candidatos cadastrados — usados por ordem de prioridade
 #
 # Roteamento por role:
 #   architecture     → Desenho de sistemas, diagramas, esquemas de BD e infraestrutura (IaC)
@@ -90,9 +90,9 @@ models:
     description: "DeepSeek-V4-Pro — Raciocínio lógico (MoE/MLA) impecável para auditoria de segurança e System Design."
     max_tokens: 393216
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
+    prompt_cost_per_1m_tokens: 1.32
+    completion_cost_per_1m_tokens: 3.96
+    cached_prompt_cost_per_1m_tokens: 0.044
 
   - name: "ollama/deepseek-v4-flash:0731-cloud"
     enabled: false
@@ -165,19 +165,20 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/glm-5.3-flash:cloud"
+    enabled: true
     provider: "ollama"
     model_family: "glm-5.3-flash"
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
-    priority: 1
-    rollout_percentage: 50
+    priority: 2
+    rollout_percentage: 100
     description: "GLM-5.3 Flash — 1M de contexto, multimodal e otimizado para coding/agentes com custo-benefício superior ao GLM-5.2."
     max_tokens: 131072
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 0
-    completion_cost_per_1m_tokens: 0
-    cached_prompt_cost_per_1m_tokens: 0
+    prompt_cost_per_1m_tokens: 0.15
+    completion_cost_per_1m_tokens: 0.50
+    cached_prompt_cost_per_1m_tokens: 0.03
 
   - name: "ollama/north-mini-code-1.0"
     enabled: false
