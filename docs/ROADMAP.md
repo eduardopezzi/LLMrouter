@@ -438,6 +438,150 @@ Cada PR deve atualizar este roadmap e a issue #11 com o que foi concluído, link
 
 ---
 
+<a id="e2-6"></a>
+
+### ETAPA 2.6 — CCR-lite: compressão reversível de tool results no gateway
+
+**Escopo LLMrouter · esforço: médio · risco: baixo-médio · economia: ALTA em
+tráfego agêntico** *( inspiração: rtk-ai/rtk — proxy CCR "Compress-Cache-Retrieve",
+estudo de 10 ferramentas de redução de tokens de 2026-11; complementa E2/E4 sem
+depender de nenhuma das duas )*
+
+**Origem externa:** análise do [rtk-ai/rtk](https://github.com/rtk-ai/rtk)
+(Rust Token Killer). O RTK intercepta conversas agênticas em dois pontos: hook
+de execução (bash output filtrado antes de entrar no contexto) e proxy HTTP com
+pipeline de transforms. O estágio **CCR** do proxy deles é o único que remove
+tokens do histórico **de forma reversível**: blocos grandes de tool result viram
+preview + marker com hash de conteúdo, o original fica num store local, e uma
+tool `retrieve` injetada no request permite ao modelo recuperar o que precisa.
+Este E2.6 porta o conceito para o gateway OpenAI-compatible do LLMrouter
+(messages `role=tool` / `tool_calls`), com escopo reduzido e os mesmos
+princípios do roadmap (byte-stability, fail-open, métrica por sessão).
+
+#### E2.6 — Design
+
+1. **Normalize stage (Fase A, quick win):** middleware puro e determinístico
+   aplicado **apenas** a blocos `role=tool` (e `content` longo de assistant com
+   `tool_calls`) cujo texto exceda `TOOL_FILTER_MIN_CHARS` (default 4.000):
+   - strip de sequências ANSI CSI (`\x1b[...m`);
+   - colapso de linhas adjacentes idênticas (run ≥ 3) em `linha\n[xN]`
+     (mesmo critério lossless-transform do `dedup.rs` do RTK: adjacência
+     apenas, não-blank, ordem preservada);
+   - cap final em `TOOL_FILTER_MAX_CHARS` (default 16.000) com tail marker
+     `[... +N linhas omitidas]`.
+   Função pura (mesmo input → mesmo output): blocos já comprimidos pelo Hermes
+   ou por hooks externos não mudam de novo → **prefixo byte-stable entre turns**
+   (princípio 3). Config: `tool_filter.enabled` (default **false** até
+   validar), escopo por header opt-in `X-LLMRouter-Tool-Filter: on`.
+2. **CCR-lite (Fase B):** blocos `role=tool` acima de `CCR_MIN_TOKENS`
+   (default 1.500, alinhado ao `COMPRESS_MIN_TOKENS` do RTK — abaixo disso o
+   preview custa tanto quanto o bloco):
+   - substituir por preview head+tail (80/40 chars) + marker
+     `[llmrouter: compressed ccr:<sha16>] (<N> chars armazenados)`;
+   - guardar o texto original (gzip) numa tabela SQLite `ccr_entries`
+     (`id TEXT PK, session_key TEXT, hash TEXT, created_at, raw BLOB,
+     chars INT`), `CREATE TABLE IF NOT EXISTS`, TTL configurable
+     (`ccr.ttl_hours`, default 72, purge best-effort no store);
+   - **tool injetada** quando houver ≥1 compressão no request: acrescentar aos
+     `tools` do payload a função `retrieve_content` (`{"id":{"type":"string"},
+     "description":"Recupera conteúdo completo de um tool result comprimido
+     pelo gateway"}`); se o modelo responder com `tool_calls` para ela, o
+     **gateway resolve localmente** (SELECT pelo id), devolve o conteúdo na
+     mensagem `role=tool` correspondente e NUNCA repassa a chamada ao provider
+     upstream (mesmo desenho do `ccr_forward.rs`). Tool auxiliar removida do
+     request seguinte após uso.
+   - Idempotência: bloco que já contém o marker `llmrouter: compressed` nunca
+     é recomprimido (guarda contra dupla aplicação em replays/histórico
+     reenviado).
+3. **Contabilidade por estágio (fecha o princípio 1):** estimar tokens como
+   `chars/4` (mesmo estimador documentado do RTK; percentuais confiáveis,
+   absolutos aproximados) e registrar no `MetricsCollector`:
+   `tool_filter_blocks/saved_chars`, `ccr_blocks/saved_chars`,
+   `ccr_retrievals`, `ccr_store_bytes`. Agregar por `session_key`
+   (`X-Session-Id` ou hash do primeiro user content) e expor em
+   `GET /v1/llmrouter/tokens/stats`.
+4. **Fail-open (requisito duro):** qualquer exceção no middleware → log warn +
+   passthrough do payload original; compressão nunca quebra nem altera a
+   resposta do provider. Erro no retrieve de tool injetada → devolver mensagem
+   `role=tool` com o erro em texto (o modelo vê e decide), sem tocar o fluxo
+   upstream.
+
+#### E2.6 — Não-objetivos (recortes conscientes do RTK)
+
+- **Sem `cache_align`**: breakpoints de prompt-cache são
+  provider-specific (Anthropic); nossos providers (Ollama/ZAI/DeepSeek) não
+  expõem esse controle na API assinada. Reavaliar se migração para serving
+  self-hosted expuser `cache_control`.
+- **Sem `pixel_compress`**: ganho só documentado para Anthropic + conteúdo
+  código; custo de visão pode exceder o de texto em JSON/logs (leitura do
+  próprio RTK: "JSON and logs lose on BOTH providers").
+- **Sem TOON**: dependência extra; `minify_json` determinístico cobre a maior
+  parte do ganho com zero risco de perda semântica em floats > i64/dup keys
+  (limitações documentadas do próprio TOON). Pode vir como Fase C se a Fase B
+  mostrar volume alto de JSON uniforme nos tool results.
+
+#### E2.6 — Interações com outras etapas
+
+- **E2 (streaming replay):** CCR-lite comprime **requests** (input); E2 replaya
+  **respostas** (output). Ortonômicos; ambos usam o mesmo padrão de store
+  SQLite. Um hit de replay contendo markers CCR antigos é deixado como está
+  (idempotência).
+- **E4 (CAPC/tool-schema filter):** o normalize stage é o "CAPC de tool
+  results" — E4 cobre system prompt/schemas; sem sobreposição.
+- **Princípio 1:** métrica por sessão antes/depois é critério de aceite, não
+  enfeite — compressão que force re-read do original (retrieve alto) pode
+  **aumentar** o custo total (`2608.16370`); o limiar de atenção é
+  `ccr_retrievals / ccr_blocks > 0.3`.
+
+#### E2.6 — Testes TDD (padrão RED→GREEN do repo)
+
+1. ANSI strip: `role=tool` com ANSI sai limpo, idempotente em 2ª passada.
+2. Dedup: 5 linhas idênticas adjacentes → 1 + `[x5]`; linhas não-adjacentes
+   não colapsam; linhas em branco nunca colapsam.
+3. Cap: bloco 40K chars → ≤16K + marker com contagem exata.
+4. Byte-stability: mesmo payload 2× → request ao provider idêntico byte-a-byte
+   (senão invalida o cache de prefixo upstream).
+5. Idempotência: payload já contendo markers não muda na 2ª passada.
+6. CCR store: comprimido → linha em `ccr_entries` com gzip; retrieve → texto
+   original byte-a-byte.
+7. Tool injetada: request comprimido contém `retrieve_content` nos `tools`;
+   chamada do modelo é interceptada e **não** chega ao provider (mock upstream
+   assertion); resposta `role=tool` com conteúdo original.
+8. Fail-open: store SQLite indisponível → passthrough + warn, resposta 200.
+9. Opt-out: sem header opt-in → nenhum bloco é alterado.
+10. Contadores: `saved_chars` por estágio coerentes com chars de entrada/saída
+    medidos nos testes.
+
+#### E2.6 — Contrato
+
+- `GET /v1/llmrouter/tokens/stats` (novo): contadores por estágio + por
+  sessão; atualização do snapshot de contrato e `tests/test_contract.py` no
+  mesmo PR quando ativar a rota.
+- Comportamento default: **off** (ambas as fases), ativação por config
+  `tool_filter.enabled` + opt-in por header; rollback = flag off, sem redeploy.
+
+#### E2.6 — Critérios de aceite
+
+1. Suíte completa verde (≥ atual 950) com os novos testes; cobertura do código
+   novo ≥ 95% de linhas.
+2. Janela de observação de 1 semana no tráfego real do Hermes com
+   `ccr_retrievals / ccr_blocks ≤ 0.3` e zero resposta incorreta atribuída à
+   compressão (revisão manual amostral de 20 casos).
+3. Redução medida de chars de input em tool-heavy sessions ≥ 40% nos blocos
+   alvo (estimativa chars/4 documentada como estimativa, não cobrança).
+4. Fase A pode ser ativada isoladamente; Fase B só após Fase A com 3+ dias de
+   contadores estáveis.
+
+#### E2.6 — Dependências e ordem
+
+- Fase A independente de qualquer etapa; Fase B reusa o padrão de store/purge
+  de E2. Sem dependência de E1/E3/E4/E5.
+- Posição na ordem de execução: após fechar os gates de produção de E2.5, em
+  paralelo a E3; precede E4 (o normalize stage é pré-requisito natural do
+  CAPC).
+
+---
+
 <a id="e3"></a>
 
 ### ETAPA 3 — TaaS: cache de trajetórias operacionais (0 token)
@@ -630,6 +774,37 @@ atualizado (status + evidência de medição). Merge exclusivamente via PR.
 
 ## Integrações e estudos técnicos
 
+### 15-A. Análise rtk-ai/rtk — técnicas de redução de tokens (2026-11)
+
+**Status:** análise concluída; recomendações incorporadas como [E2.6](#e2-6).
+
+Estudo do [rtk-ai/rtk](https://github.com/rtk-ai/rtk) (Rust Token Killer) mais
+9 ferramentas da mesma família (context-mode, token-savior, code-review-graph,
+claude-context/Zilliz, entre outras). Síntese do que o ecossistema faz e onde
+o LLMrouter já cobre:
+
+| Técnica | Onde atua | Cobertura no roadmap |
+| --- | --- | --- |
+| Filtro de bash output via hook (12 estratégias: stats extraction, dedup, grouping, failure focus) | antes de entrar no contexto (agente) | fora de escopo do gateway — papel do Hermes/agentes |
+| **CCR** (compressão reversível de tool results: preview + hash + store + tool retrieve injetada) | proxy, no histórico da conversa | **E2.6 Fase B** (novo) |
+| Normalize inerte (ANSI strip, dedup de linhas, cap com marker) | proxy, blocks `role=tool` | **E2.6 Fase A** (novo) |
+| `cache_align` (breakpoint de prompt-cache no prefixo estável) | proxy | não aplicável — providers assinados não expõem `cache_control` |
+| `pixel_compress` (tool result como PNG) | proxy | descartado — ganho restrito a Anthropic+código; JSON/logs perdem em todo provider |
+| TOON (JSON → formato tabular, shape-gated) | proxy | adiado — Fase C opcional de E2.6 |
+| Tool-schema filter (só schemas usados na sessão) | proxy, payload `tools` | E4.1 (ideia idêntica, independente) |
+| Sandbox SQLite + FTS5 com recall (context-mode) | agente | análogo funcional ao E3 (TaaS) |
+| Navegação por símbolo / grafo Tree-sitter | agente | análogo ao E6 (retriever-first PRecog) |
+| Busca vetorial híbrida do codebase (claude-context) | agente | coberto pelo PRecog (E6) |
+| Compressão de estilo de saída (caveman, token-efficient) | system prompt do agente | fora de escopo do gateway (não passa por aqui) |
+
+**Lição transversal aplicada ao E2.6:** todas as ferramentas sérias do gênero
+convergem em (a) função pura e byte-stable (não invalidar cache de prefixo),
+(b) fail-open (nunca bloquear), (c) reversibilidade com store local + marker
+hash, (d) métrica honesta em bytes com estimativa `chars/4` declarada como
+estimativa. O RTK ainda documenta a diluição da economia: bytes de bash output
+são só um dos componentes dos input tokens, que por sua vez são só parte da
+conta — por isso os critérios de E2.6 medem chars por sessão, não "custo".
+
 ### 14. RAGFlow Lite e evolução do acoplamento
 
 **Código entregue:** cliente HTTP opt-in, rota de consulta e rota de health;
@@ -669,7 +844,11 @@ gateway atual nem confundir CacheBlend/KV com cache de respostas.
 5. Entregar contratos de endpoints customizados (11) e governança do catálogo (12).
 6. Executar E4 → E5 → E6 → E7 respeitando dependências e métricas. A prioridade
    original por ROI é E1 → E3 → E2 → E4 → E5 → E6 → E7; E1/E2 já têm código entregue.
-7. Formalizar a decisão do RAGFlow (14) e validar operação antes de ampliar o
+7. Executar E2.6 (CCR-lite, fase A normalize → fase B store+retrieve) após os
+   gates de produção de E2.5, em paralelo a E3: é o pré-requisito natural do
+   CAPC em E4 e o único item novo com economia ALTA e risco baixo-médio no
+   curto prazo (fonte: análise rtk-ai/rtk, 2026-11).
+8. Formalizar a decisão do RAGFlow (14) e validar operação antes de ampliar o
    acoplamento; CacheBlend (15) permanece condicionado à medição e ao serving.
 
 ## Qualidade transversal
