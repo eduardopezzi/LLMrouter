@@ -30,7 +30,8 @@ class ModelRegistry:
         return list(self.models)
 
     def by_tier(self, tier: Tier | int) -> list[ModelInfo]:
-        return [model for model in self.models if model.tier == tier]
+        """Return initial routing candidates, defaulting to each model's capability tier."""
+        return [model for model in self.models if tier in (model.routing_tiers or (model.tier,))]
 
     def add(self, model: ModelInfo) -> ModelRegistry:
         if model in self.models:
@@ -116,6 +117,7 @@ def _model_from_mapping(
         name=name,
         provider=provider,
         tier=tier,
+        routing_tiers=_parse_routing_tiers(item, name),
         cost_per_1k_input=_cost_per_1k(item, "prompt_cost_per_1m_tokens"),
         cost_per_1k_output=_cost_per_1k(item, "completion_cost_per_1m_tokens"),
         max_tokens=max_tokens,
@@ -130,6 +132,17 @@ def _model_from_mapping(
         benchmark_scores=tuple(sorted(configured_scores.items())),
         benchmark_sources=tuple(sorted(benchmark_sources)),
     )
+
+
+def _parse_routing_tiers(item: dict[str, Any], name: str) -> frozenset[Tier]:
+    if "routing_tiers" not in item:
+        return frozenset()
+    values = item["routing_tiers"]
+    if not isinstance(values, list) or not values or any(
+        type(value) is not int or value not in (1, 2, 3) for value in values
+    ):
+        raise ValueError(f"{name}: routing_tiers must be a non-empty list of integers from 1 to 3")
+    return frozenset(Tier(value) for value in values)
 
 
 def _parse_tier(

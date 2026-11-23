@@ -28,19 +28,19 @@ models:
   # ==================================================================
   # Ollama — Provedor primário (sempre disponível)
   # ==================================================================
-  - name: "ollama/kimi-k3:cloud"
+  - name: "ollama/kimi-k3.1-pro:cloud"
     enabled: false
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
     roles: ["architecture", "review", "refactoring", "fix", "migration", "test_generation"]
     priority: 20
-    description: "Kimi K3 (2.8T) — Modelo multimodal agêntico nativo com 1M de contexto. Flagship para arquitetura, revisão profunda, refatoração de bases extensas, correções complexas, migrações e geração de testes em longas sessões de engenharia."
+    description: "Kimi K3.1 Pro (2.8T) — Modelo multimodal agêntico nativo com contexto de 1M, aprimorado para coding, pesquisa e precisão factual. Indicado para arquitetura, revisão profunda, refatoração, correções complexas, migrações e geração de testes em longas sessões de engenharia."
     max_tokens: 128000
     context_window: 1000000
-    prompt_cost_per_1m_tokens: 3.0
-    completion_cost_per_1m_tokens: 15.0
-    cached_prompt_cost_per_1m_tokens: 0.30
+    prompt_cost_per_1m_tokens: 2.0
+    completion_cost_per_1m_tokens: 10.0
+    cached_prompt_cost_per_1m_tokens: 0.20
 
   - name: "ollama/minimax-m3:cloud"
     provider: "ollama"
@@ -283,6 +283,7 @@ models:
     provider: "zai"
     model_family: "glm-5.3-flash"
     tier: 3
+    routing_tiers: [1, 2]
     roles: ["summarization", "documentation", "test_generation", "fix", "refactoring", "review", "architecture", "security_audit", "migration"]
     priority: 1
     description: "GLM-5.3-Flash via Z.ai (glm-5.3-flash) — Modelo multimodal para texto, imagens, vídeo e arquivos; contexto de 1M e saída de 128K. Recomendado pela Z.ai com temperature=1, top_p=0.95 e reasoning_effort=max. Preferência padrão para prompts simples e tarefas multimodais."

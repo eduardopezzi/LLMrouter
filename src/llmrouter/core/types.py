@@ -114,6 +114,7 @@ class ModelInfo:
     rollout_percentage: float = 100.0
     benchmark_scores: tuple[tuple[str, float], ...] = ()
     benchmark_sources: tuple[str, ...] = ()
+    routing_tiers: frozenset[Tier] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         """Validate rollout_percentage range."""

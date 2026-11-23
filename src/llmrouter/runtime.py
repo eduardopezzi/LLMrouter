@@ -195,6 +195,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         strategy=resolved_settings.routing.strategy,
         fallback_count=resolved_settings.routing.fallback_count,
         provider_cost_order=resolved_settings.routing.provider_cost_order,
+        last_resort_providers=resolved_settings.routing.last_resort_providers,
         health_tracker=health_tracker,
         rollout_config=resolved_settings.rollout,
         provider_cooldowns=provider_cooldowns,

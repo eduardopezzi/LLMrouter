@@ -357,3 +357,32 @@ async def test_router_skips_unavailable_provider_for_auto_routes() -> None:
 
     assert decision.primary.name == "ollama/reviewer"
     assert decision.fallbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "expected_tier", "expected_model"),
+    [
+        ("Olá!", Tier.T1, "flash"),
+        ("Debug and refactor this implementation:\n```python\ndef x(): pass\n```", Tier.T2, "flash"),
+        ("Faça uma auditoria de segurança procurando vulnerabilidades OWASP.", Tier.T3, "pro"),
+    ],
+)
+async def test_auto_routes_by_configured_tiers(prompt, expected_tier, expected_model) -> None:
+    registry = ModelRegistry(
+        models=(
+            ModelInfo(
+                name="flash",
+                provider=Provider.ZAI,
+                tier=Tier.T3,
+                routing_tiers=frozenset({Tier.T1, Tier.T2}),
+            ),
+            ModelInfo(name="pro", provider=Provider.ZAI, tier=Tier.T3),
+        )
+    )
+    decision = await MultiModelRouter(registry, PromptScorer()).route(
+        ChatRequest(model=None, messages=[ChatMessage(role="user", content=prompt)])
+    )
+    assert decision.primary.name == expected_model
+    assert decision.tier == expected_tier
+    assert decision.primary.tier == Tier.T3

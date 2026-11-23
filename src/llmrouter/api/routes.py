@@ -2177,6 +2177,7 @@ def _model_payload(model: ModelInfo) -> dict[str, object]:
         "owned_by": model.provider.value,
         "llmrouter": {
             "tier": model.tier.value,
+            "routing_tiers": sorted(t.value for t in model.routing_tiers or (model.tier,)),
             "capabilities": sorted(model.capabilities),
             "context_window": model.context_window,
             "api_base": model.api_base,

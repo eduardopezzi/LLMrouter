@@ -68,6 +68,12 @@ número tem preferência) e `rollout_percentage` controla quanto tráfego ele po
 receber (`0` desativa e `100` libera totalmente). Use em `provider` um provedor
 suportado pelo projeto e configure sua credencial correspondente no `.env`.
 
+`tier` indica a capacidade do modelo. A lista opcional `routing_tiers` define os
+tiers de pedido em que ele concorre na seleção inicial de `auto`. Por exemplo,
+com `tier: 3` e `routing_tiers: [1, 2]`, o modelo concorre diretamente em T1 e T2.
+Sem a lista, o roteador usa o próprio `tier`. As regras de especialistas, variantes
+da mesma família e fallback ainda podem selecionar o modelo em outros tiers.
+
 `benchmark_scores` é opcional e recebe as medições reais publicadas para o
 modelo. Percentuais podem ser informados em `0–100` ou `0–1`; o rating de
 `Codeforces` pode permanecer na escala Elo original. Não preencha notas

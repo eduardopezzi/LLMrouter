@@ -343,11 +343,13 @@ class MultiModelRouter:
         routing_context_chars: int = 12_000,
         scoring_timeout_ms: int = 750,
         fallback_scorer: PromptScoringStrategy | None = None,
+        last_resort_providers: list[Provider] | None = None,
     ) -> None:
         self._registry = registry
         self._scorer = scorer
         self._routing_strategy = RoutingStrategy(strategy)
         self._provider_cost_order = provider_cost_order or ["zai", "ollama"]
+        self._last_resort_providers = frozenset(last_resort_providers or ())
         self._strategy = get_strategy(self._routing_strategy, self._provider_cost_order)
         self._fallback_count = fallback_count
         self._unavailable_providers: set[Provider] = set()
@@ -506,6 +508,32 @@ class MultiModelRouter:
                     "No models are currently available after provider and rollout filtering"
                 )
 
+        last_resort_candidates: list[ModelInfo] = []
+        if self._last_resort_providers:
+            # Preserve the selected tier (or its existing adjacent-tier
+            # fallback) and capability requirements when looking for other
+            # providers. A last-resort provider is only selected first when
+            # no eligible alternative is available.
+            minimum_tier = min(model.tier.value for model in candidates)
+            if constraints.preferred_tier is not None:
+                minimum_tier = max(minimum_tier, constraints.preferred_tier.value)
+            compatible = [
+                model for model in available
+                if model.tier.value >= minimum_tier
+                and constraints.required_capabilities <= model.capabilities
+            ]
+            rollout_eligible = self._apply_rollout(compatible, request)
+            regular_alternatives = [
+                model for model in rollout_eligible
+                if model.provider not in self._last_resort_providers
+            ]
+            last_resort_candidates = [
+                model for model in rollout_eligible
+                if model.provider in self._last_resort_providers
+            ]
+            if regular_alternatives:
+                candidates = _unique_models([*candidates, *regular_alternatives])
+
         # Debug: log candidates
         _logger.debug(
             "Candidates (%d in tier %s): %s",
@@ -521,10 +549,15 @@ class MultiModelRouter:
         ordered = self._apply_client_provider_affinity(ordered, request, constraints)
         ordered = self._apply_peak_pricing_priority(ordered)
         ordered = self._apply_provider_family_preference(ordered)
+        ordered = self._defer_last_resort_providers(ordered)
         primary = ordered[0]
+        normal_fallback_candidates = [
+            model for model in ordered[1:]
+            if model.provider not in self._last_resort_providers
+        ]
         fallbacks = _provider_diverse_fallbacks(
             primary,
-            ordered[1:],
+            normal_fallback_candidates,
             self._fallback_count,
         )
 
@@ -542,12 +575,49 @@ class MultiModelRouter:
             )
             emergency_ordered = self._apply_peak_pricing_priority(emergency_ordered)
             emergency_ordered = self._apply_provider_family_preference(emergency_ordered)
+            if self._last_resort_providers:
+                emergency_ordered = [
+                    model for model in emergency_ordered
+                    if model.provider not in self._last_resort_providers
+                ]
             emergency_fallbacks = _provider_diverse_fallbacks(
                 primary,
                 emergency_ordered,
                 max(1, self._fallback_count),
             )
             fallbacks = _unique_models([*fallbacks, *emergency_fallbacks])
+
+        if self._last_resort_providers and self._fallback_count > 0:
+            last_models = _unique_models([
+                *(model for model in ordered if model.provider in self._last_resort_providers),
+                *last_resort_candidates,
+                *(
+                    model for model in emergency_models
+                    if model.provider in self._last_resort_providers
+                ),
+            ])
+            last_ordered = self._strategy.select(last_models, constraints)
+            last_fallbacks = _provider_diverse_fallbacks(
+                primary, last_ordered, self._fallback_count
+            )
+            fallbacks = _unique_models([*fallbacks, *last_fallbacks])
+
+        if self._last_resort_providers:
+            regular_fallbacks = [
+                model for model in fallbacks
+                if model.provider not in self._last_resort_providers
+            ]
+            last_resort_fallbacks = [
+                model for model in fallbacks
+                if model.provider in self._last_resort_providers
+            ]
+            if self._fallback_count > 0 and last_resort_fallbacks:
+                regular_fallbacks = regular_fallbacks[: self._fallback_count - 1]
+                last_resort_fallbacks = last_resort_fallbacks[:1]
+            else:
+                regular_fallbacks = regular_fallbacks[: self._fallback_count]
+                last_resort_fallbacks = []
+            fallbacks = [*regular_fallbacks, *last_resort_fallbacks]
 
         # Debug: log final selection
         _logger.debug(
@@ -647,7 +717,34 @@ class MultiModelRouter:
         if primary in all_models:
             all_models = [m for m in all_models if m.name != primary.name]
         ordered = _unique_models(self._strategy.select(all_models, constraints))
+        if self._last_resort_providers:
+            regular = [m for m in ordered if m.provider not in self._last_resort_providers]
+            last = [m for m in ordered if m.provider in self._last_resort_providers]
+            regular_fallbacks = _provider_diverse_fallbacks(
+                primary, regular, self._fallback_count
+            )
+            last_fallbacks = _provider_diverse_fallbacks(
+                primary, last, self._fallback_count
+            )
+            if self._fallback_count > 0 and last_fallbacks:
+                regular_fallbacks = regular_fallbacks[: self._fallback_count - 1]
+                last_fallbacks = last_fallbacks[:1]
+            else:
+                regular_fallbacks = regular_fallbacks[: self._fallback_count]
+                last_fallbacks = []
+            return _unique_models([
+                *regular_fallbacks,
+                *last_fallbacks,
+            ])
         return _provider_diverse_fallbacks(primary, ordered, self._fallback_count)
+
+    def _defer_last_resort_providers(self, models: list[ModelInfo]) -> list[ModelInfo]:
+        if not self._last_resort_providers:
+            return models
+        return [
+            *(model for model in models if model.provider not in self._last_resort_providers),
+            *(model for model in models if model.provider in self._last_resort_providers),
+        ]
 
     def _augment_inferred_task_candidates(
         self,

@@ -16,7 +16,7 @@ import yaml
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from llmrouter.core.types import RoutingStrategy
+from llmrouter.core.types import Provider, RoutingStrategy
 
 # ---------------------------------------------------------------------------
 # Sub-config models
@@ -85,6 +85,13 @@ class RoutingConfig(BaseModel):
     provider_cost_order: list[str] = Field(
         default_factory=lambda: ["zai", "ollama"],
         description="Provider preference used to break cost ties.",
+    )
+    last_resort_providers: list[Provider] = Field(
+        default_factory=list,
+        description=(
+            "Providers tried after other eligible providers during automatic routing. "
+            "Explicit model requests keep their requested primary model."
+        ),
     )
     client_provider_affinity: bool = Field(
         default=True,
