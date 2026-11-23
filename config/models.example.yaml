@@ -327,6 +327,24 @@ models:
   #   prompt_cost_per_1m_tokens: 0
   #   completion_cost_per_1m_tokens: 0
   #   cached_prompt_cost_per_1m_tokens: 0
+
+  - name: "ollama/inkling-2-small:cloud"
+    provider: "ollama"
+    model_family: "inkling-2-small"
+    tier: 3
+    api_base: "http://localhost:11434"
+    roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
+    priority: 21
+    rollout_percentage: 0
+    description: "Inkling 2 Small (594B MoE/17B ativos) — coding e trabalho agentico, entrada de imagem, ferramentas e contexto de 1M. Custos Ollama Cloud: US$ 0.30/M input, US$ 0.03/M cache hit, US$ 1.00/M output. Benchmarks do fornecedor no catalogo de evidencias. Disponivel para selecao explicita; rollout automatico inicial em 0%."
+    max_tokens: 128000
+    context_window: 1000000
+    prompt_cost_per_1m_tokens: 0.30
+    completion_cost_per_1m_tokens: 1.00
+    cached_prompt_cost_per_1m_tokens: 0.03
+    benchmark_sources:
+      - "https://thinkingmachines.ai/news/inkling-2-small/"
+      - "https://ollama.com/library/inkling-2-small:cloud"
 defaults:
   temperature: 0.1
   max_retries: 2

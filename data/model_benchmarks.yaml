@@ -1,5 +1,63 @@
-generated_at: '2026-09-10T17:24:46Z'
+generated_at: '2026-11-23T00:00:00Z'
 models:
+  ollama/inkling-2-small:cloud:
+    benchmark_scores:
+      AA Index v5.0:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Artificial Analysis Intelligence Index v5.0.1; provider endpoint and benchmark setup described on the model profile.
+        published_at: '2026-11-05'
+        source_type: benchmark_leaderboard
+        source_url: https://artificialanalysis.ai/models/inkling-2-small
+        value: 30.6
+      DeepSWE v1.1:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Thinking Machines reported result using mini-swe-agent v2.4.6; evaluation at reasoning effort xhigh and temperature 1.0.
+        published_at: '2026-11-05'
+        source_type: official_model_card
+        source_url: https://thinkingmachines.ai/news/inkling-2-small/
+        value: 72.1
+      FrontierCode v2.0:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Thinking Machines reported result using stirrup v0.2.1; evaluation at reasoning effort xhigh and temperature 1.0.
+        published_at: '2026-11-05'
+        source_type: official_model_card
+        source_url: https://thinkingmachines.ai/news/inkling-2-small/
+        value: 25.4
+      PostTrainBench v1.2:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Thinking Machines reported result with Inkling 2 Small in Claude Code; evaluation at reasoning effort xhigh and temperature 1.0.
+        published_at: '2026-11-05'
+        source_type: official_model_card
+        source_url: https://thinkingmachines.ai/news/inkling-2-small/
+        value: 31.9
+      SWE-Atlas v1.1:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Thinking Machines reported result using mini-swe-agent v2.4.6; evaluation at reasoning effort xhigh and temperature 1.0.
+        published_at: '2026-11-05'
+        source_type: official_model_card
+        source_url: https://thinkingmachines.ai/news/inkling-2-small/
+        value: 61.9
+      SWE-Bench Pro v2 Full:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Thinking Machines reported full-set result using mini-swe-agent v2.4.6; evaluation at reasoning effort xhigh and temperature 1.0.
+        published_at: '2026-11-05'
+        source_type: official_model_card
+        source_url: https://thinkingmachines.ai/news/inkling-2-small/
+        value: 97.7
+      SWE-Bench Pro v2 Hard:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Thinking Machines reported hard-subset result using mini-swe-agent v2.4.6; evaluation at reasoning effort xhigh and temperature 1.0.
+        published_at: '2026-11-05'
+        source_type: official_model_card
+        source_url: https://thinkingmachines.ai/news/inkling-2-small/
+        value: 86.3
+      Vibe Code Bench v1.1:
+        collected_at: '2026-11-23T00:00:00Z'
+        methodology: Thinking Machines reported result using OpenHands (vals); evaluation at reasoning effort xhigh and temperature 1.0.
+        published_at: '2026-11-05'
+        source_type: official_model_card
+        source_url: https://thinkingmachines.ai/news/inkling-2-small/
+        value: 81.6
   ollama/deepseek-v4-pro:cloud:
     benchmark_scores:
       GPQA Diamond:
