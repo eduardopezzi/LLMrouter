@@ -326,6 +326,19 @@ models:
       - "https://huggingface.co/zai-org/GLM-5.3/raw/main/README.md"
       - "https://docs.z.ai/guides/llm/glm-5.3"
 
+  - name: "zhipu/glm-5.4"
+    provider: "zai"
+    # A Z.ai anunciou disponibilidade no Coding Plan. A API padrão segue pendente.
+    enabled: false
+    tier: 3
+    roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation"]
+    priority: 3
+    description: "GLM-5.4 via Z.ai — Modelo multimodal com contexto de 1M, saída de 128K e suporte a raciocínio, streaming e chamadas de ferramentas."
+    max_tokens: 131072
+    context_window: 1000000
+    benchmark_sources:
+      - "https://docs.z.ai/guides/llm/glm-5.4"
+
   - name: "zhipu/glm-5-turbo"
     reasoning_modes: ["off", "on"]
     provider: "zai"
