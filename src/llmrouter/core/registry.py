@@ -113,7 +113,12 @@ def _model_from_mapping(
     configured_scores.update((refreshed_scores or {}).get(name, {}))
     benchmark_sources = set(_url_list(item.get("benchmark_sources", [])))
     benchmark_sources.update((refreshed_sources or {}).get(name, ()))
+    modes = item.get("reasoning_modes", [])
+    if not isinstance(modes, list) or any(not isinstance(mode, str) or not mode for mode in modes):
+        raise ValueError(f"{name}: reasoning_modes must be a list of non-empty strings")
     return ModelInfo(
+        reasoning_modes=tuple(dict.fromkeys(modes)),
+        reasoning_mode=item.get("reasoning_mode"),
         name=name,
         provider=provider,
         tier=tier,

@@ -82,14 +82,15 @@ def test_zai_provider_default_base_url() -> None:
     assert provider._base_url == "https://api.z.ai/api/paas/v4"
 
 
-def test_zai_glm53_models_enable_required_reasoning_defaults() -> None:
+@pytest.mark.parametrize(("model", "effort"), [("glm-5.3", "max"), ("glm-5.3-flash", "low")])
+def test_zai_glm53_models_enable_required_reasoning_defaults(model, effort) -> None:
     provider = ZaiProvider(api_key="zai-key")
     request = ChatRequest(model=None, messages=[ChatMessage(role="user", content="hi")])
 
-    payload = provider._build_payload(request, "glm-5.3", stream=False)
+    payload = provider._build_payload(request, model, stream=False)
 
-    assert payload["thinking"] == {"type": "enabled"}
-    assert payload["reasoning_effort"] == "max"
+    assert payload["thinking"]["type"] == "enabled"
+    assert payload["reasoning_effort"] == effort
 
 
 def test_zai_glm53_reasoning_values_are_not_overridden() -> None:
@@ -97,13 +98,13 @@ def test_zai_glm53_reasoning_values_are_not_overridden() -> None:
     request = ChatRequest(
         model=None,
         messages=[ChatMessage(role="user", content="hi")],
-        extra={"thinking": {"type": "enabled"}, "reasoning_effort": "low"},
+        extra={"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
     )
 
     payload = provider._build_payload(request, "glm-5.3-flash", stream=True)
 
     assert payload["thinking"] == {"type": "enabled", "clear_thinking": False}
-    assert payload["reasoning_effort"] == "low"
+    assert payload["reasoning_effort"] == "high"
 
 
 def test_ollama_provider_url_normalization() -> None:

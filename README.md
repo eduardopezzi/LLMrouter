@@ -68,11 +68,22 @@ número tem preferência) e `rollout_percentage` controla quanto tráfego ele po
 receber (`0` desativa e `100` libera totalmente). Use em `provider` um provedor
 suportado pelo projeto e configure sua credencial correspondente no `.env`.
 
+Em **Models**, selecione um modelo e pressione `t` para escolher seu modo
+de raciocínio. Pressione `s` para salvar e reinicie o servidor para aplicar.
+O catálogo declara as opções verificadas em `reasoning_modes` e guarda a
+escolha em `reasoning_mode`. A opção **Padrão** retoma o comportamento padrão
+da integração. Uma configuração explícita na requisição tem precedência.
+
+- Z.ai GLM-5.3 e GLM-5.3-Flash aceitam `low`, `high` e `max`. GLM-5-Turbo aceita ligar ou desligar o raciocínio. [GLM-5.3](https://docs.z.ai/guides/llm/glm-5.3) · [Flash](https://docs.z.ai/guides/vlm/glm-5.3-flash) · [Turbo](https://docs.z.ai/guides/llm/glm-5-turbo)
+- DeepSeek Flash e V4 Pro aceitam `off`, `low`, `high` e `max`. [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)
+- Ollama usa os valores da tag retornados por `/api/show`. O catálogo traduz os controles booleanos para `on` e `off`. Tags sem valores confirmados ficam sem opções no menu. [Ollama Thinking](https://docs.ollama.com/capabilities/thinking) · [API compatível com OpenAI](https://docs.ollama.com/api/openai-compatibility)
+
 `tier` indica a capacidade do modelo. A lista opcional `routing_tiers` define os
 tiers de pedido em que ele concorre na seleção inicial de `auto`. Por exemplo,
-com `tier: 3` e `routing_tiers: [1, 2]`, o modelo concorre diretamente em T1 e T2.
-Sem a lista, o roteador usa o próprio `tier`. As regras de especialistas, variantes
-da mesma família e fallback ainda podem selecionar o modelo em outros tiers.
+com `tier: 1` e `routing_tiers: [1, 2]`, o modelo concorre diretamente em T1 e T2.
+A expansão por especialista ou família respeita a lista explícita. Sem a lista,
+o roteador usa o próprio `tier` na seleção inicial. O fallback entre tiers
+continua disponível quando faltam candidatos elegíveis.
 
 `benchmark_scores` é opcional e recebe as medições reais publicadas para o
 modelo. Percentuais podem ser informados em `0–100` ou `0–1`; o rating de

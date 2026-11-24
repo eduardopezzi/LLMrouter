@@ -374,10 +374,15 @@ async def test_auto_routes_by_configured_tiers(prompt, expected_tier, expected_m
             ModelInfo(
                 name="flash",
                 provider=Provider.ZAI,
-                tier=Tier.T3,
+                model_family="flash",
+                tier=Tier.T1,
                 routing_tiers=frozenset({Tier.T1, Tier.T2}),
             ),
             ModelInfo(name="pro", provider=Provider.ZAI, tier=Tier.T3),
+            ModelInfo(
+                name="cloud-flash", provider=Provider.OLLAMA, model_family="flash",
+                tier=Tier.T3, priority=100,
+            ),
         )
     )
     decision = await MultiModelRouter(registry, PromptScorer()).route(
@@ -385,4 +390,5 @@ async def test_auto_routes_by_configured_tiers(prompt, expected_tier, expected_m
     )
     assert decision.primary.name == expected_model
     assert decision.tier == expected_tier
-    assert decision.primary.tier == Tier.T3
+    if expected_tier == Tier.T3:
+        assert all(model.name != "flash" for model in decision.fallbacks)

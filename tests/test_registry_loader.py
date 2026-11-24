@@ -25,7 +25,7 @@ def test_load_model_registry_from_catalog() -> None:
     zhipu_flash = registry.get("zhipu/glm-5.3-flash")
     assert zhipu_flash is not None
     assert zhipu_flash.model_family == "glm-5.3-flash"
-    assert zhipu_flash.tier == Tier.T3
+    assert zhipu_flash.tier == Tier.T1
     assert zhipu_flash in registry.by_tier(Tier.T1)
     assert zhipu_flash in registry.by_tier(Tier.T2)
     assert zhipu_flash not in registry.by_tier(Tier.T3)

@@ -6,9 +6,11 @@ processing and safe sharing across async tasks.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
+
+_REASONING_FIELDS = {"thinking", "think", "reasoning", "reasoning_effort"}
 
 
 class Provider(str, Enum):
@@ -115,9 +117,13 @@ class ModelInfo:
     benchmark_scores: tuple[tuple[str, float], ...] = ()
     benchmark_sources: tuple[str, ...] = ()
     routing_tiers: frozenset[Tier] = field(default_factory=frozenset)
+    reasoning_modes: tuple[str, ...] = ()
+    reasoning_mode: str | None = None
 
     def __post_init__(self) -> None:
-        """Validate rollout_percentage range."""
+        """Validate the model defaults."""
+        if self.reasoning_mode is not None and self.reasoning_mode not in self.reasoning_modes:
+            raise ValueError(f"{self.name}: unsupported reasoning_mode {self.reasoning_mode!r}")
         if not 0.0 <= self.rollout_percentage <= 100.0:
             raise ValueError(
                 f"rollout_percentage must be between 0 and 100, "
@@ -128,6 +134,20 @@ class ModelInfo:
     def cost_ratio(self) -> float:
         """Approximate cost ratio (input + output weighted equally)."""
         return self.cost_per_1k_input + self.cost_per_1k_output
+
+    def apply_reasoning(self, request: ChatRequest) -> ChatRequest:
+        """Use the catalog choice unless the client already controls reasoning."""
+        mode = self.reasoning_mode
+        if mode is None or request.has_reasoning_controls:
+            return request
+        extra = dict(request.extra)
+        if self.provider is Provider.ZAI:
+            extra["thinking"] = {"type": "disabled" if mode == "off" else "enabled"}
+            if mode not in {"on", "off"}:
+                extra["reasoning_effort"] = mode
+        else:
+            extra["reasoning_effort"] = {"off": "none", "on": "low"}.get(mode, mode)
+        return replace(request, extra=extra)
 
     @property
     def provider_model_name(self) -> str:
@@ -177,6 +197,10 @@ class ChatRequest:
     extra: dict[str, Any] = field(default_factory=dict)
     resource_policy: Any | None = None
     budget_remaining_usd: float | None = None
+
+    @property
+    def has_reasoning_controls(self) -> bool:
+        return bool(_REASONING_FIELDS.intersection(self.extra))
 
     @property
     def prompt_text(self) -> str:

@@ -473,11 +473,18 @@ class MultiModelRouter:
 
         # Get candidate models for the recommended tier
         candidates = self._get_candidates(scoring.tier, constraints)
-        candidates = self._augment_inferred_task_candidates(candidates, scoring, constraints)
         available = self._available_models(self._registry.all())
+        # Expanding the candidate pool must respect explicitly configured routing tiers.
+        expansion_pool = [
+            model for model in available
+            if not model.routing_tiers or scoring.tier in model.routing_tiers
+        ]
+        candidates = self._augment_inferred_task_candidates(
+            candidates, scoring, constraints, expansion_pool
+        )
         candidates = self._augment_provider_family_candidates(
             candidates,
-            available,
+            expansion_pool,
             constraints,
         )
 
@@ -518,7 +525,7 @@ class MultiModelRouter:
             if constraints.preferred_tier is not None:
                 minimum_tier = max(minimum_tier, constraints.preferred_tier.value)
             compatible = [
-                model for model in available
+                model for model in expansion_pool
                 if model.tier.value >= minimum_tier
                 and constraints.required_capabilities <= model.capabilities
             ]
@@ -751,6 +758,7 @@ class MultiModelRouter:
         candidates: list[ModelInfo],
         scoring: ScoringResult,
         constraints: RoutingConstraints,
+        available: list[ModelInfo],
     ) -> list[ModelInfo]:
         """Include specialists when the inferred task has none in the selected tier."""
         if not self._intent_routing or constraints.required_capabilities:
@@ -758,9 +766,7 @@ class MultiModelRouter:
         task_type = _inferred_task_type(scoring)
         if task_type is None or any(task_type in model.capabilities for model in candidates):
             return candidates
-        specialists = self._available_models(
-            [model for model in self._registry.all() if task_type in model.capabilities]
-        )
+        specialists = [model for model in available if task_type in model.capabilities]
         return _unique_models([*specialists, *candidates]) if specialists else candidates
 
     @staticmethod

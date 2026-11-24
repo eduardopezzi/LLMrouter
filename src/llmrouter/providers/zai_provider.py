@@ -61,5 +61,5 @@ class ZaiProvider(OpenAICompatibleProvider):
             payload["thinking"] = thinking
             effort = payload.get("reasoning_effort")
             if effort not in {"low", "high", "max"}:
-                payload["reasoning_effort"] = "max"
+                payload["reasoning_effort"] = "low" if model == "glm-5.3-flash" else "max"
         return payload

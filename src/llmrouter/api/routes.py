@@ -1073,6 +1073,8 @@ async def _stream_response(
     if (
         semantic_cache is not None
         and getattr(semantic_cache, "stream_cache_enabled", False)
+        and not selected_model.reasoning_mode
+        and not chat_request.has_reasoning_controls
         and selected_provider is not None
         and probe_soft_circuit is not None
     ):
@@ -1195,6 +1197,8 @@ async def _stream_response(
             if (
                 semantic_cache is not None
                 and getattr(semantic_cache, "stream_cache_enabled", False)
+                and not selected_model.reasoning_mode
+                and not chat_request.has_reasoning_controls
                 and saw_output
                 and _stream_finished_cleanly
             ):
@@ -2177,6 +2181,8 @@ def _model_payload(model: ModelInfo) -> dict[str, object]:
         "owned_by": model.provider.value,
         "llmrouter": {
             "tier": model.tier.value,
+            "reasoning_modes": list(model.reasoning_modes),
+            "reasoning_mode": model.reasoning_mode,
             "routing_tiers": sorted(t.value for t in model.routing_tiers or (model.tier,)),
             "capabilities": sorted(model.capabilities),
             "context_window": model.context_window,

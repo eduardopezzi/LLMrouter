@@ -229,9 +229,12 @@ class ProviderProxy:
                     i + 1,
                     len(attempts),
                 )
-                response = await provider.chat_completion(request, model.provider_model_name)
+                attempt_request = model.apply_reasoning(request)
+                response = await provider.chat_completion(
+                    attempt_request, model.provider_model_name
+                )
                 if i == 0:
-                    await self._store_cached_response(request, model, response)
+                    await self._store_cached_response(attempt_request, model, response)
                 await self._record_success(model, response)
                 await _record_fallback_metric(
                     fallback_used=i > 0,
@@ -286,6 +289,7 @@ class ProviderProxy:
         """
         if request.stream:
             return None
+        request = decision.primary.apply_reasoning(request)
         cached: ChatResponse | None = None
         if self._cache_manager is not None:
             cached = await self._cache_manager.get(
@@ -293,7 +297,7 @@ class ProviderProxy:
                 decision.primary.name,
                 decision.primary.tier,
             )
-        if cached is not None or self._semantic_cache is None:
+        if cached is not None or self._semantic_cache is None or request.has_reasoning_controls:
             return cached
         # Exact miss — only now pay the embedding latency.
         return await self._semantic_cache.lookup_prompt(
@@ -331,7 +335,7 @@ class ProviderProxy:
                 response,
                 cost_usd=self._estimate_cost(model, response.usage),
             )
-        if self._semantic_cache is None:
+        if self._semantic_cache is None or request.has_reasoning_controls:
             return
         if self._semantic_background_store:
             self._semantic_store_tasks = [
@@ -426,7 +430,10 @@ class ProviderProxy:
                 )
                 fallback_attempted = fallback_attempted or i > 0
                 attempt_started = time.perf_counter()
-                async for chunk in provider.stream_completion(request, model.provider_model_name):
+                attempt_request = model.apply_reasoning(request)
+                async for chunk in provider.stream_completion(
+                    attempt_request, model.provider_model_name
+                ):
                     yield chunk
                 elapsed_ms = (time.perf_counter() - attempt_started) * 1000
                 await self._record_stream_success(model, elapsed_ms)

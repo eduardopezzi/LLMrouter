@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from llmrouter.core.benchmark_scorer import _normalize_benchmark_value, score_model
-from llmrouter.core.registry import ModelRegistry
+from llmrouter.core.registry import ModelRegistry, load_model_registry
 from llmrouter.core.types import ChatMessage, ChatRequest, ModelInfo, Provider, RoutingStrategy
 from llmrouter.utils import resolve_api_key
 
@@ -343,6 +343,33 @@ def set_model_enabled(models_file: str | Path, model_name: str, enabled: bool) -
             target.name_line_index + 1,
             f"{_line_indent(name_line)}  enabled: {value}",
         )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def set_model_reasoning_modes(
+    models_file: str | Path, selections: dict[str, str | None],
+) -> None:
+    """Save selected reasoning defaults while preserving the catalog layout."""
+    path = Path(models_file)
+    registry = load_model_registry(path, include_disabled=True)
+    blocks = _model_blocks(path, include_disabled=True)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index in reversed(range(len(blocks))):
+        block = blocks[index]
+        if block.name not in selections:
+            continue
+        mode = selections[block.name]
+        model = registry.get(block.name)
+        if model is None or (mode is not None and mode not in model.reasoning_modes):
+            raise ValueError(f"{block.name}: invalid reasoning mode {mode!r}")
+        start = block.name_line_index + 1
+        end = blocks[index + 1].name_line_index if index + 1 < len(blocks) else len(lines)
+        indent = _line_indent(lines[start - 1]) + "  "
+        for line_index in range(end - 1, start - 1, -1):
+            if lines[line_index].startswith(f"{indent}reasoning_mode:"):
+                del lines[line_index]
+        if mode is not None:
+            lines.insert(start, f"{indent}reasoning_mode: {json.dumps(mode)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1874,7 +1901,6 @@ def _reload_registry(
     benchmark_catalog_path: str | Path | None = None,
     include_disabled: bool = False,
 ) -> ModelRegistry:
-    from llmrouter.core.registry import load_model_registry
 
     return load_model_registry(
         models_file,

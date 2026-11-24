@@ -29,6 +29,7 @@ models:
   # Ollama — Provedor primário (sempre disponível)
   # ==================================================================
   - name: "ollama/kimi-k3.1-pro:cloud"
+    reasoning_modes: ["off", "low", "medium", "high", "max"]
     enabled: false
     provider: "ollama"
     tier: 3
@@ -69,6 +70,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0.015
 
   - name: "ollama/kimi-k2.7-code:cloud"
+    reasoning_modes: ["off", "on"]
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
@@ -82,6 +84,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/deepseek-v4-pro:cloud"
+    reasoning_modes: ["off", "low", "high", "max"]
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
@@ -109,6 +112,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/deepseek-v4.1-flash:cloud"
+    reasoning_modes: ["off", "low", "high", "max"]
     provider: "ollama"
     model_family: "deepseek-v4.1-flash"
     tier: 3
@@ -152,6 +156,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/glm-5.2:cloud"
+    reasoning_modes: ["off", "high", "max"]
     provider: "ollama"
     tier: 3
     api_base: "http://localhost:11434"
@@ -165,6 +170,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/glm-5.3-flash:cloud"
+    reasoning_modes: ["low", "high", "max"]
     enabled: true
     provider: "ollama"
     model_family: "glm-5.3-flash"
@@ -209,6 +215,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/gemma4:31b"
+    reasoning_modes: ["off", "on"]
     enabled: false
     provider: "ollama"
     tier: 2
@@ -253,6 +260,7 @@ models:
   # DeepSeek — Provedor OpenAI-compatible
   # ==================================================================
   - name: "deepseek/deepseek-flash"
+    reasoning_modes: ["off", "low", "high", "max"]
     provider: "deepseek"
     tier: 3
     roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization", "security_audit"]
@@ -265,6 +273,7 @@ models:
     cached_prompt_cost_per_1m_tokens: 0.006
 
   - name: "deepseek/deepseek-v4-pro"
+    reasoning_modes: ["off", "low", "high", "max"]
     provider: "deepseek"
     tier: 3
     roles: ["architecture", "review", "security_audit", "fix"]
@@ -280,13 +289,15 @@ models:
   # Z AI (Zhipu) — Provedor de fallback
   # ==================================================================
   - name: "zhipu/glm-5.3-flash"
+    reasoning_modes: ["low", "high", "max"]
+    reasoning_mode: "low"
     provider: "zai"
     model_family: "glm-5.3-flash"
-    tier: 3
+    tier: 1
     routing_tiers: [1, 2]
     roles: ["summarization", "documentation", "test_generation", "fix", "refactoring", "review", "architecture", "security_audit", "migration"]
     priority: 1
-    description: "GLM-5.3-Flash via Z.ai (glm-5.3-flash) — Modelo multimodal para texto, imagens, vídeo e arquivos; contexto de 1M e saída de 128K. Recomendado pela Z.ai com temperature=1, top_p=0.95 e reasoning_effort=max. Preferência padrão para prompts simples e tarefas multimodais."
+    description: "GLM-5.3-Flash via Z.ai (glm-5.3-flash) — Modelo multimodal para texto, imagens, vídeo e arquivos; contexto de 1M e saída de 128K. O roteador usa reasoning_effort=low por padrão em T1 e T2. Preferência padrão para prompts simples e tarefas multimodais."
     max_tokens: 131072
     context_window: 1000000
     rollout_percentage: 100
@@ -298,6 +309,8 @@ models:
       - "https://docs.z.ai/guides/vlm/glm-5.3-flash"
 
   - name: "zhipu/glm-5.3"
+    reasoning_modes: ["low", "high", "max"]
+    reasoning_mode: "max"
     provider: "zai"
     tier: 3
     roles: ["architecture", "review", "security_audit", "fix", "refactoring", "migration", "test_generation"]
@@ -312,6 +325,21 @@ models:
     benchmark_sources:
       - "https://huggingface.co/zai-org/GLM-5.3/raw/main/README.md"
       - "https://docs.z.ai/guides/llm/glm-5.3"
+
+  - name: "zhipu/glm-5-turbo"
+    reasoning_modes: ["off", "on"]
+    provider: "zai"
+    enabled: false
+    tier: 3
+    roles: ["fix", "refactoring", "test_generation"]
+    priority: 4
+    description: "GLM-5-Turbo via Z.ai para tarefas de texto com ferramentas."
+    context_window: 200000
+    max_tokens: 128000
+    # Estimativas históricas em USD por milhão de tokens.
+    prompt_cost_per_1m_tokens: 1.20
+    completion_cost_per_1m_tokens: 4.00
+    cached_prompt_cost_per_1m_tokens: 0.24
 
   # ==================================================================
   # Exemplo de modelo em Canary (rollout gradual)
@@ -330,6 +358,7 @@ models:
   #   cached_prompt_cost_per_1m_tokens: 0
 
   - name: "ollama/inkling-2-small:cloud"
+    reasoning_modes: ["off", "low", "medium", "high", "max"]
     provider: "ollama"
     model_family: "inkling-2-small"
     tier: 3

@@ -710,3 +710,24 @@ async def test_embedder_failure_proceeds_to_provider(tmp_path) -> None:
     assert response.model == "gpt-4o"
     assert provider.calls == 1
     assert semantic.stats()["semantic_unavailable"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_catalog_reasoning_changes_exact_cache_key(tmp_path) -> None:
+    from dataclasses import replace
+
+    provider = StubProvider("zai")
+    cache = CacheManager(SQLiteCacheBackend(str(tmp_path / "reasoning.db")))
+    proxy = ProviderProxy({Provider.ZAI: provider}, cache_manager=cache)
+    model = replace(
+        _model("zhipu/glm-5.3-flash", Provider.ZAI),
+        reasoning_modes=("low", "high"),
+        reasoning_mode="low",
+    )
+    await proxy.chat_completion(_request(), _decision(model))
+    high = replace(model, reasoning_mode="high")
+    first_high = await proxy.chat_completion(_request(), _decision(high))
+    second_high = await proxy.chat_completion(_request(), _decision(high))
+    assert first_high.usage.cache_status != "local_hit"
+    assert second_high.usage.cache_status == "local_hit"
+    assert high.apply_reasoning(_request()).extra["reasoning_effort"] == "high"

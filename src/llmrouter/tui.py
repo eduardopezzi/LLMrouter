@@ -15,10 +15,12 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    OptionList,
     Static,
     TabbedContent,
     TabPane,
 )
+from textual.widgets.option_list import Option
 
 from llmrouter.cli_panel import (
     _model_blocks,
@@ -28,6 +30,7 @@ from llmrouter.cli_panel import (
     render_usage_report,
     set_model_enabled,
     set_model_priority_order,
+    set_model_reasoning_modes,
     set_provider_cost_order,
     usage_report,
 )
@@ -47,6 +50,7 @@ class HelpScreen(ModalScreen[None]):
             "q / k    subir modelo na prioridade\n"
             "a / j    descer modelo na prioridade\n"
             "e        alternar enabled/disabled\n"
+            "t        escolher raciocínio do modelo\n"
             "s        salvar alterações\n"
             "r        recarregar do disco\n"
             "x        restaurar ordem original do YAML\n"
@@ -59,6 +63,33 @@ class HelpScreen(ModalScreen[None]):
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
         if event.key in {"escape", "q"}:
             self.dismiss(None)
+
+
+class ReasoningScreen(ModalScreen[tuple[str | None] | None]):
+    """Select a default from the model's supported reasoning modes."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+    DEFAULT_CSS = """
+    ReasoningScreen { align: center middle; }
+    ReasoningScreen OptionList { width: 45; height: auto; max-height: 80%; }
+    """
+
+    def __init__(self, modes: tuple[str, ...], current: str | None) -> None:
+        super().__init__()
+        self.modes = (None, *modes)
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        options = OptionList(*(Option(mode or "Padrão", id=str(i))
+                               for i, mode in enumerate(self.modes)))
+        options.highlighted = self.modes.index(self.current)
+        yield options
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss((self.modes[event.option_index],))
+
+    def action_dismiss(self) -> None:
+        self.dismiss(None)
 
 
 class LLMrouterTUI(App[None]):
@@ -124,6 +155,7 @@ class LLMrouterTUI(App[None]):
         Binding("a", "move_down", "Later", priority=True),
         Binding("j", "move_down", "Later", show=False, priority=True),
         Binding("e", "toggle_enabled", "Enable/disable", priority=True),
+        Binding("t", "reasoning", "Raciocínio", priority=True),
         Binding("s", "save", "Save", priority=True),
         Binding("x", "reset_order", "Reset order", priority=True),
         Binding("r", "refresh", "Reload", priority=True),
@@ -147,6 +179,7 @@ class LLMrouterTUI(App[None]):
         self._order: list[str] = []
         self._enabled: dict[str, bool] = {}
         self._original_enabled: dict[str, bool] = {}
+        self._reasoning_changes: dict[str, str | None] = {}
         self._dirty = False
 
     def compose(self) -> ComposeResult:
@@ -168,7 +201,7 @@ class LLMrouterTUI(App[None]):
                     )
                 yield Label(
                     "↑/↓ seleciona | q/k sobe | a/j desce | e alterna status | "
-                    "s salva | r recarrega | x restaura ordem",
+                    "t escolhe raciocínio | s salva | r recarrega | x restaura ordem",
                     id="models-help",
                 )
                 yield Static(id="models-status")
@@ -213,6 +246,7 @@ class LLMrouterTUI(App[None]):
         self._order = [row.name for row in rows]
         self._enabled = {row.name: row.enabled for row in rows}
         self._original_enabled = dict(self._enabled)
+        self._reasoning_changes.clear()
         self._dirty = False
 
     def _refresh_all(self) -> None:
@@ -251,6 +285,7 @@ class LLMrouterTUI(App[None]):
         table.add_column("Provider", width=10)
         table.add_column("Model", width=42)
         table.add_column("Tier", width=7)
+        table.add_column("Raciocínio", width=12)
         table.add_column("Nota (0-100)", width=11)
         table.add_column("Média tokens/requisição (6h)", width=28)
         table.add_column("Status", width=10)
@@ -283,6 +318,8 @@ class LLMrouterTUI(App[None]):
                 model.provider.value,
                 name,
                 f"T{model.tier.value}",
+                (self._reasoning_changes.get(name, model.reasoning_mode) or "Padrão")
+                if model.reasoning_modes else "—",
                 f"{score.strategy_score * 100:.0f}/100",
                 average_tokens,
                 status,
@@ -328,6 +365,25 @@ class LLMrouterTUI(App[None]):
         self._dirty = True
         self._update_models_table(index)
 
+    def action_reasoning(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        name = self._order[index]
+        model = self.catalog.get(name)
+        if model is None or not model.reasoning_modes:
+            self.notify("Sem opções de raciocínio verificadas para este modelo.")
+            return
+
+        def apply(selection: tuple[str | None] | None) -> None:
+            if selection is not None:
+                self._reasoning_changes[name] = selection[0]
+                self._dirty = True
+                self._update_models_table(index)
+
+        current = self._reasoning_changes.get(name, model.reasoning_mode)
+        self.push_screen(ReasoningScreen(model.reasoning_modes, current), apply)
+
     def action_save(self) -> None:
         if not self._order:
             return
@@ -336,6 +392,8 @@ class LLMrouterTUI(App[None]):
             for name, enabled in self._enabled.items():
                 if enabled != self._original_enabled[name]:
                     set_model_enabled(self.models_file, name, enabled)
+            if self._reasoning_changes:
+                set_model_reasoning_modes(self.models_file, self._reasoning_changes)
         except Exception as exc:
             self.notify(f"Falha ao salvar: {exc}", severity="error")
             return

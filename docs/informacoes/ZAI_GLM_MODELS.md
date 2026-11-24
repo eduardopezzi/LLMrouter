@@ -2,8 +2,17 @@
 
 O LLMrouter usa a API OpenAI-compatible da Z.ai em
 `https://api.z.ai/api/paas/v4`. Configure `ZAI_API_KEY` no ambiente. Os nomes
-canônicos no catálogo são `zhipu/glm-5.3-flash` e `zhipu/glm-5.3`; o prefixo
+canônicos no catálogo são `zhipu/glm-5.3-flash`, `zhipu/glm-5.3` e `zhipu/glm-5-turbo`; o prefixo
 `zhipu/` é removido antes de enviar o nome à Z.ai.
+
+## Ativar o GLM-5-Turbo
+
+No `llmrouter tui`, abra **Models** com `3`, selecione `zhipu/glm-5-turbo`,
+pressione `e` para habilitar e `s` para salvar. Reinicie o servidor para
+carregar o catálogo salvo. Para escolher o Turbo como modelo primário, envie
+`"model": "zhipu/glm-5-turbo"` em `/v1/chat/completions`. O modelo vem
+desabilitado por padrão. A Z.ai o documenta como um modelo de texto com suporte
+a streaming e chamadas de ferramentas. [Guia do GLM-5-Turbo](https://docs.z.ai/guides/llm/glm-5-turbo)
 
 ## Política de roteamento
 
@@ -12,11 +21,10 @@ canônicos no catálogo são `zhipu/glm-5.3-flash` e `zhipu/glm-5.3`; o prefixo
 | Simples/rápido | `zhipu/glm-5.3-flash` | Resumos, documentação, classificação, extração, análise de arquivos/imagens, UI/frontend, automações curtas e geração de testes simples. |
 | Complexo/long-horizon | `zhipu/glm-5.3` | Arquitetura, auditoria de segurança, debugging, migrações, refatorações grandes, coding agentic, terminal e implementação/testes multi-etapa. |
 
-O Flash está no tier 1 com prioridade 1. O GLM-5.3 está no tier 3 com
-prioridade 1. Assim, a classificação de complexidade seleciona o Flash para
-prompts simples e o GLM-5.3 para prompts complexos; ambos continuam disponíveis
-como fallback. O provedor envia automaticamente `thinking.type=enabled` e
-`reasoning_effort=max` para esses dois IDs, como exigido pela documentação atual.
+O Flash tem tier principal T1 e participa do roteamento em T1 e T2.
+O GLM-5.3 tem tier T3. Ambos usam `thinking.type=enabled`. Por padrão, o
+roteador envia `reasoning_effort=low` para o Flash e `max` para o GLM-5.3.
+A requisição pode definir o esforço explicitamente.
 
 ## Benchmark publicado
 

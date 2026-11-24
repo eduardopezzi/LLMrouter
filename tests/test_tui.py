@@ -38,3 +38,30 @@ async def test_tui_reorders_and_toggles_catalog_models(tmp_path) -> None:
     assert "name: model-a" in body
     assert body.count("enabled: false") == 2
     assert app._order == ["model-b", "model-a"]
+
+
+@pytest.mark.asyncio
+async def test_tui_saves_and_resets_model_reasoning(tmp_path) -> None:
+    from llmrouter.core.registry import load_model_registry
+
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        "models:\n"
+        "  - name: zhipu/glm-5.3-flash\n"
+        "    provider: zai\n"
+        '    reasoning_modes: ["low", "high", "max"]\n'
+        '    reasoning_mode: "low"\n',
+        encoding="utf-8",
+    )
+
+    app = LLMrouterTUI(Settings(), models_file=models_file)
+    async with app.run_test() as pilot:
+        await pilot.press("t", "down", "enter", "s")
+        await pilot.pause()
+        model = load_model_registry(models_file).get("zhipu/glm-5.3-flash")
+        assert model is not None and model.reasoning_mode == "high"
+
+        await pilot.press("t", "home", "enter", "s")
+        await pilot.pause()
+        model = load_model_registry(models_file).get("zhipu/glm-5.3-flash")
+        assert model is not None and model.reasoning_mode is None
