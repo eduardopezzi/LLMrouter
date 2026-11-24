@@ -65,3 +65,41 @@ async def test_tui_saves_and_resets_model_reasoning(tmp_path) -> None:
         await pilot.pause()
         model = load_model_registry(models_file).get("zhipu/glm-5.3-flash")
         assert model is not None and model.reasoning_mode is None
+
+
+@pytest.mark.asyncio
+async def test_tui_shows_models_before_usage_is_ready(tmp_path, monkeypatch) -> None:
+    from threading import Event
+
+    from textual.widgets import DataTable, TabbedContent
+
+    from llmrouter import tui
+
+    release = Event()
+    calls = []
+
+    def load_usage(*args, **kwargs):
+        calls.append(1)
+        release.wait(timeout=5)
+        return report
+
+    report = tui.usage_report(tmp_path / "missing.db")
+    monkeypatch.setattr(tui, "usage_report", load_usage)
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        "models:\n  - name: flash\n    provider: zai\n"
+        "    tier: 1\n    routing_tiers: [1, 2]\n",
+        encoding="utf-8",
+    )
+    app = LLMrouterTUI(Settings(), models_file=models_file)
+    async with app.run_test() as pilot:
+        try:
+            assert app.query_one(TabbedContent).active == "models"
+            assert "T1, T2" in app.query_one(DataTable).get_row("flash")
+            assert app._usage is None
+            await pilot.press("4", "3")
+        finally:
+            release.set()
+        await app.workers.wait_for_complete()
+        assert app._usage == report
+        assert len(calls) == 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -24,10 +25,10 @@ from textual.widgets.option_list import Option
 
 from llmrouter.cli_panel import (
     _model_blocks,
+    format_usage_report,
     model_priorities,
     render_current_settings,
     render_panel_summary,
-    render_usage_report,
     set_model_enabled,
     set_model_priority_order,
     set_model_reasoning_modes,
@@ -180,6 +181,7 @@ class LLMrouterTUI(App[None]):
         self._enabled: dict[str, bool] = {}
         self._original_enabled: dict[str, bool] = {}
         self._reasoning_changes: dict[str, str | None] = {}
+        self._usage: dict[str, object] | None = None
         self._dirty = False
 
     def compose(self) -> ComposeResult:
@@ -216,6 +218,7 @@ class LLMrouterTUI(App[None]):
         table.cursor_type = "row"
         self._load_catalog()
         self._update_models_table()
+        self.call_after_refresh(self._start_usage_refresh)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._refresh_tab(event.pane.id or "")
@@ -229,6 +232,7 @@ class LLMrouterTUI(App[None]):
     def action_refresh(self) -> None:
         self._load_catalog(reload=True)
         self._refresh_tab(self.query_one(TabbedContent).active)
+        self._start_usage_refresh()
         self.notify("Catálogo recarregado")
 
     def _load_catalog(self, *, reload: bool = False) -> None:
@@ -284,7 +288,7 @@ class LLMrouterTUI(App[None]):
         table.add_column("#", width=5)
         table.add_column("Provider", width=10)
         table.add_column("Model", width=42)
-        table.add_column("Tier", width=7)
+        table.add_column("Tiers", width=12)
         table.add_column("Raciocínio", width=12)
         table.add_column("Nota (0-100)", width=11)
         table.add_column("Média tokens/requisição (6h)", width=28)
@@ -293,7 +297,7 @@ class LLMrouterTUI(App[None]):
         table.add_column("Roles", width=38)
 
         models = {model.name: model for model in self.catalog.all()}
-        usage = usage_report(self.settings.evaluator.db_path, hours=6)
+        usage = self._usage or {}
         usage_by_model = {
             str(row["model"]): row
             for row in usage.get("models", [])
@@ -317,7 +321,9 @@ class LLMrouterTUI(App[None]):
                 str(index),
                 model.provider.value,
                 name,
-                f"T{model.tier.value}",
+                ", ".join(f"T{tier.value}" for tier in sorted(
+                    model.routing_tiers or (model.tier,), key=lambda tier: tier.value
+                )),
                 (self._reasoning_changes.get(name, model.reasoning_mode) or "Padrão")
                 if model.reasoning_modes else "—",
                 f"{score.strategy_score * 100:.0f}/100",
@@ -482,10 +488,21 @@ class LLMrouterTUI(App[None]):
             self.query_one("#models-status", Static).update(summary or "Catálogo atualizado")
             self.notify("Modelos e características atualizados")
 
-    def _update_usage(self) -> None:
-        self.query_one("#usage-content", Static).update(
-            render_usage_report(self.settings.evaluator.db_path, hours=6)
+    def _start_usage_refresh(self) -> None:
+        self.run_worker(self._load_usage(), group="usage", exclusive=True)
+
+    async def _load_usage(self) -> None:
+        self._usage = await asyncio.to_thread(
+            usage_report, self.settings.evaluator.db_path, hours=6
         )
+        self._update_models_table(self._selected_index())
+        self._update_usage()
+
+    def _update_usage(self) -> None:
+        content = "Carregando estatísticas…" if self._usage is None else format_usage_report(
+            self._usage, hours=6
+        )
+        self.query_one("#usage-content", Static).update(content)
 
 
 def run_tui(

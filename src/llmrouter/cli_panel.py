@@ -745,7 +745,11 @@ def usage_report(
 
 def render_usage_report(db_path: str | Path, *, hours: int = 6) -> str:
     """Render the recent usage report for the interactive panel."""
-    report = usage_report(db_path, hours=hours)
+    return format_usage_report(usage_report(db_path, hours=hours), hours=hours)
+
+
+def format_usage_report(report: dict[str, object], *, hours: int = 6) -> str:
+    """Format an already loaded usage report."""
     lines = [
         f"LLMrouter usage report (last {hours}h)",
         f"  database: {report['database']}",
