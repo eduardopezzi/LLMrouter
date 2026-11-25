@@ -20,7 +20,7 @@ def test_load_model_registry_from_catalog() -> None:
     assert first.cost_per_1k_input == pytest.approx(0.15 / 1000)
     assert first.api_base == "http://localhost:11434"
     assert first.max_tokens == 131072
-    assert first.context_window == 1000000
+    assert first.context_window == 1_048_576
 
     zhipu_flash = registry.get("zhipu/glm-5.3-flash")
     assert zhipu_flash is not None

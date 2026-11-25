@@ -38,7 +38,7 @@ models:
     priority: 20
     description: "Kimi K3.1 Pro (2.8T) — Modelo multimodal agêntico nativo com contexto de 1M, aprimorado para coding, pesquisa e precisão factual. Indicado para arquitetura, revisão profunda, refatoração, correções complexas, migrações e geração de testes em longas sessões de engenharia."
     max_tokens: 128000
-    context_window: 1000000
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 2.0
     completion_cost_per_1m_tokens: 10.0
     cached_prompt_cost_per_1m_tokens: 0.20
@@ -49,9 +49,9 @@ models:
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "test_generation", "documentation", "summarization", "refactoring"]
     priority: 2
-    description: "MiniMax-M3 — 1M+ contexto, excelente para tarefas de contexto longo como documentação, revisão abrangente e refatoração de bases extensas."
+    description: "MiniMax-M3 — contexto de 512K no Ollama Cloud, excelente para tarefas de contexto longo como documentação, revisão abrangente e refatoração de bases extensas."
     max_tokens: 393216
-    context_window: 1048576
+    context_window: 512000
     prompt_cost_per_1m_tokens: 0.60
     completion_cost_per_1m_tokens: 2.40
     cached_prompt_cost_per_1m_tokens: 0.12
@@ -63,8 +63,8 @@ models:
     api_base: "http://localhost:11434"
     roles: ["review", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization"]
     priority: 2
-    description: "MiniMax M3.1 Flash — modelo Flash multimodal com visão e ferramentas, voltado a coding e tarefas agênticas; contexto de 976K. Hospedado nos EUA com zero retenção de dados. Grátis no Ollama até 22/10/2026 às 23:59 UTC; preço padrão após a promoção: US$ 0,15/M tokens de entrada e US$ 0,60/M de saída."
-    context_window: 976000
+    description: "MiniMax M3.1 Flash — modelo Flash multimodal com visão e ferramentas, voltado a coding e tarefas agênticas; contexto de 1M no Ollama Cloud. Hospedado nos EUA com zero retenção de dados. Grátis no Ollama até 22/10/2026 às 23:59 UTC; preço padrão após a promoção: US$ 0,15/M tokens de entrada e US$ 0,60/M de saída."
+    context_window: 1000000
     prompt_cost_per_1m_tokens: 0.15
     completion_cost_per_1m_tokens: 0.60
     cached_prompt_cost_per_1m_tokens: 0.015
@@ -92,7 +92,7 @@ models:
     priority: 6
     description: "DeepSeek-V4-Pro — Raciocínio lógico (MoE/MLA) impecável para auditoria de segurança e System Design."
     max_tokens: 393216
-    context_window: 1000000
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 1.32
     completion_cost_per_1m_tokens: 3.96
     cached_prompt_cost_per_1m_tokens: 0.044
@@ -122,7 +122,7 @@ models:
     rollout_percentage: 0
     description: "DeepSeek-V4.1-Flash — modelo multimodal de raciocínio e ferramentas, com contexto de 1M, para coding agêntico e tarefas longas."
     max_tokens: 393216
-    context_window: 1000000
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 0.3
     completion_cost_per_1m_tokens: 1.2
     cached_prompt_cost_per_1m_tokens: 0.006
@@ -137,7 +137,7 @@ models:
     rollout_percentage: 0
     description: "Mistral Large 4 — modelo multimodal generalista com contexto de 1M, raciocínio, coding, ferramentas e fluxos agênticos."
     max_tokens: 131072
-    context_window: 1000000
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 1.36
     completion_cost_per_1m_tokens: 4.18
     cached_prompt_cost_per_1m_tokens: 0.14
@@ -164,7 +164,7 @@ models:
     priority: 7
     description: "GLM-5.2 — Alta densidade de token. Perfeito para converter bases inteiras de código e aplicar patches."
     max_tokens: 131072
-    context_window: 999424
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 0
     completion_cost_per_1m_tokens: 0
     cached_prompt_cost_per_1m_tokens: 0
@@ -181,7 +181,7 @@ models:
     rollout_percentage: 100
     description: "GLM-5.3 Flash — 1M de contexto, multimodal e otimizado para coding/agentes com custo-benefício superior ao GLM-5.2."
     max_tokens: 131072
-    context_window: 1000000
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 0.15
     completion_cost_per_1m_tokens: 0.50
     cached_prompt_cost_per_1m_tokens: 0.03
@@ -266,8 +266,8 @@ models:
     roles: ["architecture", "review", "fix", "refactoring", "migration", "test_generation", "documentation", "summarization", "security_audit"]
     priority: 2
     description: "DeepSeek-V4.1-Flash — modelo multimodal com raciocínio e ferramentas. ID oficial atual deepseek-flash; deepseek-v4-flash é alias legado."
-    max_tokens: 384000
-    context_window: 1000000
+    max_tokens: 393216
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 0.3
     completion_cost_per_1m_tokens: 1.2
     cached_prompt_cost_per_1m_tokens: 0.006
@@ -279,8 +279,8 @@ models:
     roles: ["architecture", "review", "security_audit", "fix"]
     priority: 5
     description: "DeepSeek V4 Pro — modelo direto para arquitetura, segurança e tarefas complexas."
-    max_tokens: 384000
-    context_window: 1000000
+    max_tokens: 393216
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 1.32
     completion_cost_per_1m_tokens: 3.96
     cached_prompt_cost_per_1m_tokens: 0.044
@@ -348,7 +348,7 @@ models:
     priority: 4
     description: "GLM-5-Turbo via Z.ai para tarefas de texto com ferramentas."
     context_window: 200000
-    max_tokens: 128000
+    max_tokens: 131072
     # Estimativas históricas em USD por milhão de tokens.
     prompt_cost_per_1m_tokens: 1.20
     completion_cost_per_1m_tokens: 4.00
@@ -381,7 +381,7 @@ models:
     rollout_percentage: 0
     description: "Inkling 2 Small (594B MoE/17B ativos) — coding e trabalho agentico, entrada de imagem, ferramentas e contexto de 1M. Custos Ollama Cloud: US$ 0.30/M input, US$ 0.03/M cache hit, US$ 1.00/M output. Benchmarks do fornecedor no catalogo de evidencias. Disponivel para selecao explicita; rollout automatico inicial em 0%."
     max_tokens: 128000
-    context_window: 1000000
+    context_window: 1048576
     prompt_cost_per_1m_tokens: 0.30
     completion_cost_per_1m_tokens: 1.00
     cached_prompt_cost_per_1m_tokens: 0.03
